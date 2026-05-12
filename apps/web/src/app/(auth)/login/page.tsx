@@ -2,12 +2,14 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { ApiError } from "@/lib/api";
 import { Button, Card, CardBody, ErrorBanner, Field, Input } from "@/components/ui";
 
 export default function LoginPage() {
   const { login } = useAuth();
+  const router = useRouter();
   const [email, setEmail] = useState("demo@acme.io");
   const [password, setPassword] = useState("demo1234");
   const [loading, setLoading] = useState(false);
@@ -18,7 +20,9 @@ export default function LoginPage() {
     setLoading(true);
     setError("");
     try {
-      await login(email.trim(), password);
+      const { mfaRequired } = await login(email.trim(), password);
+      if (mfaRequired) router.push("/login/mfa");
+      // otherwise the (auth) layout redirects to /dashboard once `me` is set
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't sign in.");
       setLoading(false);

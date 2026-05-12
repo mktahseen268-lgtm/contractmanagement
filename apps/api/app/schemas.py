@@ -17,15 +17,62 @@ class LoginIn(BaseModel):
     password: str
 
 
-class RefreshIn(BaseModel):
-    refresh_token: str
-
-
 class TokenOut(BaseModel):
     access_token: str
-    refresh_token: str
     token_type: str = "bearer"
-    expires_in: int
+    expires_in: int  # seconds
+
+
+class MfaChallengeOut(BaseModel):
+    mfa_required: bool = True
+    mfa_token: str
+    methods: list[str] = ["totp", "recovery", "email_otp"]
+
+
+class MfaVerifyIn(BaseModel):
+    mfa_token: str
+    code: str
+
+
+class OtpSendIn(BaseModel):
+    mfa_token: str
+
+
+class OtpSendOut(BaseModel):
+    sent: bool = True
+    dev_code: str | None = None  # only populated when ENV=dev — for local testing
+
+
+class CodeIn(BaseModel):
+    code: str
+
+
+class PasswordIn(BaseModel):
+    password: str
+
+
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class MfaSetupOut(BaseModel):
+    secret: str
+    otpauth_uri: str
+
+
+class RecoveryCodesOut(BaseModel):
+    recovery_codes: list[str]
+
+
+class SessionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    user_agent: str
+    ip: str
+    created_at: dt.datetime
+    last_used_at: dt.datetime
+    current: bool = False
 
 
 class TenantOut(BaseModel):
@@ -46,6 +93,7 @@ class UserOut(BaseModel):
     role: str
     is_active: bool
     avatar_color: str
+    mfa_enabled: bool = False
 
 
 class MeOut(BaseModel):

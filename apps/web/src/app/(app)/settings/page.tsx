@@ -5,6 +5,7 @@ import { Settings as SettingsIcon, UserPlus } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, ApiError } from "@/lib/api";
 import { PageHeader } from "@/components/shell";
+import { SecurityPanel } from "@/components/security-panel";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Field, Input, Select, Skeleton } from "@/components/ui";
 import { titleCase } from "@/lib/utils";
 import type { User } from "@/lib/types";
@@ -61,10 +62,12 @@ export default function SettingsPage() {
               <Row k="Your role" v={titleCase(me?.user.role ?? "")} />
             </dl>
             <p className="mt-4 text-xs text-ink-3">
-              Branding, security/SSO, custom fields, billing, retention &amp; the rest are specced in docs/08 &amp; docs/19.
+              Branding, SSO/SCIM, custom fields, billing, retention &amp; the rest are specced in docs/08 &amp; docs/19.
             </p>
           </CardBody>
         </Card>
+
+        <SecurityPanel />
 
         <Card>
           <CardHeader>

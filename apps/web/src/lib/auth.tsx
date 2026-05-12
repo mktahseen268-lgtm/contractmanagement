@@ -2,13 +2,18 @@
 
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api, loadTokens, setTokens } from "./api";
-import type { AuthResponse, Me } from "./types";
+import { api, setAccessToken } from "./api";
+import type { AuthResponse, Me, MfaChallenge } from "./types";
 
 interface AuthContextValue {
   me: Me | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  mfaToken: string | null;
+  /** Returns whether a 2FA step is required (then go to /login/mfa). */
+  login: (email: string, password: string) => Promise<{ mfaRequired: boolean }>;
+  verifyMfa: (code: string) => Promise<void>;
+  /** During the 2FA step: email a one-time code; in dev the API echoes it for testing. */
+  sendLoginOtp: () => Promise<{ dev_code?: string | null }>;
   register: (workspaceName: string, name: string, email: string, password: string) => Promise<void>;
   logout: () => void;
   refreshMe: () => Promise<void>;
@@ -22,46 +27,62 @@ export function useAuth(): AuthContextValue {
   return ctx;
 }
 
+function isChallenge(x: AuthResponse | MfaChallenge): x is MfaChallenge {
+  return (x as MfaChallenge).mfa_required === true;
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [loading, setLoading] = useState(true);
+  const [mfaToken, setMfaToken] = useState<string | null>(null);
   const router = useRouter();
 
   useEffect(() => {
-    const { accessToken } = loadTokens();
-    if (!accessToken) {
+    (async () => {
+      // exchange the refresh cookie for an access token, then load /me
+      const ok = await api.bootstrapSession();
+      if (ok) {
+        try {
+          setMe(await api.get<Me>("/auth/me"));
+        } catch {
+          setAccessToken(null);
+        }
+      }
       setLoading(false);
-      return;
-    }
-    api
-      .get<Me>("/auth/me")
-      .then(setMe)
-      .catch(() => setTokens(null, null))
-      .finally(() => setLoading(false));
+    })();
   }, []);
 
   const applyAuth = useCallback((r: AuthResponse) => {
-    setTokens(r.access_token, r.refresh_token);
+    setAccessToken(r.access_token);
     setMe({ user: r.user, tenant: r.tenant });
+    setMfaToken(null);
   }, []);
 
-  const login = useCallback(
-    async (email: string, password: string) => {
-      const r = await api.post<AuthResponse>("/auth/login", { email, password });
-      applyAuth(r);
-      router.push("/dashboard");
-    },
-    [applyAuth, router],
-  );
+  const login = useCallback(async (email: string, password: string) => {
+    const r = await api.post<AuthResponse | MfaChallenge>("/auth/login", { email, password });
+    if (isChallenge(r)) {
+      setMfaToken(r.mfa_token);
+      return { mfaRequired: true };
+    }
+    applyAuth(r);
+    return { mfaRequired: false };
+  }, [applyAuth]);
+
+  const verifyMfa = useCallback(async (code: string) => {
+    if (!mfaToken) throw new Error("Sign-in session expired — please start over.");
+    const r = await api.post<AuthResponse>("/auth/mfa/verify", { mfa_token: mfaToken, code });
+    applyAuth(r);
+    router.push("/dashboard");
+  }, [mfaToken, applyAuth, router]);
+
+  const sendLoginOtp = useCallback(async () => {
+    if (!mfaToken) throw new Error("Sign-in session expired — please start over.");
+    return api.post<{ sent: boolean; dev_code?: string | null }>("/auth/otp/send", { mfa_token: mfaToken });
+  }, [mfaToken]);
 
   const register = useCallback(
     async (workspaceName: string, name: string, email: string, password: string) => {
-      const r = await api.post<AuthResponse>("/auth/register", {
-        workspace_name: workspaceName,
-        name,
-        email,
-        password,
-      });
+      const r = await api.post<AuthResponse>("/auth/register", { workspace_name: workspaceName, name, email, password });
       applyAuth(r);
       router.push("/dashboard");
     },
@@ -69,8 +90,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const logout = useCallback(() => {
-    setTokens(null, null);
+    api.post("/auth/logout").catch(() => {});
+    setAccessToken(null);
     setMe(null);
+    setMfaToken(null);
     router.push("/login");
   }, [router]);
 
@@ -79,7 +102,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ me, loading, login, register, logout, refreshMe }}>
+    <AuthContext.Provider value={{ me, loading, mfaToken, login, verifyMfa, sendLoginOtp, register, logout, refreshMe }}>
       {children}
     </AuthContext.Provider>
   );

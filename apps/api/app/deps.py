@@ -1,3 +1,5 @@
+from typing import Any
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
@@ -14,10 +16,7 @@ _CREDENTIALS_ERROR = HTTPException(
 )
 
 
-def get_current_user(
-    creds: HTTPAuthorizationCredentials | None = Depends(bearer),
-    db: Session = Depends(get_db),
-) -> models.User:
+def get_token_payload(creds: HTTPAuthorizationCredentials | None = Depends(bearer)) -> dict[str, Any]:
     if creds is None:
         raise _CREDENTIALS_ERROR
     try:
@@ -26,13 +25,23 @@ def get_current_user(
         raise _CREDENTIALS_ERROR
     if payload.get("type") != "access":
         raise _CREDENTIALS_ERROR
+    return payload
+
+
+def get_current_user(
+    payload: dict[str, Any] = Depends(get_token_payload),
+    db: Session = Depends(get_db),
+) -> models.User:
     tenant_id = payload.get("tid")
-    # set the RLS tenant context BEFORE the first query so every statement in this request is scoped
-    set_request_tenant(tenant_id)
+    set_request_tenant(tenant_id)  # set the RLS tenant context before the first query
     user = db.get(models.User, payload.get("sub"))
     if user is None or not user.is_active or user.tenant_id != tenant_id:
         raise _CREDENTIALS_ERROR
     return user
+
+
+def current_session_id(payload: dict[str, Any] = Depends(get_token_payload)) -> str | None:
+    return payload.get("sid")
 
 
 def require_role(*roles: str):

@@ -9,15 +9,31 @@ class Settings(BaseSettings):
     app_name: str = "Contract Management API"
     env: str = "dev"
 
-    # --- Database (PostgreSQL is the target stack). ---
-    # SQLite is still accepted for a zero-setup quick look (RLS migration is skipped on SQLite).
+    # --- Database (PostgreSQL is the target stack). SQLite is accepted for a zero-setup quick look. ---
     database_url: str = "postgresql+psycopg2://cm:cm@localhost:5432/cm"
 
-    # --- Auth ---
+    # --- Auth / JWT ---
     secret_key: str = "dev-only-change-me-please-0123456789abcdef"
     algorithm: str = "HS256"
-    access_token_expire_minutes: int = 60
-    refresh_token_expire_days: int = 14
+    access_token_expire_minutes: int = 30          # short-lived; refreshed via the rotating refresh cookie
+    refresh_token_expire_days: int = 14            # opaque server-side token (rotated on use)
+    mfa_token_expire_minutes: int = 5              # the short token between the password step and the 2FA step
+    otp_expire_minutes: int = 10                   # email OTP validity
+    otp_max_attempts: int = 5
+
+    # --- Refresh cookie ---
+    refresh_cookie_name: str = "cm_refresh"
+    cookie_secure: bool = False                    # MUST be true in prod (https); false for local http
+    cookie_samesite: str = "lax"                   # lax | strict | none
+
+    # --- Email (for OTP / notifications). console = log it (dev); smtp = real send. ---
+    email_backend: str = "console"                 # console | smtp
+    email_from: str = "no-reply@contract-management.local"
+    smtp_host: str = "localhost"
+    smtp_port: int = 25
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_starttls: bool = True
 
     # --- CORS (frontend origins, comma-separated) ---
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
@@ -28,14 +44,13 @@ class Settings(BaseSettings):
 
     # --- Background jobs (Celery + Redis) ---
     redis_url: str = "redis://localhost:6379/0"
-    celery_broker_url: str = ""  # empty -> falls back to redis_url
-    celery_result_backend: str = ""  # empty -> falls back to redis_url
+    celery_broker_url: str = ""                     # empty -> falls back to redis_url
+    celery_result_backend: str = ""
     celery_task_always_eager: bool = True
 
-    # --- Object storage (S3-compatible: AWS S3 / MinIO / Wasabi / Ceph).
-    # If s3_bucket is set -> S3 backend; otherwise -> local-filesystem fallback at local_storage_dir.
+    # --- Object storage (S3-compatible). Empty s3_bucket -> local-filesystem fallback. ---
     s3_bucket: str = ""
-    s3_endpoint_url: str = ""  # e.g. http://minio:9000 (MinIO) — leave empty for AWS
+    s3_endpoint_url: str = ""
     s3_access_key: str = ""
     s3_secret_key: str = ""
     s3_region: str = "us-east-1"
@@ -61,6 +76,10 @@ class Settings(BaseSettings):
     @property
     def use_s3(self) -> bool:
         return bool(self.s3_bucket)
+
+    @property
+    def is_dev(self) -> bool:
+        return self.env == "dev"
 
 
 @lru_cache

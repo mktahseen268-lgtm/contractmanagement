@@ -39,6 +39,8 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(50), default="author")  # owner|admin|manager|author|approver|reviewer|viewer|auditor
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     avatar_color: Mapped[str] = mapped_column(String(7), default="#3E7BFA")
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    mfa_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)  # base32 TOTP secret (set during setup; "active" once mfa_enabled)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
 
     tenant: Mapped[Tenant] = relationship(back_populates="users")
@@ -121,6 +123,53 @@ class Notification(Base):
     object_type: Mapped[str] = mapped_column(String(40), default="")
     object_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     read_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+
+
+class Session(Base):
+    """A refresh-token session. The refresh token is an opaque random string; only its hash is
+    stored. Rotated on each use; presenting an already-rotated token (reuse) revokes the chain."""
+
+    __tablename__ = "sessions"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    parent_id: Mapped[str | None] = mapped_column(String(32), nullable=True)  # the session this one rotated from
+    chain_id: Mapped[str] = mapped_column(String(32), index=True)  # all rotations of one login share a chain_id
+    user_agent: Mapped[str] = mapped_column(String(400), default="")
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+    last_used_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime)
+    revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_reason: Mapped[str] = mapped_column(String(40), default="")  # rotated|logout|reuse_detected|password_change|admin
+
+
+class OtpCode(Base):
+    """One-time email codes (e.g., the email-OTP alternative at the 2FA step)."""
+
+    __tablename__ = "otp_codes"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    purpose: Mapped[str] = mapped_column(String(40), default="login_2fa")
+    code_hash: Mapped[str] = mapped_column(String(64))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    used_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+
+
+class RecoveryCode(Base):
+    """Single-use 2FA backup codes (hashed)."""
+
+    __tablename__ = "recovery_codes"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    code_hash: Mapped[str] = mapped_column(String(64))
+    used_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
 
 

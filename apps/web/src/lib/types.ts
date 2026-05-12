@@ -15,6 +15,7 @@ export interface User {
   role: Role;
   is_active: boolean;
   avatar_color: string;
+  mfa_enabled: boolean;
 }
 
 export interface Tenant {
@@ -33,11 +34,30 @@ export interface Me {
 
 export interface AuthResponse {
   access_token: string;
-  refresh_token: string;
   token_type: string;
   expires_in: number;
   user: User;
   tenant: Tenant;
+}
+
+export interface MfaChallenge {
+  mfa_required: true;
+  mfa_token: string;
+  methods: string[];
+}
+
+export interface SessionInfo {
+  id: string;
+  user_agent: string;
+  ip: string;
+  created_at: string;
+  last_used_at: string;
+  current: boolean;
+}
+
+export interface MfaSetup {
+  secret: string;
+  otpauth_uri: string;
 }
 
 export interface ContractListItem {

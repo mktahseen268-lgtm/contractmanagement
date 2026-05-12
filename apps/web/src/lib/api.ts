@@ -1,28 +1,15 @@
 const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-const ACCESS_KEY = "cm_access";
-const REFRESH_KEY = "cm_refresh";
-
+// The refresh token lives in an httpOnly cookie (the browser sends it automatically with
+// `credentials: include`). The short-lived access token is held in memory only — never in
+// localStorage — so it can't be read by XSS; it's re-obtained via /auth/refresh on boot.
 let accessToken: string | null = null;
-let refreshToken: string | null = null;
 
-export function loadTokens(): { accessToken: string | null; refreshToken: string | null } {
-  if (typeof window !== "undefined") {
-    accessToken = window.localStorage.getItem(ACCESS_KEY);
-    refreshToken = window.localStorage.getItem(REFRESH_KEY);
-  }
-  return { accessToken, refreshToken };
+export function setAccessToken(token: string | null): void {
+  accessToken = token;
 }
-
-export function setTokens(access: string | null, refresh: string | null): void {
-  accessToken = access;
-  refreshToken = refresh;
-  if (typeof window !== "undefined") {
-    if (access) window.localStorage.setItem(ACCESS_KEY, access);
-    else window.localStorage.removeItem(ACCESS_KEY);
-    if (refresh) window.localStorage.setItem(REFRESH_KEY, refresh);
-    else window.localStorage.removeItem(REFRESH_KEY);
-  }
+export function getAccessToken(): string | null {
+  return accessToken;
 }
 
 export class ApiError extends Error {
@@ -45,41 +32,53 @@ async function parseError(res: Response): Promise<ApiError> {
   return new ApiError(res.status, detail);
 }
 
+let refreshing: Promise<boolean> | null = null;
+
 async function tryRefresh(): Promise<boolean> {
-  if (!refreshToken) return false;
-  const r = await fetch(`${BASE}/auth/refresh`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token: refreshToken }),
-  });
-  if (r.ok) {
-    const data = await r.json();
-    setTokens(data.access_token, data.refresh_token);
-    return true;
-  }
-  setTokens(null, null);
-  return false;
+  // de-dupe concurrent refreshes
+  if (refreshing) return refreshing;
+  refreshing = (async () => {
+    try {
+      const r = await fetch(`${BASE}/auth/refresh`, { method: "POST", credentials: "include" });
+      if (!r.ok) {
+        accessToken = null;
+        return false;
+      }
+      const data = await r.json();
+      accessToken = data.access_token;
+      return true;
+    } catch {
+      accessToken = null;
+      return false;
+    } finally {
+      refreshing = null;
+    }
+  })();
+  return refreshing;
 }
 
+function authHeader(extra: Record<string, string> = {}): Record<string, string> {
+  const h = { ...extra };
+  if (accessToken) h["Authorization"] = `Bearer ${accessToken}`;
+  return h;
+}
+
+const NO_RETRY = (path: string) => path.startsWith("/auth/");
+
 async function request<T>(path: string, init: RequestInit = {}, allowRetry = true): Promise<T> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...((init.headers as Record<string, string>) || {}),
-  };
-  if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
-
-  const res = await fetch(`${BASE}${path}`, { ...init, headers });
-
-  if (res.status === 401 && allowRetry && (await tryRefresh())) return request<T>(path, init, false);
+  const res = await fetch(`${BASE}${path}`, {
+    ...init,
+    credentials: "include",
+    headers: authHeader({ "Content-Type": "application/json", ...((init.headers as Record<string, string>) || {}) }),
+  });
+  if (res.status === 401 && allowRetry && !NO_RETRY(path) && (await tryRefresh())) return request<T>(path, init, false);
   if (!res.ok) throw await parseError(res);
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
 
 async function requestForm<T>(path: string, form: FormData, allowRetry = true): Promise<T> {
-  const headers: Record<string, string> = {}; // let the browser set the multipart boundary
-  if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
-  const res = await fetch(`${BASE}${path}`, { method: "POST", body: form, headers });
+  const res = await fetch(`${BASE}${path}`, { method: "POST", body: form, credentials: "include", headers: authHeader() });
   if (res.status === 401 && allowRetry && (await tryRefresh())) return requestForm<T>(path, form, false);
   if (!res.ok) throw await parseError(res);
   if (res.status === 204) return undefined as T;
@@ -87,9 +86,7 @@ async function requestForm<T>(path: string, form: FormData, allowRetry = true): 
 }
 
 async function requestBlob(path: string, allowRetry = true): Promise<Blob> {
-  const headers: Record<string, string> = {};
-  if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
-  const res = await fetch(`${BASE}${path}`, { headers });
+  const res = await fetch(`${BASE}${path}`, { credentials: "include", headers: authHeader() });
   if (res.status === 401 && allowRetry && (await tryRefresh())) return requestBlob(path, false);
   if (!res.ok) throw await parseError(res);
   return res.blob();
@@ -104,6 +101,8 @@ export const api = {
   del: (path: string) => request<void>(path, { method: "DELETE" }),
   postForm: <T>(path: string, form: FormData) => requestForm<T>(path, form),
   blob: (path: string) => requestBlob(path),
+  /** boot-time: exchange the refresh cookie for an access token. Returns true if signed in. */
+  bootstrapSession: () => tryRefresh(),
 };
 
 export function qs(params: Record<string, string | number | boolean | undefined | null>): string {

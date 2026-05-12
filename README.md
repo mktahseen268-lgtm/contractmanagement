@@ -7,8 +7,8 @@ This repo contains:
 | Path | What |
 |---|---|
 | [`docs/`](./docs) | The full product **design & architecture blueprint** (20 docs: design system, all 30 module designs, OCR/AI experience, workflow builder, editor, mobile, Arabic/RTL, backend/DB/API/infra/security). Start at [`docs/README.md`](./docs/README.md). |
-| [`apps/api`](./apps/api) | **Backend** — FastAPI · SQLAlchemy · **PostgreSQL** (Alembic migrations · **Row-Level-Security multi-tenancy**) · JWT auth + refresh · contract lifecycle state machine · dashboard · append-only audit log · **Celery + Redis** background jobs · **S3-compatible object storage** (MinIO / local-filesystem fallback) for file uploads & the OCR pipeline. A runnable subset of the blueprint ("the spine"). |
-| [`apps/web`](./apps/web) | **Frontend** — Next.js (App Router) · TypeScript · Tailwind, in the locked "Trust Workspace" skin (friendly azure blue, airy, soft-rounded). 3-pane shell, dashboard, contracts list/detail/create/edit, audit log, OCR/AI workspace (drag-and-drop upload), settings. |
+| [`apps/api`](./apps/api) | **Backend** — FastAPI · SQLAlchemy · **PostgreSQL** (Alembic migrations · **Row-Level-Security multi-tenancy**) · JWT access tokens + **rotating refresh tokens in httpOnly cookies with reuse detection** · RBAC · **MFA (TOTP) + recovery codes + email OTP** · contract lifecycle state machine · dashboard · append-only audit log · **Celery + Redis** background jobs · **S3-compatible object storage** (MinIO / local-filesystem fallback) for file uploads & the OCR pipeline. A runnable subset of the blueprint ("the spine"). |
+| [`apps/web`](./apps/web) | **Frontend** — Next.js (App Router) · TypeScript · Tailwind, in the locked "Trust Workspace" skin (friendly azure blue, airy, soft-rounded). 3-pane shell, dashboard, contracts list/detail/create/edit, audit log, OCR/AI workspace (drag-and-drop upload), settings + a **Security panel** (enable/disable 2FA, manage sessions, change password), an **MFA sign-in step**. Access token kept in memory; cookie-based session bootstrap. |
 | [`docker-compose.yml`](./docker-compose.yml) | Runs the whole stack: **Postgres + Redis + MinIO + API + Celery worker + web**. |
 
 > **Status:** a working, dynamic full-stack app — real PostgreSQL with Alembic migrations, database-enforced tenant isolation (RLS), real CRUD, a real lifecycle state machine, a real append-only audit log, a real Celery/Redis-backed async OCR job, and real file uploads stored in S3-compatible object storage. It's the *core spine* of the blueprint, built so the remaining modules slot in. It is **not** fully production-hardened yet (see "Going to production" below).
@@ -21,7 +21,7 @@ This repo contains:
 docker compose up --build
 ```
 
-Brings up **Postgres** (`:5432`), **Redis** (`:6379`), **MinIO** (S3-compatible object storage — API on `:9000`, console on `:9001`, login `minioadmin`/`minioadmin`), the **API** (`:8000` — runs Alembic migrations + creates the `cm-files` bucket + seeds a demo workspace on first start), a **Celery worker** (processes the OCR queue), and the **web app** (`:3000`).
+Brings up **Postgres** (`:5432`), **Redis** (`:6379`), **MinIO** (S3-compatible object storage — API on `:9000`, console on `:9001`, login `minioadmin`/`minioadmin`), the **API** (`:8000` — runs Alembic migrations + creates the `cm-files` bucket + seeds a demo workspace on first start), a **Celery worker** (processes the OCR queue), and the **web app** (`:3000`). Email (for MFA OTP) uses a **console backend by default** — the code is logged to the API container's stdout, so nothing else is needed; set `EMAIL_BACKEND=smtp` + `SMTP_*` for real delivery.
 
 Open <http://localhost:3000> → sign in with the demo credentials (pre-filled on the login screen): **`demo@acme.io`** / **`demo1234`** (also `manager@acme.io`, `approver@acme.io`, `author@acme.io`, same password). API docs: <http://localhost:8000/docs>.
 
@@ -72,7 +72,7 @@ Open <http://localhost:3000>.
 
 ## What works
 
-- **Auth & multi-tenancy** — register a workspace (you become Owner) or sign in; JWT access + rotating refresh tokens with silent refresh. **Tenant isolation is enforced at the database level by PostgreSQL Row-Level Security** (every tenant-scoped table has a `tenant_isolation` policy keyed off a per-request `app.cm_tenant` session GUC set from the JWT) *plus* a `tenant_id` filter in the repository layer (defence in depth). Verified: a contract created in workspace B is invisible (404) to workspace A's token, and vice-versa; each workspace's dashboard/audit only shows its own data.
+- **Auth & multi-tenancy** — register a workspace (you become Owner) or sign in. **JWT access tokens** (short-lived, kept in browser memory only) + **rotating refresh tokens in an httpOnly cookie** with **reuse detection** (presenting an already-rotated refresh token revokes the whole session chain). **MFA**: enrol a TOTP authenticator (QR-key + recovery codes), then sign-in requires a second step — verifiable by your authenticator code, a one-time **email OTP**, or a single-use **recovery code**. Manage active sessions, sign out other devices, change password (which revokes other sessions). **Tenant isolation is enforced at the database level by PostgreSQL Row-Level Security** (every tenant-scoped table — `contracts`, `audit_log`, `sessions`, `otp_codes`, `recovery_codes`, `file_objects`, … — has a `tenant_isolation` policy keyed off a per-request `app.cm_tenant` session GUC set from the JWT) *plus* a `tenant_id` filter in the repository layer (defence in depth). Verified: a contract/file created in workspace B is invisible (404) to workspace A's token, and vice-versa; each workspace's dashboard/audit only shows its own data.
 - **PostgreSQL + Alembic** — schema is owned by Alembic migrations (`0001_initial` materialises the model state; `0002_rls` adds the RLS policies, Postgres-only); `alembic upgrade head` runs on startup (toggle with `RUN_MIGRATIONS_ON_STARTUP`).
 - **Dashboard** — KPI cards (total / pending approvals / awaiting signature / expiring ≤30d / open risks / active value), Quick Create tiles, "Needs your attention", contracts-by-stage distribution, AI recommendations, team activity feed — all live from the API.
 - **Contracts** — list with search + status/type/risk filters + sort + pagination + sidebar saved views; create (full form); edit (when `draft`/`changes_requested`); detail page with the lifecycle bar, key terms, AI summary, document body, per-contract activity, comments; delete.
@@ -95,25 +95,30 @@ contractmanagement/
 ├── apps/
 │   ├── api/                       # FastAPI backend
 │   │   ├── alembic.ini
-│   │   ├── migrations/            # Alembic — env.py + versions/0001_initial, 0002_rls, 0003_files
+│   │   ├── migrations/            # Alembic — env.py + versions/0001_initial, 0002_rls, 0003_files, 0004_auth
 │   │   ├── app/
 │   │   │   ├── main.py            # app factory · CORS · routers · startup (migrations + storage + seed)
-│   │   │   ├── config.py          # Pydantic settings (.env): DB url, Redis, Celery, S3, JWT, CORS …
+│   │   │   ├── config.py          # Pydantic settings (.env): DB url, Redis, Celery, S3, JWT, cookies, MFA/OTP, email/SMTP, CORS …
 │   │   │   ├── database.py        # SQLAlchemy engine/session/Base + the RLS tenant-context plumbing
 │   │   │   ├── storage.py         # object-storage abstraction — S3Backend (boto3) / LocalFsBackend
-│   │   │   ├── models.py          # Tenant, User, Contract, ContractVersion, Comment, AuditLog, Notification, OcrJob, FileObject
+│   │   │   ├── email.py           # email sender — console backend (logs) / smtp backend
+│   │   │   ├── models.py          # Tenant, User(+mfa), Contract, ContractVersion, Comment, AuditLog, Notification, OcrJob, FileObject, Session, OtpCode, RecoveryCode
 │   │   │   ├── schemas.py         # Pydantic request/response models
-│   │   │   ├── security.py        # password hashing + JWT
-│   │   │   ├── deps.py            # auth deps (get_current_user sets the RLS tenant context), require_role
+│   │   │   ├── security.py        # password hashing · JWT (access + mfa-pending) · opaque tokens / codes
+│   │   │   ├── auth_service.py    # sessions (rotation + reuse detection) · TOTP · recovery codes · email OTP · cookies
+│   │   │   ├── deps.py            # auth deps — get_token_payload / get_current_user (sets the RLS tenant context) / current_session_id / require_role
 │   │   │   ├── lifecycle.py       # the contract state machine
 │   │   │   ├── audit.py           # append-audit-entry helper (+ optional notification)
 │   │   │   ├── celery_app.py      # Celery app (broker/backend = Redis; named queues)
 │   │   │   ├── tasks.py           # background tasks — the OCR/AI pipeline (realistic stub)
 │   │   │   ├── seed.py            # demo-data seeder
-│   │   │   └── routers/           # auth · contracts · dashboard · audit · files · misc (users/notifications/ocr)
+│   │   │   └── routers/           # auth (login/MFA/refresh/sessions/password) · contracts · dashboard · audit · files · misc (users/notifications/ocr)
 │   │   ├── requirements.txt · Dockerfile · .env.example
-│   └── web/                       # Next.js frontend (see previous README revision for the inner tree)
-│       ├── src/app/ · src/components/ · src/lib/ · tailwind.config.ts (design tokens — docs/03 §0)
+│   └── web/                       # Next.js frontend
+│       ├── src/app/               # (auth)/login, login/mfa, register · (app)/dashboard, contracts/*, intelligence, audit, settings, workflows
+│       ├── src/components/        # ui · shell · lifecycle · widgets · contract-form · security-panel
+│       ├── src/lib/               # api (cookie-based; access token in memory) · auth (context, MFA flow) · types · utils
+│       └── tailwind.config.ts     # design tokens — docs/03 §0
 └── docker-compose.yml             # postgres · redis · minio · api · worker · web
 ```
 
@@ -126,7 +131,7 @@ This scaffold prioritises "clone and run". Before shipping, see the relevant doc
 - ~~**DB**: PostgreSQL + Alembic + RLS~~ ✅ **done.** Still TODO for prod: a dedicated non-owner app DB role (so RLS is `FORCE`d for the app while migrations run as the owner — currently the single `cm` role is the owner, and RLS is `FORCE`d on all tenant tables so it *is* enforced), connection pooling (PgBouncer), read replicas, table partitioning on the append-only tables (docs/14, docs/15).
 - ~~**Async**: Celery + Redis~~ ✅ **done** for the OCR job — TODO: wire the real OCR engine + LLM provider behind the provider interfaces, route email/PDF/notifications/bulk-import through their own queues, add the **Progress Tray** UI (docs/09, docs/14, docs/18).
 - ~~**Storage**: S3-compatible object storage + a `files` table~~ ✅ **done** (MinIO / local-fs fallback). Still TODO for prod: presigned PUT/GET URLs (so the browser uploads/downloads direct to S3 instead of streaming through the API), per-tenant encryption keys, lifecycle tiering, antivirus scan on ingest, and linking generated contract PDFs (docs/18).
-- **Auth**: refresh tokens are currently JWTs in `localStorage` — move to **rotating refresh tokens in httpOnly cookies with reuse detection**, add **MFA / SSO / SCIM**, **step-up auth** for sensitive actions (docs/19).
+- ~~**Auth**: rotating refresh tokens (httpOnly cookies, reuse detection) + MFA (TOTP) + OTP~~ ✅ **done.** Still TODO: encrypt the stored TOTP secret at rest (currently plaintext), **SSO (SAML/OIDC) + SCIM** provisioning, **step-up auth** (re-prompt for password/MFA on sensitive actions like role changes / workspace delete), WebAuthn/passkeys, rate-limiting on the auth endpoints, and email-verification on signup (docs/19).
 - **Realtime, the block editor, the workflow canvas, e-signature ceremony, reports, billing, the external client portal, Arabic/RTL** — all designed in `docs/`, not yet built here.
 - **Hardening**: rate limiting, security headers/CSP, audit-log hash chaining, observability (OTel/Prometheus/Sentry), CI, container scanning, backups (docs/18, docs/19).
 
