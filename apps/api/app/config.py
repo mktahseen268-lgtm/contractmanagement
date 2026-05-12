@@ -23,19 +23,24 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     # --- Startup behaviour ---
-    # Run `alembic upgrade head` on startup (convenient for dev/single-instance; disable for
-    # multi-replica prod and run migrations as a job instead).
     run_migrations_on_startup: bool = True
-    # Seed a demo workspace if the DB is empty.
     auto_seed: bool = True
 
     # --- Background jobs (Celery + Redis) ---
     redis_url: str = "redis://localhost:6379/0"
     celery_broker_url: str = ""  # empty -> falls back to redis_url
     celery_result_backend: str = ""  # empty -> falls back to redis_url
-    # When true, tasks run inline in the caller (no worker needed — handy for local dev/tests).
-    # docker-compose runs a real worker and sets this to false.
     celery_task_always_eager: bool = True
+
+    # --- Object storage (S3-compatible: AWS S3 / MinIO / Wasabi / Ceph).
+    # If s3_bucket is set -> S3 backend; otherwise -> local-filesystem fallback at local_storage_dir.
+    s3_bucket: str = ""
+    s3_endpoint_url: str = ""  # e.g. http://minio:9000 (MinIO) — leave empty for AWS
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
+    s3_region: str = "us-east-1"
+    local_storage_dir: str = "./storage"
+    max_upload_mb: int = 50
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -52,6 +57,10 @@ class Settings(BaseSettings):
     @property
     def is_postgres(self) -> bool:
         return self.database_url.startswith("postgres")
+
+    @property
+    def use_s3(self) -> bool:
+        return bool(self.s3_bucket)
 
 
 @lru_cache

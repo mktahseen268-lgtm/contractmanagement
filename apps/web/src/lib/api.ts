@@ -45,6 +45,22 @@ async function parseError(res: Response): Promise<ApiError> {
   return new ApiError(res.status, detail);
 }
 
+async function tryRefresh(): Promise<boolean> {
+  if (!refreshToken) return false;
+  const r = await fetch(`${BASE}/auth/refresh`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+  if (r.ok) {
+    const data = await r.json();
+    setTokens(data.access_token, data.refresh_token);
+    return true;
+  }
+  setTokens(null, null);
+  return false;
+}
+
 async function request<T>(path: string, init: RequestInit = {}, allowRetry = true): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -54,23 +70,29 @@ async function request<T>(path: string, init: RequestInit = {}, allowRetry = tru
 
   const res = await fetch(`${BASE}${path}`, { ...init, headers });
 
-  if (res.status === 401 && allowRetry && refreshToken) {
-    const r = await fetch(`${BASE}/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: refreshToken }),
-    });
-    if (r.ok) {
-      const data = await r.json();
-      setTokens(data.access_token, data.refresh_token);
-      return request<T>(path, init, false);
-    }
-    setTokens(null, null);
-  }
-
+  if (res.status === 401 && allowRetry && (await tryRefresh())) return request<T>(path, init, false);
   if (!res.ok) throw await parseError(res);
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
+}
+
+async function requestForm<T>(path: string, form: FormData, allowRetry = true): Promise<T> {
+  const headers: Record<string, string> = {}; // let the browser set the multipart boundary
+  if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+  const res = await fetch(`${BASE}${path}`, { method: "POST", body: form, headers });
+  if (res.status === 401 && allowRetry && (await tryRefresh())) return requestForm<T>(path, form, false);
+  if (!res.ok) throw await parseError(res);
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}
+
+async function requestBlob(path: string, allowRetry = true): Promise<Blob> {
+  const headers: Record<string, string> = {};
+  if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+  const res = await fetch(`${BASE}${path}`, { headers });
+  if (res.status === 401 && allowRetry && (await tryRefresh())) return requestBlob(path, false);
+  if (!res.ok) throw await parseError(res);
+  return res.blob();
 }
 
 export const api = {
@@ -80,6 +102,8 @@ export const api = {
   patch: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: "PATCH", body: JSON.stringify(body ?? {}) }),
   del: (path: string) => request<void>(path, { method: "DELETE" }),
+  postForm: <T>(path: string, form: FormData) => requestForm<T>(path, form),
+  blob: (path: string) => requestBlob(path),
 };
 
 export function qs(params: Record<string, string | number | boolean | undefined | null>): string {

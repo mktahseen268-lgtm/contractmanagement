@@ -133,6 +133,16 @@ export interface Notification {
   created_at: string;
 }
 
+export interface FileObject {
+  id: string;
+  original_name: string;
+  content_type: string;
+  size: number;
+  kind: string;
+  backend: string;
+  created_at: string;
+}
+
 export interface OcrJob {
   id: string;
   status: string;
@@ -146,6 +156,7 @@ export interface OcrJob {
     tables_found?: number;
     languages?: string[];
     pages?: number;
+    source_file_id?: string | null;
   };
   created_contract_id: string | null;
   created_at: string;

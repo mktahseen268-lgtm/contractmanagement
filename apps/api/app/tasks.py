@@ -66,6 +66,6 @@ def process_ocr_job(job_id: str, tenant_id: str) -> str:
             return "not_found"
         job.status = "completed"
         job.progress = 100
-        job.result = build_extraction(job.file_name)
+        job.result = {**(job.result or {}), **build_extraction(job.file_name)}  # keep source_file_id
         db.commit()
     return "completed"

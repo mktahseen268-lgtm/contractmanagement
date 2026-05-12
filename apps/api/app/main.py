@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import SessionLocal
-from .routers import audit, auth, contracts, dashboard, misc
+from .routers import audit, auth, contracts, dashboard, files, misc
 
 log = logging.getLogger("uvicorn.error")
 
@@ -32,6 +32,13 @@ async def lifespan(app: FastAPI):
         except Exception:  # noqa: BLE001
             log.exception("Failed to run migrations on startup")
             raise
+    try:
+        from .storage import get_storage
+
+        get_storage().ensure_ready()
+        log.info("Object storage ready (%s).", get_storage().name)
+    except Exception:  # noqa: BLE001
+        log.exception("Could not prepare object storage")
     if settings.auto_seed:
         from .seed import seed_if_empty
 
@@ -55,6 +62,7 @@ app.include_router(auth.router)
 app.include_router(contracts.router)
 app.include_router(dashboard.router)
 app.include_router(audit.router)
+app.include_router(files.router)
 app.include_router(misc.router)
 
 

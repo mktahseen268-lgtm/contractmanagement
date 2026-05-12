@@ -44,6 +44,7 @@ venv/
 .env
 .env.*
 !.env.example
+apps/api/storage/
 
 # --- Node / Next.js frontend ---
 .next/

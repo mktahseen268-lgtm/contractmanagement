@@ -124,6 +124,24 @@ class Notification(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
 
 
+class FileObject(Base):
+    __tablename__ = "file_objects"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    key: Mapped[str] = mapped_column(String(500))  # storage key (S3 key or local path)
+    bucket: Mapped[str] = mapped_column(String(120), default="")  # S3 bucket, or "" for local
+    backend: Mapped[str] = mapped_column(String(20), default="local")  # "s3" | "local"
+    content_type: Mapped[str] = mapped_column(String(150), default="application/octet-stream")
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    sha256: Mapped[str] = mapped_column(String(64), default="")
+    original_name: Mapped[str] = mapped_column(String(300), default="")
+    kind: Mapped[str] = mapped_column(String(30), default="attachment")  # ocr_source|contract_pdf|attachment|export|...
+    parent_type: Mapped[str] = mapped_column(String(30), default="")
+    parent_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+
+
 class OcrJob(Base):
     __tablename__ = "ocr_jobs"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)

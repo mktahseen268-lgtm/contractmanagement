@@ -246,11 +246,21 @@ class UserInviteIn(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 
-# ---------- ocr (stub) ----------
+# ---------- files ----------
 
 
-class OcrCreateIn(BaseModel):
-    file_name: str = "scanned_contract.pdf"
+class FileObjectOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    original_name: str
+    content_type: str
+    size: int
+    kind: str
+    backend: str
+    created_at: dt.datetime
+
+
+# ---------- ocr ----------
 
 
 class OcrJobOut(BaseModel):

@@ -1,7 +1,7 @@
 import datetime as dt
 import random
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
@@ -76,17 +76,41 @@ def mark_all_read(db: Session = Depends(get_db), user: models.User = Depends(get
 
 
 # ---------- OCR / AI ----------
-# Job creation enqueues a Celery task (queue "ocr"). With CELERY_TASK_ALWAYS_EAGER=true (local
-# default) it runs inline so no worker is needed; docker-compose runs a real worker. The
-# extraction itself is a realistic stub — see app/tasks.py and docs/09.
+# Multipart: upload a real document (stored in S3-compatible object storage / local fallback)
+# OR just pass a file_name for the demo path. Creating the job enqueues a Celery task (queue
+# "ocr"); CELERY_TASK_ALWAYS_EAGER=true (local default) runs it inline. The extraction itself
+# is a realistic stub — see app/tasks.py and docs/09.
 
 
 @router.post("/ocr/jobs", response_model=schemas.OcrJobOut, status_code=status.HTTP_201_CREATED)
-def create_ocr_job(data: schemas.OcrCreateIn, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.OcrJobOut:
-    job = models.OcrJob(tenant_id=user.tenant_id, status="queued", file_name=data.file_name, progress=0, result={}, created_by=user.id)
+def create_ocr_job(
+    request: Request,
+    file: UploadFile | None = File(None),
+    file_name: str = Form(""),
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+) -> schemas.OcrJobOut:
+    source_file_id: str | None = None
+    name = (file_name or "").strip()
+    if file is not None and (file.filename or "").strip():
+        from .files import save_upload
+
+        obj = save_upload(db, tenant_id=user.tenant_id, file=file, kind="ocr_source", created_by=user.id)
+        source_file_id = obj.id
+        name = obj.original_name
+    if not name:
+        name = "scanned_contract.pdf"
+    job = models.OcrJob(
+        tenant_id=user.tenant_id,
+        status="queued",
+        file_name=name,
+        progress=0,
+        result={"source_file_id": source_file_id} if source_file_id else {},
+        created_by=user.id,
+    )
     db.add(job)
     db.flush()
-    record(db, tenant_id=user.tenant_id, action="ocr.queued", actor=user, object_type="ocr_job", object_id=job.id, object_label=data.file_name, ip=client_ip(request))
+    record(db, tenant_id=user.tenant_id, action="ocr.queued", actor=user, object_type="ocr_job", object_id=job.id, object_label=name, ip=client_ip(request), meta={"file_id": source_file_id})
     db.commit()
     job_id = job.id
 
