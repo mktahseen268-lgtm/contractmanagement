@@ -271,3 +271,37 @@ def contract_activity(contract_id: str, db: Session = Depends(get_db), user: mod
         select(models.AuditLog).where(models.AuditLog.tenant_id == user.tenant_id, models.AuditLog.object_type == "contract", models.AuditLog.object_id == contract_id).order_by(desc(models.AuditLog.at)).limit(200)
     ).all()
     return [schemas.ActivityItem(id=r.id, at=r.at, actor_name=r.actor_name, action=r.action, object_type=r.object_type, object_id=r.object_id, object_label=r.object_label) for r in rows]
+
+
+# ---------- files (generated PDFs) ----------
+
+
+@router.get("/{contract_id}/files", response_model=list[schemas.FileObjectOut])
+def list_contract_files(contract_id: str, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> list[schemas.FileObjectOut]:
+    _get_owned_contract(db, user, contract_id)
+    rows = db.scalars(
+        select(models.FileObject)
+        .where(models.FileObject.tenant_id == user.tenant_id, models.FileObject.parent_type == "contract", models.FileObject.parent_id == contract_id)
+        .order_by(desc(models.FileObject.created_at))
+    ).all()
+    return [schemas.FileObjectOut.model_validate(r) for r in rows]
+
+
+@router.post("/{contract_id}/pdf", response_model=schemas.FileObjectOut, status_code=status.HTTP_201_CREATED)
+def generate_contract_pdf(contract_id: str, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.FileObjectOut:
+    c = _get_owned_contract(db, user, contract_id)
+    from ..tasks import render_contract_pdf
+
+    result = render_contract_pdf.delay(c.id, user.tenant_id, user.id)
+    try:
+        file_id = result.get(timeout=25)  # PDFs are quick; inline in eager mode
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="PDF generation took too long — please try again.")
+    if not file_id:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Couldn't generate the PDF.")
+    fo = db.get(models.FileObject, file_id)
+    if fo is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="The PDF was generated but couldn't be located.")
+    record(db, tenant_id=user.tenant_id, action="contract.pdf_generated", actor=user, object_type="contract", object_id=c.id, object_label=c.title, ip=client_ip(request), meta={"file_id": file_id})
+    db.commit()
+    return schemas.FileObjectOut.model_validate(fo)

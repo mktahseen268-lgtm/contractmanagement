@@ -2,13 +2,18 @@
 product this is where the real OCR engine + LLM provider run (see docs/09)."""
 
 import datetime as dt
+import hashlib
 import random
+import re
 import time
+import uuid
 
 from .celery_app import celery
 from .config import settings
 from . import models
 from .database import SessionLocal, set_request_tenant
+from .pdf import is_draftish, render_contract_pdf_bytes
+from .storage import get_storage, tenant_key
 
 _STUB_PARTIES = ["Acme Corporation", "Globex LLC", "Northstar Industries", "Initech FZE", "Stark Trading Co.", "Wayne Holdings"]
 _STUB_TYPES = ["msa", "nda", "lease", "vendor", "service"]
@@ -69,3 +74,46 @@ def process_ocr_job(job_id: str, tenant_id: str) -> str:
         job.result = {**(job.result or {}), **build_extraction(job.file_name)}  # keep source_file_id
         db.commit()
     return "completed"
+
+
+@celery.task(name="contracts.render_pdf")
+def render_contract_pdf(contract_id: str, tenant_id: str, created_by: str) -> str:
+    """Render the contract to a PDF, store it in object storage, and create a FileObject row.
+    Returns the new file id (or '' if the contract is gone)."""
+    set_request_tenant(tenant_id)
+    with SessionLocal() as db:
+        c = db.get(models.Contract, contract_id)
+        if c is None:
+            return ""
+        tenant = db.get(models.Tenant, tenant_id)
+        org_name = (tenant.name if tenant else "Workspace") or "Workspace"
+        pdf_bytes = render_contract_pdf_bytes(contract=c, org_name=org_name, draft=is_draftish(c.status))
+        ref, title = c.reference_no, (c.title or "Contract")
+
+        storage = get_storage()
+        storage.ensure_ready()
+        fid = uuid.uuid4().hex
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{ref}_{title}").strip("_")[:120] or "contract"
+        name = f"{safe}.pdf"
+        key = tenant_key(tenant_id, "contract_pdf", f"{fid}-{name}")
+        storage.put(key, pdf_bytes, "application/pdf")
+
+        db.add(
+            models.FileObject(
+                id=fid,
+                tenant_id=tenant_id,
+                key=key,
+                bucket=settings.s3_bucket if settings.use_s3 else "",
+                backend=storage.name,
+                content_type="application/pdf",
+                size=len(pdf_bytes),
+                sha256=hashlib.sha256(pdf_bytes).hexdigest(),
+                original_name=name,
+                kind="contract_pdf",
+                parent_type="contract",
+                parent_id=contract_id,
+                created_by=created_by,
+            )
+        )
+        db.commit()
+        return fid

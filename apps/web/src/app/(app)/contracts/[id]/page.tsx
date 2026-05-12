@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { Pencil, Sparkles, Trash2 } from "lucide-react";
+import { Download, FileDown, FileText, Pencil, Sparkles, Trash2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton, Textarea } from "@/components/ui";
 import { PageHeader } from "@/components/shell";
@@ -14,6 +14,8 @@ import {
   cn,
   contractTypeLabel,
   daysUntil,
+  downloadBlob,
+  formatBytes,
   formatDate,
   formatDateTime,
   formatMoney,
@@ -21,10 +23,11 @@ import {
   TRANSITION_LABELS,
   titleCase,
 } from "@/lib/utils";
-import type { ActivityItem, Comment, ContractDetail } from "@/lib/types";
+import type { ActivityItem, Comment, ContractDetail, FileObject } from "@/lib/types";
 
-type Tab = "overview" | "document" | "activity" | "comments";
+type Tab = "overview" | "document" | "activity" | "comments" | "files";
 const EDITABLE_STATUSES = new Set(["draft", "changes_requested"]);
+const TABS: Tab[] = ["overview", "document", "activity", "comments", "files"];
 
 export default function ContractDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -32,6 +35,7 @@ export default function ContractDetailPage() {
   const [contract, setContract] = useState<ContractDetail | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
   const [error, setError] = useState("");
+  const [pdfBusy, setPdfBusy] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
@@ -57,6 +61,21 @@ export default function ContractDetailPage() {
       setError(e instanceof ApiError ? e.message : "Couldn't update the contract.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function downloadPdf() {
+    if (!contract) return;
+    setPdfBusy(true);
+    setError("");
+    try {
+      const fo = await api.post<FileObject>(`/contracts/${contract.id}/pdf`);
+      const blob = await api.blob(`/files/${fo.id}/download`);
+      downloadBlob(blob, fo.original_name);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't generate the PDF.");
+    } finally {
+      setPdfBusy(false);
     }
   }
 
@@ -123,6 +142,9 @@ export default function ContractDetailPage() {
         }
         actions={
           <>
+            <Button variant="secondary" size="sm" onClick={downloadPdf} loading={pdfBusy} title="Generate & download PDF">
+              <FileDown className="h-3.5 w-3.5" /> PDF
+            </Button>
             {canEdit && (
               <Link href={`/contracts/${contract.id}/edit`}>
                 <Button variant="secondary" size="sm">
@@ -191,7 +213,7 @@ export default function ContractDetailPage() {
 
         {/* tabs */}
         <div className="flex gap-1 border-b border-line">
-          {(["overview", "document", "activity", "comments"] as Tab[]).map((t) => (
+          {TABS.map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -209,6 +231,7 @@ export default function ContractDetailPage() {
         {tab === "document" && <DocumentTab body={contract.body} />}
         {tab === "activity" && <ActivityTab contractId={contract.id} />}
         {tab === "comments" && <CommentsTab contractId={contract.id} />}
+        {tab === "files" && <FilesTab contractId={contract.id} />}
       </div>
     </div>
   );
@@ -351,6 +374,82 @@ function CommentsTab({ contractId }: { contractId: string }) {
             </div>
           ))}
         </div>
+      </CardBody>
+    </Card>
+  );
+}
+
+function FilesTab({ contractId }: { contractId: string }) {
+  const [files, setFiles] = useState<FileObject[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(() => {
+    api.get<FileObject[]>(`/contracts/${contractId}/files`).then(setFiles).catch(() => setFiles([]));
+  }, [contractId]);
+  useEffect(load, [load]);
+
+  async function generate() {
+    setBusy(true);
+    setError("");
+    try {
+      const fo = await api.post<FileObject>(`/contracts/${contractId}/pdf`);
+      setFiles((f) => [fo, ...(f ?? [])]);
+      const blob = await api.blob(`/files/${fo.id}/download`);
+      downloadBlob(blob, fo.original_name);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't generate the PDF.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function download(fo: FileObject) {
+    try {
+      const blob = await api.blob(`/files/${fo.id}/download`);
+      downloadBlob(blob, fo.original_name);
+    } catch {
+      setError("Couldn't download that file.");
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-1.5">
+          <FileText className="h-4 w-4" /> Files
+        </CardTitle>
+        <Button size="sm" onClick={generate} loading={busy}>
+          <FileDown className="h-3.5 w-3.5" /> Generate PDF
+        </Button>
+      </CardHeader>
+      <CardBody>
+        {error && <ErrorBanner message={error} className="mb-3" />}
+        {files === null && <Skeleton className="h-16" />}
+        {files && files.length === 0 && (
+          <p className="text-sm text-ink-3">No generated files yet. Click “Generate PDF” to produce a downloadable copy of this contract.</p>
+        )}
+        <div className="divide-y divide-line">
+          {files?.map((f) => (
+            <div key={f.id} className="flex items-center gap-3 py-3 text-sm">
+              <span className="grid h-9 w-9 place-items-center rounded-md bg-surface-3 text-ink-3">
+                <FileText className="h-4 w-4" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-ink">{f.original_name}</div>
+                <div className="text-xs text-ink-3">
+                  {titleCase(f.kind)} · {formatBytes(f.size)} · {formatDateTime(f.created_at)} · stored on {f.backend === "s3" ? "S3" : "local"}
+                </div>
+              </div>
+              <Button size="sm" variant="ghost" onClick={() => download(f)}>
+                <Download className="h-3.5 w-3.5" /> Download
+              </Button>
+            </div>
+          ))}
+        </div>
+        <p className="mt-3 text-[11px] text-ink-3">
+          Generated PDFs are stored in S3-compatible object storage (or a local-filesystem fallback) and are tenant-isolated. Drafts carry a “DRAFT — not executed” watermark.
+        </p>
       </CardBody>
     </Card>
   );
