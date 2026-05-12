@@ -37,6 +37,8 @@ class Settings(BaseSettings):
 
     # --- CORS (frontend origins, comma-separated) ---
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # public URL of the frontend (used in emails — e.g. signing links)
+    frontend_url: str = "http://localhost:3000"
 
     # --- Startup behaviour ---
     run_migrations_on_startup: bool = True

@@ -8,11 +8,13 @@ import re
 import time
 import uuid
 
+from sqlalchemy import select
+
 from .celery_app import celery
 from .config import settings
 from . import models
 from .database import SessionLocal, set_request_tenant
-from .pdf import is_draftish, render_contract_pdf_bytes
+from .pdf import is_draftish, render_certificate_bytes, render_contract_pdf_bytes, render_signed_pdf_bytes
 from .storage import get_storage, tenant_key
 
 _STUB_PARTIES = ["Acme Corporation", "Globex LLC", "Northstar Industries", "Initech FZE", "Stark Trading Co.", "Wayne Holdings"]
@@ -117,3 +119,49 @@ def render_contract_pdf(contract_id: str, tenant_id: str, created_by: str) -> st
         )
         db.commit()
         return fid
+
+
+@celery.task(name="signatures.seal_envelope")
+def seal_envelope(envelope_id: str, tenant_id: str) -> str:
+    """Render the executed PDF + the Certificate of Completion for a completed envelope and link them."""
+    set_request_tenant(tenant_id)
+    with SessionLocal() as db:
+        env = db.get(models.SignatureEnvelope, envelope_id)
+        if env is None or env.status != "completed":
+            return ""
+        c = db.get(models.Contract, env.contract_id)
+        tenant = db.get(models.Tenant, tenant_id)
+        org = (tenant.name if tenant else "Workspace") or "Workspace"
+        recips = list(db.scalars(select(models.SignatureRecipient).where(models.SignatureRecipient.envelope_id == env.id).order_by(models.SignatureRecipient.sequence)).all())
+        events = list(db.scalars(select(models.SignatureEvent).where(models.SignatureEvent.envelope_id == env.id).order_by(models.SignatureEvent.at)).all())
+        decline_times = {e.recipient_id: e.at for e in events if e.event == "declined"}
+        signers = [{"name": r.name, "email": r.email, "signed_name": r.signed_name, "signed_at": r.signed_at, "ip": r.ip} for r in recips if r.status == "signed" and r.kind == "signer"]
+        recip_dicts = [
+            {"name": r.name, "email": r.email, "kind": r.kind, "status": r.status, "signed_at": r.signed_at, "declined_at": decline_times.get(r.id), "declined_reason": r.declined_reason, "ip": r.ip}
+            for r in recips
+        ]
+        event_dicts = [{"at": e.at, "event": e.event, "recipient_name": e.recipient_name, "ip": e.ip} for e in events]
+
+        signed_bytes = render_signed_pdf_bytes(contract=c, org_name=org, signers=signers)
+        cert_bytes = render_certificate_bytes(envelope=env, contract=c, org_name=org, recipients=recip_dicts, events=event_dicts)
+
+        storage = get_storage()
+        storage.ensure_ready()
+        ref = c.reference_no or "contract"
+
+        def _store(data: bytes, kind: str, name: str) -> str:
+            fid = uuid.uuid4().hex
+            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")[:120] or "doc"
+            key = tenant_key(tenant_id, kind, f"{fid}-{safe}.pdf")
+            storage.put(key, data, "application/pdf")
+            db.add(models.FileObject(
+                id=fid, tenant_id=tenant_id, key=key, bucket=settings.s3_bucket if settings.use_s3 else "", backend=storage.name,
+                content_type="application/pdf", size=len(data), sha256=hashlib.sha256(data).hexdigest(), original_name=f"{safe}.pdf",
+                kind=kind, parent_type="contract", parent_id=c.id, created_by=env.created_by,
+            ))
+            return fid
+
+        env.sealed_pdf_file_id = _store(signed_bytes, "signed_pdf", f"{ref}_executed")
+        env.certificate_file_id = _store(cert_bytes, "certificate", f"{ref}_certificate_of_completion")
+        db.commit()
+        return env.id

@@ -433,3 +433,77 @@ class SubmitForApprovalIn(BaseModel):
 class WorkflowDecideIn(BaseModel):
     decision: str  # approve | reject | changes_requested
     comment: str = ""
+
+
+# ---------- e-signature ----------
+
+
+class RecipientIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    email: EmailStr
+    kind: str = "signer"  # "signer" | "cc"
+
+
+class RecipientOut(BaseModel):
+    id: str
+    sequence: int
+    name: str
+    email: str
+    kind: str
+    status: str  # created|sent|viewed|signed|declined
+    signed_name: str
+    signed_at: dt.datetime | None
+    declined_reason: str
+    ip: str
+    signing_link: str | None = None  # /sign/{token} — populated for the contract owner only
+
+
+class EnvelopeOut(BaseModel):
+    id: str
+    contract_id: str
+    status: str
+    signing_order: str
+    message: str
+    document_file_id: str | None
+    sealed_pdf_file_id: str | None
+    certificate_file_id: str | None
+    created_by: str
+    created_at: dt.datetime
+    sent_at: dt.datetime | None
+    completed_at: dt.datetime | None
+    recipients: list[RecipientOut] = []
+
+
+class PrepareSignatureIn(BaseModel):
+    recipients: list[RecipientIn] = Field(min_length=1)
+    message: str = ""
+    signing_order: str = "sequential"  # "sequential" | "parallel"
+
+
+class SignIn(BaseModel):
+    full_name: str = Field(min_length=1, max_length=200)
+    consent: bool = True
+
+
+class DeclineIn(BaseModel):
+    reason: str = ""
+
+
+class SigningInfoOut(BaseModel):
+    """Public (token-auth) signing-page data."""
+    valid: bool
+    reason: str = ""  # if not valid: expired | revoked | not_found
+    org_name: str = ""
+    contract_title: str = ""
+    contract_reference: str = ""
+    sender_name: str = ""
+    message: str = ""
+    recipient_name: str = ""
+    recipient_email: str = ""
+    recipient_status: str = ""  # created|sent|viewed|signed|declined  (the recipient's own state)
+    can_sign: bool = False      # the envelope is sent & it's this recipient's turn
+    waiting_reason: str = ""    # if can_sign is false: "earlier signer hasn't signed yet" / etc.
+    document_path: str = ""     # /sign/{token}/document — download the contract being signed
+    consent_text: str = ""
+    envelope_status: str = ""
+    sealed_pdf_path: str = ""   # populated once the envelope is completed

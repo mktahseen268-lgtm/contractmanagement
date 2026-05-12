@@ -22,6 +22,7 @@ from reportlab.platypus import (
     HRFlowable,
     ListFlowable,
     ListItem,
+    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -152,7 +153,7 @@ def substitute_variables(text: str, contract, org_name: str) -> str:
     return _VAR_RE.sub(lambda m: vals.get(m.group(1).lower(), m.group(0)), text)
 
 
-def render_contract_pdf_bytes(*, contract, org_name: str, draft: bool) -> bytes:
+def render_contract_pdf_bytes(*, contract, org_name: str, draft: bool, extra_story: list | None = None) -> bytes:
     st = _styles()
     buf = io.BytesIO()
 
@@ -216,6 +217,107 @@ def render_contract_pdf_bytes(*, contract, org_name: str, draft: bool) -> bytes:
 
     body = substitute_variables(getattr(contract, "body", "") or "", contract, org_name)
     story.extend(_body_flowables(body, st))
+    if extra_story:
+        story.extend(extra_story)
+
+    doc.build(story, onFirstPage=_decorate, onLaterPages=_decorate)
+    return buf.getvalue()
+
+
+def _fmt_dt(d) -> str:
+    if not d:
+        return "—"
+    if isinstance(d, (dt.date, dt.datetime)):
+        return d.strftime("%d %b %Y %H:%M UTC")
+    return str(d)
+
+
+def render_signed_pdf_bytes(*, contract, org_name: str, signers: list[dict]) -> bytes:
+    """The executed contract: the contract body (no DRAFT watermark) + a Signatures page."""
+    st = _styles()
+    sig_style = ParagraphStyle("CMSig", parent=st["body"], fontName="Helvetica-BoldOblique", fontSize=14, leading=18, textColor=_INK)
+    extra: list = [PageBreak(), Paragraph("Signatures", st["h1"]), Spacer(1, 6),
+                   Paragraph(f"This is the executed copy of {_inline(contract.title or 'the contract')} ({contract.reference_no}). The signatures below were captured electronically.", st["small"]),
+                   Spacer(1, 14)]
+    if not signers:
+        extra.append(Paragraph("<i>(No signatures recorded.)</i>", st["body"]))
+    for s in signers:
+        extra.append(Paragraph(f"<b>{_inline(s.get('name') or '')}</b>" + (f" &nbsp;<font size=8 color='#7A8694'>{_inline(s.get('email') or '')}</font>" if s.get("email") else ""), st["body"]))
+        extra.append(Paragraph("/s/  " + _inline(s.get("signed_name") or s.get("name") or ""), sig_style))
+        extra.append(Paragraph(f"Signed {_fmt_dt(s.get('signed_at'))}" + (f" · IP {s['ip']}" if s.get("ip") else ""), st["small"]))
+        extra.append(HRFlowable(width="60%", color=_LINE, spaceBefore=8, spaceAfter=14))
+    extra.append(Spacer(1, 4))
+    extra.append(Paragraph("A Certificate of Completion with the full signing audit trail is available separately.", st["small"]))
+    return render_contract_pdf_bytes(contract=contract, org_name=org_name, draft=False, extra_story=extra)
+
+
+def render_certificate_bytes(*, envelope, contract, org_name: str, recipients: list[dict], events: list[dict]) -> bytes:
+    """A standalone Certificate of Completion — the signing audit trail."""
+    st = _styles()
+    buf = io.BytesIO()
+
+    def _decorate(canvas, doc):
+        canvas.saveState()
+        w, h = A4
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(_INK3)
+        canvas.drawString(18 * mm, h - 12 * mm, org_name[:80])
+        canvas.drawRightString(w - 18 * mm, h - 12 * mm, dt.datetime.now().strftime("Generated %d %b %Y %H:%M"))
+        canvas.setStrokeColor(_LINE)
+        canvas.line(18 * mm, h - 14 * mm, w - 18 * mm, h - 14 * mm)
+        canvas.drawCentredString(w / 2, 12 * mm, f"Certificate of Completion · Page {doc.page}")
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=22 * mm, bottomMargin=20 * mm, title="Certificate of Completion")
+    story: list = [
+        Paragraph("Certificate of Completion", st["title"]),
+        Spacer(1, 10),
+    ]
+    info = [
+        ("Document", f"{contract.title or 'Contract'}  ({contract.reference_no})"),
+        ("Envelope ID", envelope.id),
+        ("Status", (envelope.status or "").replace("_", " ").title()),
+        ("Document hash (SHA-256)", envelope.document_hash or "—"),
+        ("Created", _fmt_dt(envelope.created_at)),
+        ("Sent", _fmt_dt(envelope.sent_at)),
+        ("Completed", _fmt_dt(envelope.completed_at)),
+    ]
+    rows = [[Paragraph(k.upper(), st["label"]), Paragraph(_inline(str(v)), st["val"])] for k, v in info]
+    t = Table(rows, colWidths=[44 * mm, (A4[0] - 36 * mm - 44 * mm)])
+    t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3), ("LINEBELOW", (0, 0), (-1, -2), 0.4, _LINE)]))
+    story.append(t)
+    story.append(HRFlowable(width="100%", color=_LINE, spaceBefore=12, spaceAfter=12))
+
+    story.append(Paragraph("Recipients", st["h2"]))
+    rh = [[Paragraph("Name", st["label"]), Paragraph("Email", st["label"]), Paragraph("Role", st["label"]), Paragraph("Status", st["label"]), Paragraph("Signed / declined", st["label"]), Paragraph("IP", st["label"])]]
+    for r in recipients:
+        rh.append([
+            Paragraph(_inline(r.get("name") or ""), st["val"]),
+            Paragraph(_inline(r.get("email") or ""), st["val"]),
+            Paragraph((r.get("kind") or "signer").title(), st["val"]),
+            Paragraph((r.get("status") or "").replace("_", " ").title(), st["val"]),
+            Paragraph(_fmt_dt(r.get("signed_at") or r.get("declined_at")) + (f"  ({_inline(r['declined_reason'])})" if r.get("declined_reason") else ""), st["small"]),
+            Paragraph(_inline(r.get("ip") or "—"), st["small"]),
+        ])
+    rt = Table(rh, colWidths=[30 * mm, 38 * mm, 16 * mm, 18 * mm, 38 * mm, 22 * mm], repeatRows=1)
+    rt.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3), ("LINEBELOW", (0, 0), (-1, 0), 0.6, _LINE), ("LINEBELOW", (0, 1), (-1, -1), 0.3, _LINE), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F6F8FB"))]))
+    story.append(rt)
+    story.append(HRFlowable(width="100%", color=_LINE, spaceBefore=12, spaceAfter=12))
+
+    story.append(Paragraph("History", st["h2"]))
+    eh = [[Paragraph("When", st["label"]), Paragraph("Event", st["label"]), Paragraph("By", st["label"]), Paragraph("IP", st["label"])]]
+    for e in events:
+        eh.append([
+            Paragraph(_fmt_dt(e.get("at")), st["small"]),
+            Paragraph((e.get("event") or "").replace("_", " ").title(), st["val"]),
+            Paragraph(_inline(e.get("recipient_name") or "—"), st["small"]),
+            Paragraph(_inline(e.get("ip") or "—"), st["small"]),
+        ])
+    et = Table(eh, colWidths=[40 * mm, 40 * mm, 50 * mm, 22 * mm], repeatRows=1)
+    et.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2), ("LINEBELOW", (0, 0), (-1, 0), 0.6, _LINE), ("LINEBELOW", (0, 1), (-1, -1), 0.3, _LINE), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F6F8FB"))]))
+    story.append(et)
+    story.append(Spacer(1, 14))
+    story.append(Paragraph(f"Issued by {org_name} via the Contract Management platform. This certificate evidences the electronic signing of the document identified above.", st["small"]))
 
     doc.build(story, onFirstPage=_decorate, onLaterPages=_decorate)
     return buf.getvalue()

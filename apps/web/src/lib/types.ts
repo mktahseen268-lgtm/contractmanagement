@@ -142,6 +142,57 @@ export interface Dashboard {
   expiring_soon: ContractListItem[];
 }
 
+// ---------- e-signature ----------
+
+export interface SignatureRecipient {
+  id: string;
+  sequence: number;
+  name: string;
+  email: string;
+  kind: "signer" | "cc";
+  status: "created" | "sent" | "viewed" | "signed" | "declined";
+  signed_name: string;
+  signed_at: string | null;
+  declined_reason: string;
+  ip: string;
+  signing_link: string | null;
+}
+
+export interface SignatureEnvelope {
+  id: string;
+  contract_id: string;
+  status: "draft" | "sent" | "partially_signed" | "completed" | "declined" | "voided" | "expired";
+  signing_order: "sequential" | "parallel";
+  message: string;
+  document_file_id: string | null;
+  sealed_pdf_file_id: string | null;
+  certificate_file_id: string | null;
+  created_by: string;
+  created_at: string;
+  sent_at: string | null;
+  completed_at: string | null;
+  recipients: SignatureRecipient[];
+}
+
+export interface SigningInfo {
+  valid: boolean;
+  reason: string;
+  org_name: string;
+  contract_title: string;
+  contract_reference: string;
+  sender_name: string;
+  message: string;
+  recipient_name: string;
+  recipient_email: string;
+  recipient_status: string;
+  can_sign: boolean;
+  waiting_reason: string;
+  document_path: string;
+  consent_text: string;
+  envelope_status: string;
+  sealed_pdf_path: string;
+}
+
 // ---------- workflows ----------
 
 export interface WorkflowStep {

@@ -222,6 +222,65 @@ class WorkflowRunStep(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
 
 
+class SignatureEnvelope(Base):
+    """An e-signature request for a contract version. v1 has no on-page field placement — each
+    recipient adopts a typed signature; the executed PDF appends a signatures page + a certificate
+    of completion. (DocViewer field placement, identity OTP, etc. are planned — docs/13.)"""
+
+    __tablename__ = "signature_envelopes"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    contract_id: Mapped[str] = mapped_column(ForeignKey("contracts.id"), index=True)
+    contract_version_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="draft", index=True)  # draft|sent|partially_signed|completed|declined|voided|expired
+    signing_order: Mapped[str] = mapped_column(String(20), default="sequential")  # sequential | parallel
+    message: Mapped[str] = mapped_column(Text, default="")
+    document_file_id: Mapped[str | None] = mapped_column(String(32), nullable=True)   # the contract PDF recipients see
+    document_hash: Mapped[str] = mapped_column(String(64), default="")                  # hash of the signed content
+    sealed_pdf_file_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    certificate_file_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+    sent_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class SignatureRecipient(Base):
+    __tablename__ = "signature_recipients"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    envelope_id: Mapped[str] = mapped_column(ForeignKey("signature_envelopes.id"), index=True)
+    sequence: Mapped[int] = mapped_column(Integer, default=0)
+    name: Mapped[str] = mapped_column(String(200))
+    email: Mapped[str] = mapped_column(String(255))
+    kind: Mapped[str] = mapped_column(String(20), default="signer")  # signer | cc
+    status: Mapped[str] = mapped_column(String(20), default="created")  # created|sent|viewed|signed|declined
+    # the per-recipient signing-link token. Scaffold: stored as-is (the table is RLS-protected and
+    # the token is high-entropy); production should store only a hash (docs/19).
+    access_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    signed_name: Mapped[str] = mapped_column(String(200), default="")  # the typed signature
+    consent_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    signed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    declined_reason: Mapped[str] = mapped_column(String(500), default="")
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    user_agent: Mapped[str] = mapped_column(String(400), default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+
+
+class SignatureEvent(Base):
+    __tablename__ = "signature_events"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    envelope_id: Mapped[str] = mapped_column(ForeignKey("signature_envelopes.id"), index=True)
+    recipient_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    recipient_name: Mapped[str] = mapped_column(String(200), default="")
+    event: Mapped[str] = mapped_column(String(40))  # created|sent|opened|consented|signed|declined|reminder_sent|completed|voided
+    at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    user_agent: Mapped[str] = mapped_column(String(400), default="")
+    meta: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
+
+
 class FileObject(Base):
     __tablename__ = "file_objects"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)

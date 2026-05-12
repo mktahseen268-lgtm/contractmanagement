@@ -6,7 +6,7 @@ TRANSITIONS: dict[str, set[str]] = {
     "in_review": {"approved", "changes_requested", "rejected"},
     "changes_requested": {"draft", "in_review", "voided"},
     "approved": {"out_for_signature", "active"},
-    "out_for_signature": {"signed", "declined", "voided"},
+    "out_for_signature": {"signed", "declined", "voided", "approved"},  # "approved" = recall the envelope
     "signed": {"active"},
     "active": {"expiring", "terminated", "renewed"},
     "expiring": {"active", "expired", "renewed", "terminated"},

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
-import { Check, Download, Eye, FileDown, FileText, History, Pencil, RotateCcw, Send, Sparkles, Trash2, Workflow as WorkflowIcon, X } from "lucide-react";
+import { Check, Copy, Download, Eye, FileCheck2, FileDown, FileText, History, Pencil, PenLine, RotateCcw, Send, Sparkles, Trash2, Workflow as WorkflowIcon, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton, Textarea } from "@/components/ui";
 
@@ -31,17 +31,19 @@ import {
   TRANSITION_LABELS,
   titleCase,
 } from "@/lib/utils";
-import type { ActivityItem, Comment, ContractDetail, ContractWorkflow, FileObject, User, Version, VersionDetail, WorkflowRunStep } from "@/lib/types";
+import type { ActivityItem, Comment, ContractDetail, ContractWorkflow, FileObject, SignatureEnvelope, SignatureRecipient, User, Version, VersionDetail, WorkflowRunStep } from "@/lib/types";
 
-type Tab = "overview" | "approvals" | "document" | "activity" | "comments" | "files" | "versions";
+type Tab = "overview" | "approvals" | "signatures" | "document" | "activity" | "comments" | "files" | "versions";
 const EDITABLE_STATUSES = new Set(["draft", "changes_requested"]);
-const TABS: Tab[] = ["overview", "approvals", "document", "activity", "comments", "files", "versions"];
+const TABS: Tab[] = ["overview", "approvals", "signatures", "document", "activity", "comments", "files", "versions"];
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export default function ContractDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const [contract, setContract] = useState<ContractDetail | null>(null);
   const [wfState, setWfState] = useState<ContractWorkflow | null>(null);
+  const [sigState, setSigState] = useState<SignatureEnvelope | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
   const [error, setError] = useState("");
   const [pdfBusy, setPdfBusy] = useState(false);
@@ -51,6 +53,7 @@ export default function ContractDetailPage() {
   const load = useCallback(() => {
     api.get<ContractDetail>(`/contracts/${id}`).then(setContract).catch((e) => setError(e instanceof ApiError ? e.message : "Couldn't load this contract."));
     api.get<ContractWorkflow>(`/contracts/${id}/workflow`).then(setWfState).catch(() => setWfState(null));
+    api.get<SignatureEnvelope | null>(`/contracts/${id}/signature`).then(setSigState).catch(() => setSigState(null));
   }, [id]);
 
   useEffect(load, [load]);
@@ -140,9 +143,15 @@ export default function ContractDetailPage() {
   const du = daysUntil(contract.end_date);
   const canEdit = EDITABLE_STATUSES.has(contract.status);
   const hasActiveRun = wfState?.run?.status === "running";
+  const hasActiveEnvelope = sigState?.status === "sent" || sigState?.status === "partially_signed";
   // "Submit for approval" replaces the in_review transition; approve/reject/changes go through the workflow when a run is active.
-  const positive = contract.available_transitions.filter((t) => !NEGATIVE_TRANSITIONS.has(t) && t !== "in_review" && !(hasActiveRun && t === "approved"));
-  const negative = contract.available_transitions.filter((t) => NEGATIVE_TRANSITIONS.has(t) && !(hasActiveRun && (t === "rejected" || t === "changes_requested")));
+  // "Submit for approval" and "Prepare for signature" are tab actions; while a run/envelope is active those moves go through the tab
+  const positive = contract.available_transitions.filter(
+    (t) => !NEGATIVE_TRANSITIONS.has(t) && t !== "in_review" && t !== "out_for_signature" && !(hasActiveRun && t === "approved") && !(hasActiveEnvelope && t === "signed"),
+  );
+  const negative = contract.available_transitions.filter(
+    (t) => NEGATIVE_TRANSITIONS.has(t) && !(hasActiveRun && (t === "rejected" || t === "changes_requested")) && !(hasActiveEnvelope && (t === "declined" || t === "voided")),
+  );
   const canSubmit = EDITABLE_STATUSES.has(contract.status) && !hasActiveRun && contract.available_transitions.includes("in_review");
 
   return (
@@ -263,6 +272,7 @@ export default function ContractDetailPage() {
 
         {tab === "overview" && <OverviewTab contract={contract} />}
         {tab === "approvals" && <ApprovalsTab contract={contract} wf={wfState} onChanged={load} />}
+        {tab === "signatures" && <SignaturesTab contract={contract} env={sigState} onChanged={load} />}
         {tab === "document" && <DocumentTab key={contract.id} contract={contract} />}
         {tab === "activity" && <ActivityTab contractId={contract.id} />}
         {tab === "comments" && <CommentsTab contractId={contract.id} />}
@@ -849,6 +859,308 @@ function ApprovalsTab({ contract, wf, onChanged }: { contract: ContractDetail; w
           </div>
         )}
         {run.status === "running" && !wf.can_decide && <p className="mt-4 text-xs text-ink-3">Waiting on the assignee of the current step.</p>}
+      </CardBody>
+    </Card>
+  );
+}
+
+const ENV_STATUS_LABEL: Record<string, string> = {
+  draft: "Draft",
+  sent: "Out for signature",
+  partially_signed: "Partially signed",
+  completed: "Completed",
+  declined: "Declined",
+  voided: "Voided",
+  expired: "Expired",
+};
+const ENV_STATUS_TONE: Record<string, string> = {
+  draft: "text-slate-600 bg-slate-100",
+  sent: "text-amber-800 bg-amber-100",
+  partially_signed: "text-amber-800 bg-amber-100",
+  completed: "text-emerald-800 bg-emerald-100",
+  declined: "text-red-800 bg-red-100",
+  voided: "text-slate-600 bg-slate-100",
+  expired: "text-slate-600 bg-slate-100",
+};
+const RCPT_STATUS_TONE: Record<string, string> = {
+  created: "text-slate-600 bg-slate-100",
+  sent: "text-sky-800 bg-sky-100",
+  viewed: "text-violet-800 bg-violet-100",
+  signed: "text-emerald-800 bg-emerald-100",
+  declined: "text-red-800 bg-red-100",
+};
+const INPUT_CLS = "h-10 rounded-sm border border-line bg-white px-3 text-sm text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none";
+
+type DraftRecipient = { name: string; email: string; kind: "signer" | "cc" };
+
+function SignaturesTab({ contract, env, onChanged }: { contract: ContractDetail; env: SignatureEnvelope | null; onChanged: () => void }) {
+  const [recips, setRecips] = useState<DraftRecipient[]>([{ name: "", email: "", kind: "signer" }]);
+  const [order, setOrder] = useState<"sequential" | "parallel">("sequential");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState<string | null>(null);
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+
+  async function prepare() {
+    const clean = recips.map((r) => ({ name: r.name.trim(), email: r.email.trim(), kind: r.kind })).filter((r) => r.name && r.email);
+    if (clean.length === 0) {
+      setError("Add at least one recipient with a name and email.");
+      return;
+    }
+    setBusy("prepare");
+    setError("");
+    try {
+      await api.post(`/contracts/${contract.id}/prepare-signature`, { recipients: clean, message: message.trim(), signing_order: order });
+      onChanged();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't prepare the signing request.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function act(key: string, fn: () => Promise<unknown>, fail: string) {
+    setBusy(key);
+    setError("");
+    try {
+      await fn();
+      onChanged();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : fail);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function downloadFile(path: string, name: string) {
+    try {
+      const blob = await api.blob(path);
+      downloadBlob(blob, name);
+    } catch {
+      setError("Couldn't download that file.");
+    }
+  }
+
+  function copyLink(link: string, rid: string) {
+    navigator.clipboard?.writeText(`${origin}${link}`).then(
+      () => {
+        setCopied(rid);
+        setTimeout(() => setCopied(null), 1500);
+      },
+      () => {},
+    );
+  }
+
+  // --- No envelope yet -------------------------------------------------------
+  if (!env) {
+    if (contract.status !== "approved") {
+      return (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-1.5">
+              <PenLine className="h-4 w-4" /> Signatures
+            </CardTitle>
+          </CardHeader>
+          <CardBody>
+            <p className="text-sm text-ink-2">
+              This contract needs to be <strong>approved</strong> before it can be sent for signature.
+              {EDITABLE_STATUSES.has(contract.status) ? " Submit it for approval from the Approvals tab." : ""}
+            </p>
+          </CardBody>
+        </Card>
+      );
+    }
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-1.5">
+            <PenLine className="h-4 w-4" /> Prepare for signature
+          </CardTitle>
+        </CardHeader>
+        <CardBody className="space-y-4">
+          {error && <ErrorBanner message={error} />}
+          <div className="space-y-2">
+            <div className="text-[13px] font-medium text-ink-2">Recipients</div>
+            {recips.map((r, i) => (
+              <div key={i} className="flex flex-wrap items-center gap-2">
+                <input
+                  className={cn(INPUT_CLS, "min-w-[10rem] flex-1")}
+                  placeholder="Full name"
+                  value={r.name}
+                  onChange={(e) => setRecips((rs) => rs.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))}
+                />
+                <input
+                  className={cn(INPUT_CLS, "min-w-[12rem] flex-1")}
+                  placeholder="email@company.com"
+                  type="email"
+                  value={r.email}
+                  onChange={(e) => setRecips((rs) => rs.map((x, j) => (j === i ? { ...x, email: e.target.value } : x)))}
+                />
+                <select
+                  className={INPUT_CLS}
+                  value={r.kind}
+                  onChange={(e) => setRecips((rs) => rs.map((x, j) => (j === i ? { ...x, kind: e.target.value as "signer" | "cc" } : x)))}
+                >
+                  <option value="signer">Signer</option>
+                  <option value="cc">CC (gets a copy)</option>
+                </select>
+                {recips.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => setRecips((rs) => rs.filter((_, j) => j !== i))}
+                    className="grid h-9 w-9 place-items-center rounded-md text-ink-3 hover:bg-surface-3 hover:text-danger"
+                    aria-label="Remove recipient"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={() => setRecips((rs) => [...rs, { name: "", email: "", kind: "signer" }])}
+              className="text-sm font-medium text-accent hover:underline"
+            >
+              + Add recipient
+            </button>
+          </div>
+          <div>
+            <div className="mb-1 text-[13px] font-medium text-ink-2">Signing order</div>
+            <div className="flex flex-wrap gap-4 text-sm text-ink-2">
+              <label className="flex items-center gap-1.5">
+                <input type="radio" name="order" checked={order === "sequential"} onChange={() => setOrder("sequential")} /> Sequential — one after another
+              </label>
+              <label className="flex items-center gap-1.5">
+                <input type="radio" name="order" checked={order === "parallel"} onChange={() => setOrder("parallel")} /> Parallel — everyone at once
+              </label>
+            </div>
+          </div>
+          <div>
+            <div className="mb-1 text-[13px] font-medium text-ink-2">Message to recipients (optional)</div>
+            <Textarea rows={2} value={message} onChange={(e) => setMessage(e.target.value)} placeholder="A short note shown on the signing page." />
+          </div>
+          <div className="flex items-center gap-2">
+            <Button onClick={prepare} loading={busy === "prepare"}>
+              <PenLine className="h-4 w-4" /> Prepare request
+            </Button>
+            <span className="text-xs text-ink-3">You&rsquo;ll be able to review it before anything is sent.</span>
+          </div>
+        </CardBody>
+      </Card>
+    );
+  }
+
+  // --- Envelope exists -------------------------------------------------------
+  const live = env.status === "sent" || env.status === "partially_signed";
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-1.5">
+          <PenLine className="h-4 w-4" /> Signature request
+        </CardTitle>
+        <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${ENV_STATUS_TONE[env.status] ?? "text-slate-700 bg-slate-100"}`}>
+          {ENV_STATUS_LABEL[env.status] ?? env.status}
+        </span>
+      </CardHeader>
+      <CardBody className="space-y-4">
+        {error && <ErrorBanner message={error} />}
+        <div className="text-xs text-ink-3">
+          {env.signing_order === "sequential" ? "Signed in order" : "All sign in parallel"}
+          {env.sent_at ? ` · sent ${timeAgo(env.sent_at)}` : ""}
+          {env.completed_at ? ` · completed ${timeAgo(env.completed_at)}` : ""}
+        </div>
+        {env.message && <div className="rounded-md bg-surface-2 px-3 py-2 text-sm text-ink-2">&ldquo;{env.message}&rdquo;</div>}
+
+        <div className="divide-y divide-line overflow-hidden rounded-lg border border-line">
+          {env.recipients.map((r: SignatureRecipient) => (
+            <div key={r.id} className="flex flex-wrap items-center gap-3 p-3 text-sm">
+              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-surface-3 text-xs font-semibold text-ink-2">{r.sequence}</span>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-ink">{r.name}</span>
+                  {r.kind === "cc" && <span className="rounded bg-slate-100 px-1.5 text-[10px] font-medium uppercase tracking-wide text-ink-3">CC</span>}
+                  <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${RCPT_STATUS_TONE[r.status] ?? "text-slate-600 bg-slate-100"}`}>{r.status}</span>
+                </div>
+                <div className="text-xs text-ink-3">
+                  {r.email}
+                  {r.signed_name && r.signed_name !== r.name ? ` · signed as “${r.signed_name}”` : ""}
+                  {r.signed_at ? ` · ${formatDateTime(r.signed_at)}` : ""}
+                  {r.declined_reason ? ` · declined: ${r.declined_reason}` : ""}
+                </div>
+                {r.signing_link && (
+                  <div className="mt-1 flex items-center gap-1.5">
+                    <code className="max-w-[22rem] truncate rounded bg-surface-2 px-1.5 py-0.5 text-[11px] text-ink-3">
+                      {origin}
+                      {r.signing_link}
+                    </code>
+                    <button type="button" onClick={() => copyLink(r.signing_link!, r.id)} className="inline-flex items-center gap-1 text-xs text-accent hover:underline">
+                      {copied === r.id ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                      {copied === r.id ? "copied" : "copy"}
+                    </button>
+                  </div>
+                )}
+              </div>
+              {live && r.kind === "signer" && r.status !== "signed" && r.status !== "declined" && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  loading={busy === `remind-${r.id}`}
+                  onClick={() => act(`remind-${r.id}`, () => api.post(`/envelopes/${env.id}/recipients/${r.id}/remind`), "Couldn't send a reminder.")}
+                >
+                  <Send className="h-3.5 w-3.5" /> Remind
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {env.status === "draft" && (
+            <>
+              <Button loading={busy === "send"} onClick={() => act("send", () => api.post(`/envelopes/${env.id}/send`), "Couldn't send the request.")}>
+                <Send className="h-4 w-4" /> Send for signature
+              </Button>
+              <Button variant="ghost" loading={busy === "void"} onClick={() => act("void", () => api.post(`/envelopes/${env.id}/void`), "Couldn't discard the draft.")}>
+                <Trash2 className="h-4 w-4" /> Discard
+              </Button>
+            </>
+          )}
+          {live && (
+            <>
+              {env.document_file_id && (
+                <Button variant="secondary" size="sm" onClick={() => downloadFile(`/envelopes/${env.id}/document`, `${contract.title}.pdf`)}>
+                  <FileText className="h-3.5 w-3.5" /> View sent document
+                </Button>
+              )}
+              <Button variant="ghost" size="sm" loading={busy === "void"} onClick={() => act("void", () => api.post(`/envelopes/${env.id}/void`), "Couldn't void the envelope.")}>
+                <X className="h-3.5 w-3.5" /> Void envelope
+              </Button>
+            </>
+          )}
+          {env.status === "completed" && (
+            <>
+              <Button variant="secondary" size="sm" onClick={() => downloadFile(`/envelopes/${env.id}/signed-pdf`, `${contract.title} (executed).pdf`)}>
+                <FileCheck2 className="h-3.5 w-3.5" /> Download executed PDF
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => downloadFile(`/envelopes/${env.id}/certificate`, `${contract.title} — certificate.pdf`)}>
+                <FileDown className="h-3.5 w-3.5" /> Certificate of completion
+              </Button>
+            </>
+          )}
+        </div>
+
+        {env.status === "completed" && <p className="text-sm font-medium text-emerald-700">✓ Fully executed — every signer has signed.</p>}
+        {env.status === "declined" && (
+          <p className="text-sm text-red-700">A signer declined this request. Return the contract to draft from the header to revise it, then start a new request.</p>
+        )}
+        {env.status === "voided" && <p className="text-sm text-ink-3">This signing request was voided. You can prepare a new one if the contract is still approved.</p>}
+        {env.status === "draft" && (
+          <p className="text-[11px] text-ink-3">
+            Recipients get a unique link to review the document and adopt a typed signature — no account needed. Signers sign{" "}
+            {env.signing_order === "sequential" ? "one after another" : "in any order"}; the executed PDF and a certificate of completion are produced automatically once everyone has signed.
+          </p>
+        )}
       </CardBody>
     </Card>
   );

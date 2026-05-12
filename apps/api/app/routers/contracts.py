@@ -5,6 +5,7 @@ from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from .. import lifecycle, models, schemas
+from .. import signing_service as sig
 from .. import workflow_service as wf
 from ..audit import record
 from ..database import get_db
@@ -187,6 +188,7 @@ def delete_contract(contract_id: str, request: Request, db: Session = Depends(ge
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to delete contracts.")
     label = c.title
     wf.delete_runs_for_contract(db, c.id)
+    sig.delete_envelopes_for_contract(db, c.id)
     db.query(models.Comment).filter(models.Comment.contract_id == c.id).delete()
     db.query(models.ContractVersion).filter(models.ContractVersion.contract_id == c.id).delete()
     db.delete(c)
@@ -211,6 +213,9 @@ def transition(contract_id: str, data: schemas.TransitionIn, request: Request, d
     # if an approval workflow is running, approve/reject/changes must go through it
     if c.status == "in_review" and target in {"approved", "rejected", "changes_requested"} and wf.active_run_for_contract(db, c.id) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This contract is in an approval workflow — use the approval actions on the Approvals tab.")
+    # if an e-signature envelope is out, manage it via the Signatures tab (not a plain transition)
+    if c.status == "out_for_signature" and target in {"signed", "declined", "voided", "approved"} and sig.active_envelope(db, c.id) is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This contract is out for signature — use the Signatures tab (recipients sign via their links; you can void the envelope there).")
     prev = c.status
     c.status = target
     if target in {"voided", "terminated", "expired"}:
