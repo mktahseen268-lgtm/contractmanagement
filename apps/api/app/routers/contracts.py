@@ -5,6 +5,7 @@ from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from .. import lifecycle, models, schemas
+from .. import workflow_service as wf
 from ..audit import record
 from ..database import get_db
 from ..deps import client_ip, get_current_user
@@ -185,6 +186,7 @@ def delete_contract(contract_id: str, request: Request, db: Session = Depends(ge
     if user.role not in {"owner", "admin", "manager"}:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to delete contracts.")
     label = c.title
+    wf.delete_runs_for_contract(db, c.id)
     db.query(models.Comment).filter(models.Comment.contract_id == c.id).delete()
     db.query(models.ContractVersion).filter(models.ContractVersion.contract_id == c.id).delete()
     db.delete(c)
@@ -206,8 +208,13 @@ def transition(contract_id: str, data: schemas.TransitionIn, request: Request, d
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only an approver/manager/admin can approve, reject, or request changes.")
     if target in {"out_for_signature", "in_review", "active", "voided", "renewed", "terminated", "draft", "signed", "declined", "expiring", "expired"} and user.role not in _EDIT_ROLES and user.role not in _APPROVE_ROLES:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to change this contract's status.")
+    # if an approval workflow is running, approve/reject/changes must go through it
+    if c.status == "in_review" and target in {"approved", "rejected", "changes_requested"} and wf.active_run_for_contract(db, c.id) is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This contract is in an approval workflow — use the approval actions on the Approvals tab.")
     prev = c.status
     c.status = target
+    if target in {"voided", "terminated", "expired"}:
+        wf.cancel_runs_for_contract(db, c.id, reason=f"contract_{target}")
     if data.comment.strip():
         db.add(models.Comment(tenant_id=user.tenant_id, contract_id=c.id, author_id=user.id, author_name=user.name, body=f"[{prev} → {target}] {data.comment.strip()}"))
     notify_user_id = c.owner_id if c.owner_id != user.id else None
@@ -335,3 +342,88 @@ def generate_contract_pdf(contract_id: str, request: Request, db: Session = Depe
     record(db, tenant_id=user.tenant_id, action="contract.pdf_generated", actor=user, object_type="contract", object_id=c.id, object_label=c.title, ip=client_ip(request), meta={"file_id": file_id})
     db.commit()
     return schemas.FileObjectOut.model_validate(fo)
+
+
+# ---------- approval workflow (run lifecycle) ----------
+
+
+def _run_out(db: Session, run: models.WorkflowRun) -> schemas.WorkflowRunOut:
+    steps = wf.run_steps(db, run.id)
+    return schemas.WorkflowRunOut(
+        id=run.id, contract_id=run.contract_id, definition_id=run.definition_id, definition_name=run.definition_name,
+        status=run.status, current_index=run.current_index, started_by=run.started_by, started_by_name=run.started_by_name,
+        started_at=run.started_at, completed_at=run.completed_at,
+        steps=[schemas.WorkflowRunStepOut.model_validate(s) for s in steps],
+    )
+
+
+@router.get("/{contract_id}/workflow", response_model=schemas.ContractWorkflowOut)
+def get_contract_workflow(contract_id: str, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.ContractWorkflowOut:
+    c = _get_owned_contract(db, user, contract_id)
+    run = wf.latest_run_for_contract(db, c.id)
+    run_out = None
+    can = False
+    if run is not None:
+        run_out = _run_out(db, run)
+        if run.status == "running":
+            active = wf.active_step(db, run)
+            can = bool(active is not None and wf.can_decide(user, active))
+    default_wf = wf.default_workflow_for(db, user.tenant_id, c.type)
+    avail = [
+        schemas.WorkflowOption(id=d.id, name=d.name, is_default=(default_wf is not None and d.id == default_wf.id))
+        for d in wf.active_workflows(db, user.tenant_id)
+        if (d.steps or [])
+    ]
+    return schemas.ContractWorkflowOut(run=run_out, can_decide=can, default_workflow_id=(default_wf.id if default_wf else None), available_workflows=avail)
+
+
+@router.post("/{contract_id}/submit-for-approval", response_model=schemas.ContractDetail)
+def submit_for_approval(contract_id: str, data: schemas.SubmitForApprovalIn, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.ContractDetail:
+    c = _get_owned_contract(db, user, contract_id)
+    if user.role not in _EDIT_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to submit contracts.")
+    if c.status not in {"draft", "changes_requested"}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"A '{c.status}' contract can't be submitted for approval.")
+    if wf.active_run_for_contract(db, c.id) is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This contract is already in an approval workflow.")
+    definition: models.WorkflowDefinition | None = None
+    if data.workflow_id:
+        definition = db.get(models.WorkflowDefinition, data.workflow_id)
+        if definition is None or definition.tenant_id != user.tenant_id or definition.status != "active":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="That workflow isn't available.")
+    else:
+        definition = wf.default_workflow_for(db, user.tenant_id, c.type)
+    if definition is not None and (definition.steps or []):
+        wf.start_run(db, contract=c, definition=definition, user=user, ip=client_ip(request))
+    else:
+        # no workflow -> plain transition to in_review
+        prev = c.status
+        c.status = "in_review"
+        record(db, tenant_id=user.tenant_id, action="contract.submitted", actor=user, object_type="contract", object_id=c.id, object_label=c.title, ip=client_ip(request), meta={"from": prev, "workflow": None})
+        if c.owner_id and c.owner_id != user.id:
+            db.add(models.Notification(tenant_id=user.tenant_id, user_id=c.owner_id, type="contract.workflow_update", title=f"\"{c.title}\" submitted for review", body=f"{user.name} submitted it for review (no workflow attached).", object_type="contract", object_id=c.id))
+    db.commit()
+    db.refresh(c)
+    return _detail(db, c)
+
+
+@router.post("/{contract_id}/workflow/decide", response_model=schemas.ContractDetail)
+def decide_workflow(contract_id: str, data: schemas.WorkflowDecideIn, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.ContractDetail:
+    c = _get_owned_contract(db, user, contract_id)
+    run = wf.active_run_for_contract(db, c.id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="There's no active approval workflow on this contract.")
+    step = wf.active_step(db, run)
+    if step is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="There's no active approval step right now.")
+    if not wf.can_decide(user, step):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"The step \"{step.name}\" is assigned to someone else.")
+    if data.decision not in {"approve", "reject", "changes_requested"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Decision must be approve, reject, or changes_requested.")
+    try:
+        wf.decide(db, run=run, step=step, contract=c, user=user, decision=data.decision, comment=data.comment, ip=client_ip(request))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    db.commit()
+    db.refresh(c)
+    return _detail(db, c)

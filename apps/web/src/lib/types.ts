@@ -142,6 +142,88 @@ export interface Dashboard {
   expiring_soon: ContractListItem[];
 }
 
+// ---------- workflows ----------
+
+export interface WorkflowStep {
+  name: string;
+  assignee_kind: "role" | "user";
+  assignee_value: string;
+}
+
+export interface WorkflowDefinitionListItem {
+  id: string;
+  name: string;
+  status: "draft" | "active" | "archived";
+  default_for_types: string[];
+  step_count: number;
+  run_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowDefinitionDetail {
+  id: string;
+  name: string;
+  status: "draft" | "active" | "archived";
+  default_for_types: string[];
+  steps: WorkflowStep[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowRunStep {
+  id: string;
+  step_index: number;
+  name: string;
+  assignee_kind: "role" | "user";
+  assignee_value: string;
+  status: "pending" | "active" | "approved" | "rejected" | "changes_requested" | "skipped";
+  decision: string | null;
+  decided_by: string | null;
+  decided_by_name: string;
+  decided_at: string | null;
+  comment: string;
+}
+
+export interface WorkflowRun {
+  id: string;
+  contract_id: string;
+  definition_id: string | null;
+  definition_name: string;
+  status: "running" | "approved" | "rejected" | "changes_requested" | "cancelled";
+  current_index: number;
+  started_by: string;
+  started_by_name: string;
+  started_at: string;
+  completed_at: string | null;
+  steps: WorkflowRunStep[];
+}
+
+export interface WorkflowRunListItem {
+  id: string;
+  contract_id: string;
+  contract_title: string;
+  definition_name: string;
+  status: string;
+  current_step_name: string;
+  started_by_name: string;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface WorkflowOption {
+  id: string;
+  name: string;
+  is_default: boolean;
+}
+
+export interface ContractWorkflow {
+  run: WorkflowRun | null;
+  can_decide: boolean;
+  default_workflow_id: string | null;
+  available_workflows: WorkflowOption[];
+}
+
 export interface Notification {
   id: string;
   type: string;

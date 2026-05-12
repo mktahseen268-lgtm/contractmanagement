@@ -76,7 +76,8 @@ Open <http://localhost:3000>.
 - **PostgreSQL + Alembic** — schema is owned by Alembic migrations (`0001_initial` materialises the model state; `0002_rls` adds the RLS policies, Postgres-only); `alembic upgrade head` runs on startup (toggle with `RUN_MIGRATIONS_ON_STARTUP`).
 - **Dashboard** — KPI cards (total / pending approvals / awaiting signature / expiring ≤30d / open risks / active value), Quick Create tiles, "Needs your attention", contracts-by-stage distribution, AI recommendations, team activity feed — all live from the API.
 - **Contracts** — list with search + status/type/risk filters + sort + pagination + sidebar saved views; create (metadata form); edit metadata (when `draft`/`changes_requested`); detail page with the lifecycle bar, key terms, AI summary, **a rich block editor for the document** (Tiptap — toolbar with headings / bold / italic / lists / quote / code / divider / undo-redo + an "Insert variable" menu for merge fields `{{counterparty}}`, `{{value}}`, `{{effective_date}}`, … which resolve to the contract's values in the PDF and the read-only view; saves Markdown; editable when `draft`/`changes_requested`, read-only otherwise), per-contract activity, comments, **Files** (generated PDFs), **Versions** (a new version every save/restore — view any version's content read-only, restore one), delete.
-- **Lifecycle state machine** — `draft → in_review → approved → out_for_signature → signed → active → expiring`, plus `changes_requested / rejected / declined / renewed / terminated / voided`. Invalid transitions are rejected (409). Each move is audited and notifies the owner. Light role gates (only approvers/managers/admins can approve).
+- **Lifecycle state machine** — `draft → in_review → approved → out_for_signature → signed → active → expiring`, plus `changes_requested / rejected / declined / renewed / terminated / voided`. Invalid transitions are rejected (409). Each move is audited and notifies the owner.
+- **Approval workflows** — define named workflows under `/workflows`: an ordered list of approval steps, each assigned to a role ("any approver/manager/admin (or above)" or "the workspace owner") or a specific person; mark a workflow active and set it as the default for some contract types. **Submit for approval** on a `draft` contract starts a run through the chosen (or default) workflow → the contract goes to `in_review` → the current step's assignees are notified → they **Approve / Request changes / Reject** from the contract's **Approvals tab** (decisions audited, the owner notified). Approving the last step → `approved`; reject → `rejected`; request changes → `changes_requested`. While a run is active, the generic status actions are blocked (you go through the workflow). Each workflow page lists its runs. (v1 is linear; parallel/conditional steps, SLAs &amp; escalation are designed in docs/10.) Light role gates (managers/admins/owners manage workflows; approvers+ can decide).
 - **Audit log** — append-only record of everything, searchable, paginated; privileged roles (owner/admin/auditor) see all, others see their own actions.
 - **File storage** — uploads go to **S3-compatible object storage** (MinIO in Docker; a local-filesystem fallback at `apps/api/storage/` when `S3_BUCKET` is unset), per-tenant key prefixes (`tenants/<id>/…`), with a `file_objects` table (RLS-isolated like everything else — verified). `POST /files` (multipart), `GET /files/{id}`, `GET /files/{id}/download` (streamed).
 - **OCR & AI workspace** (`/intelligence`) — **drag-and-drop a real document** (stored as above) or use the demo "file name" path → the API **enqueues a Celery job** (`queue: ocr`) → the worker (or, in eager mode, inline) produces a realistic extraction (type, parties, dates, value, per-field confidence scores, detected clauses, AI summary) → the frontend polls the job (`queued → processing → completed`) → "Open uploaded document" / "Create contract from this" (makes a `draft` contract from the extraction).
@@ -96,7 +97,7 @@ contractmanagement/
 ├── apps/
 │   ├── api/                       # FastAPI backend
 │   │   ├── alembic.ini
-│   │   ├── migrations/            # Alembic — env.py + versions/0001_initial, 0002_rls, 0003_files, 0004_auth
+│   │   ├── migrations/            # Alembic — env.py + versions/0001_initial, 0002_rls, 0003_files, 0004_auth, 0005_workflows
 │   │   ├── app/
 │   │   │   ├── main.py            # app factory · CORS · routers · startup (migrations + storage + seed)
 │   │   │   ├── config.py          # Pydantic settings (.env): DB url, Redis, Celery, S3, JWT, cookies, MFA/OTP, email/SMTP, CORS …
@@ -104,21 +105,22 @@ contractmanagement/
 │   │   │   ├── storage.py         # object-storage abstraction — S3Backend (boto3) / LocalFsBackend
 │   │   │   ├── email.py           # email sender — console backend (logs) / smtp backend
 │   │   │   ├── pdf.py             # ReportLab contract-PDF renderer (letterhead · key terms · markdown body · DRAFT watermark)
-│   │   │   ├── models.py          # Tenant, User(+mfa), Contract, ContractVersion, Comment, AuditLog, Notification, OcrJob, FileObject, Session, OtpCode, RecoveryCode
+│   │   │   ├── models.py          # Tenant, User(+mfa), Contract, ContractVersion, Comment, AuditLog, Notification, OcrJob, FileObject, Session, OtpCode, RecoveryCode, WorkflowDefinition, WorkflowRun, WorkflowRunStep
 │   │   │   ├── schemas.py         # Pydantic request/response models
 │   │   │   ├── security.py        # password hashing · JWT (access + mfa-pending) · opaque tokens / codes
 │   │   │   ├── auth_service.py    # sessions (rotation + reuse detection) · TOTP · recovery codes · email OTP · cookies
+│   │   │   ├── workflow_service.py # the approval-workflow engine — start_run / decide / can_decide / cancel
 │   │   │   ├── deps.py            # auth deps — get_token_payload / get_current_user (sets the RLS tenant context) / current_session_id / require_role
 │   │   │   ├── lifecycle.py       # the contract state machine
 │   │   │   ├── audit.py           # append-audit-entry helper (+ optional notification)
 │   │   │   ├── celery_app.py      # Celery app (broker/backend = Redis; named queues)
 │   │   │   ├── tasks.py           # background tasks — the OCR/AI pipeline (realistic stub)
 │   │   │   ├── seed.py            # demo-data seeder
-│   │   │   └── routers/           # auth (login/MFA/refresh/sessions/password) · contracts · dashboard · audit · files · misc (users/notifications/ocr)
+│   │   │   └── routers/           # auth (login/MFA/refresh/sessions/password) · contracts (incl. submit-for-approval / workflow/decide / pdf / versions) · workflows · dashboard · audit · files · misc (users/notifications/ocr)
 │   │   ├── requirements.txt · Dockerfile · .env.example
 │   └── web/                       # Next.js frontend
-│       ├── src/app/               # (auth)/login, login/mfa, register · (app)/dashboard, contracts/*, intelligence, audit, settings, workflows
-│       ├── src/components/        # ui · shell · lifecycle · widgets · contract-form · security-panel · block-editor (Tiptap)
+│       ├── src/app/               # (auth)/login, login/mfa, register · (app)/dashboard, contracts/*, workflows/*, intelligence, audit, settings
+│       ├── src/components/        # ui · shell · lifecycle · widgets · contract-form · security-panel · block-editor (Tiptap) · workflow-builder
 │       ├── src/lib/               # api (cookie-based; access token in memory) · auth (context, MFA flow) · types · utils
 │       └── tailwind.config.ts     # design tokens — docs/03 §0
 └── docker-compose.yml             # postgres · redis · minio · api · worker · web
@@ -135,7 +137,8 @@ This scaffold prioritises "clone and run". Before shipping, see the relevant doc
 - ~~**Storage**: S3-compatible object storage + a `files` table + generated contract PDFs~~ ✅ **done** (MinIO / local-fs fallback; ReportLab PDF render via Celery). Still TODO for prod: presigned PUT/GET URLs (so the browser uploads/downloads direct to S3 instead of streaming through the API), per-tenant encryption keys, lifecycle tiering, antivirus scan on ingest, faithful block-document PDF rendering + sealed/signed copies with the audit certificate (docs/11, docs/18, docs/19).
 - ~~**Auth**: rotating refresh tokens (httpOnly cookies, reuse detection) + MFA (TOTP) + OTP~~ ✅ **done.** Still TODO: encrypt the stored TOTP secret at rest (currently plaintext), **SSO (SAML/OIDC) + SCIM** provisioning, **step-up auth** (re-prompt for password/MFA on sensitive actions like role changes / workspace delete), WebAuthn/passkeys, rate-limiting on the auth endpoints, and email-verification on signup (docs/19).
 - **The block editor** ✅ a first cut (Tiptap, Markdown round-trip, toolbar, merge variables that resolve in the PDF/preview, a version-history tab with view & restore). TODO: the slash (`/`) command menu, variables as styled inline node-chips (not literal `{{...}}` text), clause inserts from a library, inline comments & suggestions (redlines), a side-by-side version diff, real-time collaboration (docs/11).
-- **The workflow canvas, e-signature placement & signing ceremony, reports & analytics, billing, the external client portal, real-time presence, Arabic/RTL** — all designed in `docs/`, not yet built here.
+- **Approval workflows** ✅ a first cut (linear step-list builder, run lifecycle, the Approvals tab, run history). TODO: the visual node-graph canvas; parallel groups & conditional routing; SLAs + reminders + escalation; a "My approvals" inbox + the dashboard surfacing where *you* are the blocker; workflow versioning so editing a definition doesn't affect in-flight runs (docs/10).
+- **E-signature placement & signing ceremony, reports & analytics, billing, the external client portal, real-time presence, Arabic/RTL** — all designed in `docs/`, not yet built here.
 - **Hardening**: rate limiting, security headers/CSP, audit-log hash chaining, observability (OTel/Prometheus/Sentry), CI, container scanning, backups (docs/18, docs/19).
 
 ---

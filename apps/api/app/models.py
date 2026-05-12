@@ -173,6 +173,55 @@ class RecoveryCode(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
 
 
+class WorkflowDefinition(Base):
+    """A named, ordered list of approval steps. v1 is linear (sequential); parallel/conditional
+    steps, SLAs and escalation are planned (docs/10)."""
+
+    __tablename__ = "workflow_definitions"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(20), default="draft")  # draft | active | archived
+    default_for_types: Mapped[list] = mapped_column(JSON, default=list)  # contract types this is the default workflow for
+    steps: Mapped[list] = mapped_column(JSON, default=list)  # [{name, assignee_kind: role|user, assignee_value}]
+    created_by: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+class WorkflowRun(Base):
+    __tablename__ = "workflow_runs"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    contract_id: Mapped[str] = mapped_column(ForeignKey("contracts.id"), index=True)
+    definition_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    definition_name: Mapped[str] = mapped_column(String(200), default="")
+    status: Mapped[str] = mapped_column(String(30), default="running", index=True)  # running | approved | rejected | changes_requested | cancelled
+    current_index: Mapped[int] = mapped_column(Integer, default=0)
+    started_by: Mapped[str] = mapped_column(String(32))
+    started_by_name: Mapped[str] = mapped_column(String(200), default="")
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class WorkflowRunStep(Base):
+    __tablename__ = "workflow_run_steps"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.id"), index=True)
+    step_index: Mapped[int] = mapped_column(Integer, default=0)
+    name: Mapped[str] = mapped_column(String(200))
+    assignee_kind: Mapped[str] = mapped_column(String(20), default="role")  # role | user
+    assignee_value: Mapped[str] = mapped_column(String(64), default="approver")
+    status: Mapped[str] = mapped_column(String(30), default="pending")  # pending | active | approved | rejected | changes_requested | skipped
+    decision: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    decided_by_name: Mapped[str] = mapped_column(String(200), default="")
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    comment: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+
+
 class FileObject(Base):
     __tablename__ = "file_objects"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)

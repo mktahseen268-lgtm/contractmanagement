@@ -324,3 +324,112 @@ class OcrJobOut(BaseModel):
     result: dict
     created_contract_id: str | None
     created_at: dt.datetime
+
+
+# ---------- workflows ----------
+
+
+class WorkflowStep(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    assignee_kind: str = "role"  # "role" | "user"
+    assignee_value: str = "approver"  # role name (approver|manager|admin|owner) or a user id
+
+
+class WorkflowOption(BaseModel):
+    id: str
+    name: str
+    is_default: bool = False
+
+
+class WorkflowDefinitionListItem(BaseModel):
+    id: str
+    name: str
+    status: str
+    default_for_types: list[str]
+    step_count: int
+    run_count: int
+    created_at: dt.datetime
+    updated_at: dt.datetime
+
+
+class WorkflowDefinitionDetail(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    name: str
+    status: str
+    default_for_types: list[str]
+    steps: list[WorkflowStep]
+    created_at: dt.datetime
+    updated_at: dt.datetime
+
+
+class WorkflowDefinitionIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    status: str = "draft"
+    default_for_types: list[str] = []
+    steps: list[WorkflowStep] = []
+
+
+class WorkflowDefinitionUpdateIn(BaseModel):
+    name: str | None = None
+    status: str | None = None
+    default_for_types: list[str] | None = None
+    steps: list[WorkflowStep] | None = None
+
+
+class WorkflowRunStepOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    step_index: int
+    name: str
+    assignee_kind: str
+    assignee_value: str
+    status: str
+    decision: str | None
+    decided_by: str | None
+    decided_by_name: str
+    decided_at: dt.datetime | None
+    comment: str
+
+
+class WorkflowRunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    contract_id: str
+    definition_id: str | None
+    definition_name: str
+    status: str
+    current_index: int
+    started_by: str
+    started_by_name: str
+    started_at: dt.datetime
+    completed_at: dt.datetime | None
+    steps: list[WorkflowRunStepOut] = []
+
+
+class WorkflowRunListItem(BaseModel):
+    id: str
+    contract_id: str
+    contract_title: str
+    definition_name: str
+    status: str
+    current_step_name: str
+    started_by_name: str
+    started_at: dt.datetime
+    completed_at: dt.datetime | None
+
+
+class ContractWorkflowOut(BaseModel):
+    run: WorkflowRunOut | None = None
+    can_decide: bool = False
+    default_workflow_id: str | None = None
+    available_workflows: list[WorkflowOption] = []
+
+
+class SubmitForApprovalIn(BaseModel):
+    workflow_id: str | None = None  # None -> the contract type's default active workflow, or no workflow (plain review)
+
+
+class WorkflowDecideIn(BaseModel):
+    decision: str  # approve | reject | changes_requested
+    comment: str = ""

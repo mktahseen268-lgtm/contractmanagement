@@ -51,6 +51,21 @@ def seed_if_empty(db: Session) -> bool:
     db.flush()
     users = [owner, manager, approver, author]
 
+    # default approval workflows
+    db.add_all([
+        models.WorkflowDefinition(tenant_id=tenant.id, name="Standard approval", status="active",
+                                  default_for_types=["msa", "vendor", "service", "nda"],
+                                  steps=[{"name": "Manager review", "assignee_kind": "role", "assignee_value": "manager"}], created_by=owner.id),
+        models.WorkflowDefinition(tenant_id=tenant.id, name="High-value approval", status="active",
+                                  default_for_types=["lease", "employment"],
+                                  steps=[{"name": "Manager review", "assignee_kind": "role", "assignee_value": "manager"},
+                                         {"name": "Owner sign-off", "assignee_kind": "role", "assignee_value": "owner"}], created_by=owner.id),
+        models.WorkflowDefinition(tenant_id=tenant.id, name="Procurement (draft)", status="draft", default_for_types=[],
+                                  steps=[{"name": "Procurement review", "assignee_kind": "role", "assignee_value": "approver"},
+                                         {"name": "Finance review", "assignee_kind": "role", "assignee_value": "manager"},
+                                         {"name": "Owner sign-off", "assignee_kind": "role", "assignee_value": "owner"}], created_by=owner.id),
+    ])
+
     record(db, tenant_id=tenant.id, action="tenant.created", actor=owner, object_type="tenant", object_id=tenant.id, object_label=tenant.name)
 
     today = dt.date.today()

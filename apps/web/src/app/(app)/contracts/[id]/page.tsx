@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
-import { Download, Eye, FileDown, FileText, History, Pencil, RotateCcw, Sparkles, Trash2 } from "lucide-react";
+import { Check, Download, Eye, FileDown, FileText, History, Pencil, RotateCcw, Send, Sparkles, Trash2, Workflow as WorkflowIcon, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton, Textarea } from "@/components/ui";
 
@@ -27,29 +27,48 @@ import {
   formatMoney,
   NEGATIVE_TRANSITIONS,
   resolveContractVariables,
+  timeAgo,
   TRANSITION_LABELS,
   titleCase,
 } from "@/lib/utils";
-import type { ActivityItem, Comment, ContractDetail, FileObject, Version, VersionDetail } from "@/lib/types";
+import type { ActivityItem, Comment, ContractDetail, ContractWorkflow, FileObject, User, Version, VersionDetail, WorkflowRunStep } from "@/lib/types";
 
-type Tab = "overview" | "document" | "activity" | "comments" | "files" | "versions";
+type Tab = "overview" | "approvals" | "document" | "activity" | "comments" | "files" | "versions";
 const EDITABLE_STATUSES = new Set(["draft", "changes_requested"]);
-const TABS: Tab[] = ["overview", "document", "activity", "comments", "files", "versions"];
+const TABS: Tab[] = ["overview", "approvals", "document", "activity", "comments", "files", "versions"];
 
 export default function ContractDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const [contract, setContract] = useState<ContractDetail | null>(null);
+  const [wfState, setWfState] = useState<ContractWorkflow | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
   const [error, setError] = useState("");
   const [pdfBusy, setPdfBusy] = useState(false);
+  const [submitBusy, setSubmitBusy] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
     api.get<ContractDetail>(`/contracts/${id}`).then(setContract).catch((e) => setError(e instanceof ApiError ? e.message : "Couldn't load this contract."));
+    api.get<ContractWorkflow>(`/contracts/${id}/workflow`).then(setWfState).catch(() => setWfState(null));
   }, [id]);
 
   useEffect(load, [load]);
+
+  async function submitForApproval() {
+    if (!contract) return;
+    setSubmitBusy(true);
+    setError("");
+    try {
+      await api.post<ContractDetail>(`/contracts/${contract.id}/submit-for-approval`, {});
+      load();
+      setTab("approvals");
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't submit for approval.");
+    } finally {
+      setSubmitBusy(false);
+    }
+  }
 
   async function transition(toStatus: string) {
     if (!contract) return;
@@ -120,8 +139,11 @@ export default function ContractDetailPage() {
 
   const du = daysUntil(contract.end_date);
   const canEdit = EDITABLE_STATUSES.has(contract.status);
-  const positive = contract.available_transitions.filter((t) => !NEGATIVE_TRANSITIONS.has(t));
-  const negative = contract.available_transitions.filter((t) => NEGATIVE_TRANSITIONS.has(t));
+  const hasActiveRun = wfState?.run?.status === "running";
+  // "Submit for approval" replaces the in_review transition; approve/reject/changes go through the workflow when a run is active.
+  const positive = contract.available_transitions.filter((t) => !NEGATIVE_TRANSITIONS.has(t) && t !== "in_review" && !(hasActiveRun && t === "approved"));
+  const negative = contract.available_transitions.filter((t) => NEGATIVE_TRANSITIONS.has(t) && !(hasActiveRun && (t === "rejected" || t === "changes_requested")));
+  const canSubmit = EDITABLE_STATUSES.has(contract.status) && !hasActiveRun && contract.available_transitions.includes("in_review");
 
   return (
     <div>
@@ -149,6 +171,11 @@ export default function ContractDetailPage() {
         }
         actions={
           <>
+            {canSubmit && (
+              <Button size="sm" onClick={submitForApproval} loading={submitBusy}>
+                <Send className="h-3.5 w-3.5" /> Submit for approval
+              </Button>
+            )}
             <Button variant="secondary" size="sm" onClick={downloadPdf} loading={pdfBusy} title="Generate & download PDF">
               <FileDown className="h-3.5 w-3.5" /> PDF
             </Button>
@@ -235,6 +262,7 @@ export default function ContractDetailPage() {
         </div>
 
         {tab === "overview" && <OverviewTab contract={contract} />}
+        {tab === "approvals" && <ApprovalsTab contract={contract} wf={wfState} onChanged={load} />}
         {tab === "document" && <DocumentTab key={contract.id} contract={contract} />}
         {tab === "activity" && <ActivityTab contractId={contract.id} />}
         {tab === "comments" && <CommentsTab contractId={contract.id} />}
@@ -603,6 +631,224 @@ function VersionsTab({ contract, onRestored, onGoToDocument }: { contract: Contr
           ))}
         </div>
         <p className="mt-3 text-[11px] text-ink-3">A new version is recorded every time the document is saved (or restored). The version sent for signature is the legal artifact.</p>
+      </CardBody>
+    </Card>
+  );
+}
+
+const RUN_STATUS_TONE: Record<string, string> = {
+  running: "text-amber-800 bg-amber-100",
+  approved: "text-emerald-800 bg-emerald-100",
+  rejected: "text-red-800 bg-red-100",
+  changes_requested: "text-orange-800 bg-orange-100",
+  cancelled: "text-slate-600 bg-slate-100",
+};
+const STEP_TONE: Record<string, string> = {
+  active: "text-amber-800 bg-amber-100",
+  approved: "text-emerald-800 bg-emerald-100",
+  rejected: "text-red-800 bg-red-100",
+  changes_requested: "text-orange-800 bg-orange-100",
+  pending: "text-slate-600 bg-slate-100",
+  skipped: "text-slate-500 bg-slate-100",
+};
+
+function ApprovalsTab({ contract, wf, onChanged }: { contract: ContractDetail; wf: ContractWorkflow | null; onChanged: () => void }) {
+  const [users, setUsers] = useState<User[]>([]);
+  const [chosenWf, setChosenWf] = useState<string>("");
+  const [submitBusy, setSubmitBusy] = useState(false);
+  const [decideComment, setDecideComment] = useState("");
+  const [decideBusy, setDecideBusy] = useState<string | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    api.get<User[]>("/users").then(setUsers).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (wf) setChosenWf(wf.default_workflow_id ?? wf.available_workflows[0]?.id ?? "");
+  }, [wf]);
+
+  function assigneeLabel(kind: string, value: string): string {
+    if (kind === "user") {
+      const u = users.find((x) => x.id === value);
+      return u ? u.name : "a specific person";
+    }
+    const m: Record<string, string> = {
+      approver: "Any approver (or above)",
+      manager: "Any manager (or above)",
+      admin: "Any admin (or above)",
+      owner: "The workspace owner",
+    };
+    return m[value] ?? `Role: ${value}`;
+  }
+
+  async function submit() {
+    setSubmitBusy(true);
+    setError("");
+    try {
+      await api.post<ContractDetail>(`/contracts/${contract.id}/submit-for-approval`, { workflow_id: chosenWf || null });
+      onChanged();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't submit for approval.");
+    } finally {
+      setSubmitBusy(false);
+    }
+  }
+
+  async function decide(decision: "approve" | "reject" | "changes_requested") {
+    setDecideBusy(decision);
+    setError("");
+    try {
+      await api.post<ContractDetail>(`/contracts/${contract.id}/workflow/decide`, { decision, comment: decideComment.trim() });
+      setDecideComment("");
+      onChanged();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't record your decision.");
+    } finally {
+      setDecideBusy(null);
+    }
+  }
+
+  if (wf === null) {
+    return (
+      <Card>
+        <CardBody>
+          <Skeleton className="h-24" />
+        </CardBody>
+      </Card>
+    );
+  }
+
+  if (!wf.run) {
+    if (EDITABLE_STATUSES.has(contract.status)) {
+      return (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-1.5">
+              <WorkflowIcon className="h-4 w-4" /> Approvals
+            </CardTitle>
+          </CardHeader>
+          <CardBody className="space-y-3">
+            {error && <ErrorBanner message={error} />}
+            <p className="text-sm text-ink-2">This contract hasn&rsquo;t been submitted for approval yet.</p>
+            {wf.available_workflows.length > 0 ? (
+              <div className="flex flex-wrap items-end gap-2">
+                <div>
+                  <label className="mb-1 block text-[13px] font-medium text-ink-2">Workflow</label>
+                  <select value={chosenWf} onChange={(e) => setChosenWf(e.target.value)} className="h-10 rounded-sm border border-line bg-white px-3 text-sm">
+                    {wf.available_workflows.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name}
+                        {w.is_default ? " (default for this type)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <Button onClick={submit} loading={submitBusy}>
+                  <Send className="h-4 w-4" /> Submit for approval
+                </Button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <Button onClick={submit} loading={submitBusy}>
+                  <Send className="h-4 w-4" /> Submit for review
+                </Button>
+                <span className="text-xs text-ink-3">No active workflows &mdash; it will just go to &ldquo;in review&rdquo;. Create one under Workflows.</span>
+              </div>
+            )}
+          </CardBody>
+        </Card>
+      );
+    }
+    return (
+      <Card>
+        <CardBody>
+          <p className="text-sm text-ink-3">
+            {contract.status === "in_review"
+              ? "This contract is in review but isn’t attached to a workflow — use the status actions in the header to approve, reject, or request changes."
+              : "This contract isn’t in an approval flow."}
+          </p>
+        </CardBody>
+      </Card>
+    );
+  }
+
+  const run = wf.run;
+  const activeStepName = run.steps.find((s) => s.status === "active")?.name ?? "";
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-1.5">
+          <WorkflowIcon className="h-4 w-4" /> {run.definition_name || "Approval workflow"}
+        </CardTitle>
+        <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${RUN_STATUS_TONE[run.status] ?? "text-slate-700 bg-slate-100"}`}>
+          {run.status === "running" ? "In progress" : run.status.replace(/_/g, " ")}
+        </span>
+      </CardHeader>
+      <CardBody>
+        {error && <ErrorBanner message={error} className="mb-3" />}
+        <div className="mb-4 text-xs text-ink-3">
+          Submitted by {run.started_by_name} · {timeAgo(run.started_at)}
+          {run.completed_at ? ` · finished ${timeAgo(run.completed_at)}` : ""}
+        </div>
+        <div className="flex flex-col">
+          {run.steps.map((s, i) => (
+            <div key={s.id}>
+              {i > 0 && <div className="ml-3 h-4 w-px bg-line" />}
+              <div className={`flex items-start gap-3 rounded-lg p-3 ${s.status === "active" ? "border border-amber-300 bg-amber-50" : ""}`}>
+                <span
+                  className={`mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full text-[11px] font-semibold ${
+                    s.status === "approved"
+                      ? "bg-emerald-500 text-white"
+                      : s.status === "rejected" || s.status === "changes_requested"
+                        ? "bg-red-500 text-white"
+                        : s.status === "active"
+                          ? "bg-amber-500 text-white"
+                          : "bg-line text-ink-3"
+                  }`}
+                >
+                  {s.status === "approved" ? <Check className="h-3.5 w-3.5" /> : s.status === "rejected" || s.status === "changes_requested" ? <X className="h-3.5 w-3.5" /> : i + 1}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-medium text-ink">{s.name}</span>
+                    <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${STEP_TONE[s.status] ?? "text-slate-600 bg-slate-100"}`}>{s.status.replace(/_/g, " ")}</span>
+                  </div>
+                  <div className="mt-0.5 text-xs text-ink-3">Assignee: {assigneeLabel(s.assignee_kind, s.assignee_value)}</div>
+                  {s.decided_at && (
+                    <div className="mt-1 text-xs text-ink-2">
+                      {s.decision === "approve" ? "Approved" : s.decision === "reject" ? "Rejected" : "Changes requested"} by {s.decided_by_name} · {formatDateTime(s.decided_at)}
+                      {s.comment && <div className="mt-1 rounded-md bg-surface-2 px-2 py-1 text-ink-2">&ldquo;{s.comment}&rdquo;</div>}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        {wf.can_decide && run.status === "running" && (
+          <div className="mt-4 rounded-lg border border-line bg-surface-2 p-4">
+            <div className="mb-2 text-sm font-medium text-ink">Your decision on &ldquo;{activeStepName}&rdquo;</div>
+            <Textarea
+              rows={2}
+              value={decideComment}
+              onChange={(e) => setDecideComment(e.target.value)}
+              placeholder="Optional note (shown on the step; recommended when rejecting or requesting changes)"
+              className="mb-2"
+            />
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={() => decide("approve")} loading={decideBusy === "approve"} disabled={!!decideBusy}>
+                <Check className="h-3.5 w-3.5" /> Approve
+              </Button>
+              <Button variant="outline" onClick={() => decide("changes_requested")} loading={decideBusy === "changes_requested"} disabled={!!decideBusy}>
+                Request changes
+              </Button>
+              <Button variant="outline" onClick={() => decide("reject")} loading={decideBusy === "reject"} disabled={!!decideBusy}>
+                <X className="h-3.5 w-3.5" /> Reject
+              </Button>
+            </div>
+          </div>
+        )}
+        {run.status === "running" && !wf.can_decide && <p className="mt-4 text-xs text-ink-3">Waiting on the assignee of the current step.</p>}
       </CardBody>
     </Card>
   );
