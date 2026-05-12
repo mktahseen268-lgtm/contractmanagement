@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
 import { CONTRACT_TYPES } from "@/lib/utils";
-import { Button, Card, CardBody, ErrorBanner, Field, Input, Select, Textarea } from "@/components/ui";
+import { Button, Card, CardBody, ErrorBanner, Field, Input, Select } from "@/components/ui";
 import type { ContractDetail } from "@/lib/types";
 
 export interface ContractFormValues {
@@ -19,7 +19,6 @@ export interface ContractFormValues {
   renewal_type: string;
   governing_law: string;
   tags: string;
-  body: string;
 }
 
 function emptyValues(currency = "USD"): ContractFormValues {
@@ -35,7 +34,6 @@ function emptyValues(currency = "USD"): ContractFormValues {
     renewal_type: "none",
     governing_law: "",
     tags: "",
-    body: "",
   };
 }
 
@@ -52,7 +50,6 @@ export function fromContract(c: ContractDetail): ContractFormValues {
     renewal_type: c.renewal_type,
     governing_law: c.governing_law,
     tags: c.tags.join(", "),
-    body: c.body,
   };
 }
 
@@ -69,7 +66,6 @@ function toPayload(v: ContractFormValues) {
     renewal_type: v.renewal_type,
     governing_law: v.governing_law.trim(),
     tags: v.tags.split(",").map((t) => t.trim()).filter(Boolean),
-    body: v.body,
   };
 }
 
@@ -171,9 +167,9 @@ export function ContractForm({
           <Field label="Tags" hint="Comma-separated.">
             <Input value={v.tags} onChange={(e) => set("tags", e.target.value)} placeholder="renewal, priority" />
           </Field>
-          <Field label="Document" hint="Markdown is fine for this build — this is the contract body.">
-            <Textarea rows={10} value={v.body} onChange={(e) => set("body", e.target.value)} placeholder={"# Master Services Agreement\n\nThis Agreement is made between …"} className="font-mono text-[13px]" />
-          </Field>
+          <p className="text-xs text-ink-3">
+            The contract document itself is written in the rich editor on the contract’s <span className="font-medium text-ink-2">Document</span> tab once it’s created.
+          </p>
         </CardBody>
       </Card>
       <div className="flex items-center justify-end gap-2">

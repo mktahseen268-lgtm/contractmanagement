@@ -2,10 +2,16 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
 import { Download, FileDown, FileText, Pencil, Sparkles, Trash2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton, Textarea } from "@/components/ui";
+
+const BlockEditor = dynamic(() => import("@/components/block-editor").then((m) => m.BlockEditor), {
+  ssr: false,
+  loading: () => <div className="cm-doc min-h-[42vh] px-1 py-2 text-sm text-ink-3">Loading editor…</div>,
+});
 import { PageHeader } from "@/components/shell";
 import { ActivityFeed } from "@/components/widgets";
 import { LifecycleBar, RiskBadge, StatusPill } from "@/components/lifecycle";
@@ -228,7 +234,7 @@ export default function ContractDetailPage() {
         </div>
 
         {tab === "overview" && <OverviewTab contract={contract} />}
-        {tab === "document" && <DocumentTab body={contract.body} />}
+        {tab === "document" && <DocumentTab key={contract.id} contract={contract} />}
         {tab === "activity" && <ActivityTab contractId={contract.id} />}
         {tab === "comments" && <CommentsTab contractId={contract.id} />}
         {tab === "files" && <FilesTab contractId={contract.id} />}
@@ -298,14 +304,62 @@ function Row({ k, v }: { k: string; v: React.ReactNode }) {
   );
 }
 
-function DocumentTab({ body }: { body: string }) {
+function DocumentTab({ contract }: { contract: ContractDetail }) {
+  const editable = EDITABLE_STATUSES.has(contract.status);
+  const [md, setMd] = useState<string>(contract.body || "");
+  const [baseline, setBaseline] = useState<string>(contract.body || "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [savedNote, setSavedNote] = useState("");
+  const dirty = md !== baseline;
+
+  async function save() {
+    setSaving(true);
+    setError("");
+    setSavedNote("");
+    try {
+      await api.patch<ContractDetail>(`/contracts/${contract.id}`, { body: md });
+      setBaseline(md);
+      setSavedNote("Saved — a new version was recorded.");
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't save the document.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <Card>
+      {editable && (
+        <CardHeader>
+          <CardTitle className="flex items-center gap-1.5">
+            <FileText className="h-4 w-4" /> Document
+            {dirty && <span className="text-xs font-normal text-amber-700">· unsaved changes</span>}
+          </CardTitle>
+          <div className="flex items-center gap-2">
+            {savedNote && !dirty && <span className="text-xs text-ok">{savedNote}</span>}
+            <Button size="sm" variant="ghost" onClick={() => setMd(baseline)} disabled={!dirty || saving}>
+              Discard
+            </Button>
+            <Button size="sm" onClick={save} loading={saving} disabled={!dirty}>
+              Save
+            </Button>
+          </div>
+        </CardHeader>
+      )}
       <CardBody>
-        {body.trim() ? (
-          <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed text-ink">{body}</pre>
-        ) : (
-          <p className="text-sm text-ink-3">This contract has no document body yet — edit it to add one.</p>
+        {error && <ErrorBanner message={error} className="mb-3" />}
+        {!editable && (
+          <p className="mb-3 text-xs text-ink-3">
+            This contract is “{titleCase(contract.status)}” — the document is read-only. Return it to draft to edit.
+          </p>
+        )}
+        <BlockEditor value={baseline} editable={editable} onChange={editable ? setMd : undefined} />
+        {editable && (
+          <details className="mt-4 text-xs text-ink-3">
+            <summary className="cursor-pointer select-none">Markdown source</summary>
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-surface-2 p-3 font-mono text-[11px] text-ink-2">{md || "(empty)"}</pre>
+          </details>
         )}
       </CardBody>
     </Card>
