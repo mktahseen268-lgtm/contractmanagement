@@ -213,6 +213,10 @@ class VersionOut(BaseModel):
     created_at: dt.datetime
 
 
+class VersionDetailOut(VersionOut):
+    body: str
+
+
 # ---------- dashboard ----------
 
 

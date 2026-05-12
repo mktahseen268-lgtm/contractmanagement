@@ -163,6 +163,18 @@ export interface FileObject {
   created_at: string;
 }
 
+export interface Version {
+  id: string;
+  version_no: number;
+  change_summary: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface VersionDetail extends Version {
+  body: string;
+}
+
 export interface OcrJob {
   id: string;
   status: string;

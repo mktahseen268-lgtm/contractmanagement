@@ -120,6 +120,38 @@ def is_draftish(status: str) -> bool:
     return status in _DRAFTISH
 
 
+_VAR_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
+
+
+def contract_variables(contract, org_name: str) -> dict[str, str]:
+    """The merge-field values available in a contract document ({{name}})."""
+    return {
+        "counterparty": contract.counterparty or "",
+        "our_entity": org_name,
+        "org": org_name,
+        "us": org_name,
+        "title": contract.title or "",
+        "reference_no": contract.reference_no or "",
+        "ref": contract.reference_no or "",
+        "type": (contract.type or "other").replace("_", " ").title(),
+        "value": _fmt_money(contract.value, contract.currency),
+        "currency": contract.currency or "",
+        "effective_date": _fmt_date(contract.effective_date),
+        "end_date": _fmt_date(contract.end_date),
+        "governing_law": contract.governing_law or "—",
+        "renewal_type": (contract.renewal_type or "none").replace("_", " ").title(),
+        "department": contract.department or "—",
+        "status": (contract.status or "").replace("_", " ").title(),
+    }
+
+
+def substitute_variables(text: str, contract, org_name: str) -> str:
+    if not text or "{{" not in text:
+        return text or ""
+    vals = contract_variables(contract, org_name)
+    return _VAR_RE.sub(lambda m: vals.get(m.group(1).lower(), m.group(0)), text)
+
+
 def render_contract_pdf_bytes(*, contract, org_name: str, draft: bool) -> bytes:
     st = _styles()
     buf = io.BytesIO()
@@ -177,11 +209,13 @@ def render_contract_pdf_bytes(*, contract, org_name: str, draft: bool) -> bytes:
     story.append(ft)
     story.append(HRFlowable(width="100%", color=_LINE, spaceBefore=12, spaceAfter=12))
 
-    if getattr(contract, "ai_summary", ""):
+    summary = substitute_variables(getattr(contract, "ai_summary", "") or "", contract, org_name)
+    if summary:
         story.append(Paragraph("<b>AI summary</b> &nbsp;<font size=8 color='#7A8694'>(machine-generated — verify before relying)</font>", st["body"]))
-        story.append(Paragraph(_inline(contract.ai_summary), st["aisum"]))
+        story.append(Paragraph(_inline(summary), st["aisum"]))
 
-    story.extend(_body_flowables(getattr(contract, "body", "") or "", st))
+    body = substitute_variables(getattr(contract, "body", "") or "", contract, org_name)
+    story.extend(_body_flowables(body, st))
 
     doc.build(story, onFirstPage=_decorate, onLaterPages=_decorate)
     return buf.getvalue()

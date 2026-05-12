@@ -261,6 +261,36 @@ def list_versions(contract_id: str, db: Session = Depends(get_db), user: models.
     return [schemas.VersionOut.model_validate(r) for r in rows]
 
 
+def _get_version(db: Session, user: models.User, contract_id: str, version_id: str) -> models.ContractVersion:
+    v = db.get(models.ContractVersion, version_id)
+    if v is None or v.tenant_id != user.tenant_id or v.contract_id != contract_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+    return v
+
+
+@router.get("/{contract_id}/versions/{version_id}", response_model=schemas.VersionDetailOut)
+def get_version(contract_id: str, version_id: str, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.VersionDetailOut:
+    _get_owned_contract(db, user, contract_id)
+    return schemas.VersionDetailOut.model_validate(_get_version(db, user, contract_id, version_id))
+
+
+@router.post("/{contract_id}/versions/{version_id}/restore", response_model=schemas.ContractDetail)
+def restore_version(contract_id: str, version_id: str, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.ContractDetail:
+    c = _get_owned_contract(db, user, contract_id)
+    if user.role not in _EDIT_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to edit contracts.")
+    if c.status not in {"draft", "changes_requested"}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"This contract is '{c.status}' and can't be edited. Return it to draft first.")
+    v = _get_version(db, user, contract_id, version_id)
+    c.body = v.body
+    last = db.scalar(select(func.max(models.ContractVersion.version_no)).where(models.ContractVersion.contract_id == c.id)) or 0
+    db.add(models.ContractVersion(tenant_id=user.tenant_id, contract_id=c.id, version_no=last + 1, body=c.body, change_summary=f"Restored v{v.version_no}", created_by=user.id))
+    record(db, tenant_id=user.tenant_id, action="contract.version_restored", actor=user, object_type="contract", object_id=c.id, object_label=c.title, ip=client_ip(request), meta={"restored_version": v.version_no, "restored_version_id": version_id})
+    db.commit()
+    db.refresh(c)
+    return _detail(db, c)
+
+
 # ---------- per-contract activity ----------
 
 

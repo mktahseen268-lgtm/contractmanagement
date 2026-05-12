@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
-import { Download, FileDown, FileText, Pencil, Sparkles, Trash2 } from "lucide-react";
+import { Download, Eye, FileDown, FileText, History, Pencil, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton, Textarea } from "@/components/ui";
 
@@ -26,14 +26,15 @@ import {
   formatDateTime,
   formatMoney,
   NEGATIVE_TRANSITIONS,
+  resolveContractVariables,
   TRANSITION_LABELS,
   titleCase,
 } from "@/lib/utils";
-import type { ActivityItem, Comment, ContractDetail, FileObject } from "@/lib/types";
+import type { ActivityItem, Comment, ContractDetail, FileObject, Version, VersionDetail } from "@/lib/types";
 
-type Tab = "overview" | "document" | "activity" | "comments" | "files";
+type Tab = "overview" | "document" | "activity" | "comments" | "files" | "versions";
 const EDITABLE_STATUSES = new Set(["draft", "changes_requested"]);
-const TABS: Tab[] = ["overview", "document", "activity", "comments", "files"];
+const TABS: Tab[] = ["overview", "document", "activity", "comments", "files", "versions"];
 
 export default function ContractDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -238,6 +239,7 @@ export default function ContractDetailPage() {
         {tab === "activity" && <ActivityTab contractId={contract.id} />}
         {tab === "comments" && <CommentsTab contractId={contract.id} />}
         {tab === "files" && <FilesTab contractId={contract.id} />}
+        {tab === "versions" && <VersionsTab contract={contract} onRestored={load} onGoToDocument={() => setTab("document")} />}
       </div>
     </div>
   );
@@ -351,13 +353,17 @@ function DocumentTab({ contract }: { contract: ContractDetail }) {
         {error && <ErrorBanner message={error} className="mb-3" />}
         {!editable && (
           <p className="mb-3 text-xs text-ink-3">
-            This contract is “{titleCase(contract.status)}” — the document is read-only. Return it to draft to edit.
+            This contract is “{titleCase(contract.status)}” — the document is read-only (merge variables shown resolved). Return it to draft to edit.
           </p>
         )}
-        <BlockEditor value={baseline} editable={editable} onChange={editable ? setMd : undefined} />
+        <BlockEditor
+          value={editable ? baseline : resolveContractVariables(contract.body || "", contract)}
+          editable={editable}
+          onChange={editable ? setMd : undefined}
+        />
         {editable && (
           <details className="mt-4 text-xs text-ink-3">
-            <summary className="cursor-pointer select-none">Markdown source</summary>
+            <summary className="cursor-pointer select-none">Markdown source · merge variables look like <code>{"{{counterparty}}"}</code> and resolve in the PDF / read-only view</summary>
             <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-surface-2 p-3 font-mono text-[11px] text-ink-2">{md || "(empty)"}</pre>
           </details>
         )}
@@ -504,6 +510,99 @@ function FilesTab({ contractId }: { contractId: string }) {
         <p className="mt-3 text-[11px] text-ink-3">
           Generated PDFs are stored in S3-compatible object storage (or a local-filesystem fallback) and are tenant-isolated. Drafts carry a “DRAFT — not executed” watermark.
         </p>
+      </CardBody>
+    </Card>
+  );
+}
+
+function VersionsTab({ contract, onRestored, onGoToDocument }: { contract: ContractDetail; onRestored: () => void; onGoToDocument: () => void }) {
+  const editable = EDITABLE_STATUSES.has(contract.status);
+  const [versions, setVersions] = useState<Version[] | null>(null);
+  const [viewing, setViewing] = useState<VersionDetail | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [note, setNote] = useState("");
+
+  const load = useCallback(() => {
+    api.get<Version[]>(`/contracts/${contract.id}/versions`).then(setVersions).catch(() => setVersions([]));
+  }, [contract.id]);
+  useEffect(load, [load]);
+
+  async function view(v: Version) {
+    if (viewing?.id === v.id) {
+      setViewing(null);
+      return;
+    }
+    try {
+      setViewing(await api.get<VersionDetail>(`/contracts/${contract.id}/versions/${v.id}`));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't load that version.");
+    }
+  }
+
+  async function restore(v: Version) {
+    if (!window.confirm(`Restore v${v.version_no}? The document will be reset to that version (a new version is recorded).`)) return;
+    setBusy(true);
+    setError("");
+    setNote("");
+    try {
+      await api.post<ContractDetail>(`/contracts/${contract.id}/versions/${v.id}/restore`);
+      setNote(`Restored v${v.version_no} — see the Document tab.`);
+      onRestored();
+      load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't restore that version.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-1.5">
+          <History className="h-4 w-4" /> Version history
+        </CardTitle>
+        {note && (
+          <button onClick={onGoToDocument} className="text-xs text-accent hover:underline">
+            {note}
+          </button>
+        )}
+      </CardHeader>
+      <CardBody>
+        {error && <ErrorBanner message={error} className="mb-3" />}
+        {versions === null && <Skeleton className="h-20" />}
+        {versions && versions.length === 0 && <p className="text-sm text-ink-3">No versions yet.</p>}
+        <div className="divide-y divide-line">
+          {versions?.map((v, i) => (
+            <div key={v.id} className="py-3">
+              <div className="flex items-center gap-3 text-sm">
+                <span className="grid h-7 w-9 place-items-center rounded-md bg-surface-3 text-xs font-semibold text-ink-2 tnum">v{v.version_no}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="text-ink">
+                    {v.change_summary || "—"}
+                    {i === 0 && <span className="ml-2 rounded-full bg-accent-subtle px-1.5 py-0.5 text-[10px] font-medium text-accent">current</span>}
+                  </div>
+                  <div className="text-xs text-ink-3">{formatDateTime(v.created_at)}</div>
+                </div>
+                <Button size="sm" variant="ghost" onClick={() => view(v)}>
+                  <Eye className="h-3.5 w-3.5" /> {viewing?.id === v.id ? "Hide" : "View"}
+                </Button>
+                {editable && i !== 0 && (
+                  <Button size="sm" variant="outline" onClick={() => restore(v)} disabled={busy}>
+                    <RotateCcw className="h-3.5 w-3.5" /> Restore
+                  </Button>
+                )}
+              </div>
+              {viewing?.id === v.id && (
+                <div className="mt-2 rounded-lg border border-line bg-surface-2 p-1">
+                  <BlockEditor key={`v-${v.id}`} value={viewing.body || ""} editable={false} />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        <p className="mt-3 text-[11px] text-ink-3">A new version is recorded every time the document is saved (or restored). The version sent for signature is the legal artifact.</p>
       </CardBody>
     </Card>
   );

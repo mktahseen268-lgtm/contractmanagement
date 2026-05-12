@@ -52,6 +52,62 @@ export function daysUntil(s: string | null | undefined): number | null {
   return Math.ceil((d - Date.now()) / 86_400_000);
 }
 
+// merge fields available in a contract document — kept in sync with the backend's pdf.contract_variables
+export const CONTRACT_VARIABLES: { key: string; label: string }[] = [
+  { key: "counterparty", label: "Counterparty" },
+  { key: "our_entity", label: "Our entity" },
+  { key: "value", label: "Value" },
+  { key: "currency", label: "Currency" },
+  { key: "effective_date", label: "Effective date" },
+  { key: "end_date", label: "End date" },
+  { key: "reference_no", label: "Reference #" },
+  { key: "governing_law", label: "Governing law" },
+  { key: "type", label: "Contract type" },
+  { key: "renewal_type", label: "Renewal type" },
+  { key: "department", label: "Department" },
+  { key: "status", label: "Status" },
+];
+
+interface VariableSource {
+  counterparty?: string;
+  currency?: string;
+  value?: number;
+  effective_date?: string | null;
+  end_date?: string | null;
+  reference_no?: string;
+  governing_law?: string;
+  type?: string;
+  renewal_type?: string;
+  department?: string;
+  status?: string;
+  title?: string;
+}
+
+/** Client-side {{var}} substitution (used for read-only document previews; the PDF does its own server-side pass). */
+export function resolveContractVariables(text: string, c: VariableSource, orgName?: string): string {
+  if (!text || !text.includes("{{")) return text || "";
+  const org = orgName || "Our entity";
+  const vals: Record<string, string> = {
+    counterparty: c.counterparty || "",
+    our_entity: org,
+    org,
+    us: org,
+    title: c.title || "",
+    reference_no: c.reference_no || "",
+    ref: c.reference_no || "",
+    type: titleCase(c.type || "other"),
+    value: c.value ? formatMoney(c.value, c.currency) : "—",
+    currency: c.currency || "",
+    effective_date: formatDate(c.effective_date),
+    end_date: formatDate(c.end_date),
+    governing_law: c.governing_law || "—",
+    renewal_type: titleCase(c.renewal_type || "none"),
+    department: c.department || "—",
+    status: titleCase(c.status || ""),
+  };
+  return text.replace(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g, (m, k) => vals[String(k).toLowerCase()] ?? m);
+}
+
 export function formatBytes(n: number): string {
   if (!n) return "0 B";
   if (n < 1024) return `${n} B`;

@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "tiptap-markdown";
 import {
   Bold,
+  Braces,
+  ChevronDown,
   Code,
   Code2,
   Heading1,
@@ -20,7 +22,7 @@ import {
   Redo2,
   Undo2,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, CONTRACT_VARIABLES } from "@/lib/utils";
 
 interface Cmd {
   icon: typeof Bold;
@@ -69,6 +71,8 @@ export function BlockEditor({
   });
 
   const [, force] = useReducer((x) => x + 1, 0);
+  const [varOpen, setVarOpen] = useState(false);
+  const varRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!editor) return;
     const f = () => force();
@@ -80,6 +84,14 @@ export function BlockEditor({
   useEffect(() => {
     editor?.setEditable(editable);
   }, [editor, editable]);
+  useEffect(() => {
+    if (!varOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (varRef.current && !varRef.current.contains(e.target as Node)) setVarOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [varOpen]);
 
   if (!editor) {
     return <div className="cm-doc min-h-[42vh] px-1 py-2 text-sm text-ink-3">Loading editor…</div>;
@@ -140,6 +152,36 @@ export function BlockEditor({
               })}
             </div>
           ))}
+          <span className="mx-1 h-5 w-px bg-line" />
+          <div ref={varRef} className="relative">
+            <button
+              type="button"
+              title="Insert a merge variable"
+              onClick={() => setVarOpen((o) => !o)}
+              className={cn("flex h-7 items-center gap-1 rounded-md px-2 text-[12px] font-medium text-ink-2 transition-colors hover:bg-surface-3", varOpen && "bg-surface-3")}
+            >
+              <Braces className="h-3.5 w-3.5" /> Variable <ChevronDown className="h-3 w-3" />
+            </button>
+            {varOpen && (
+              <div className="absolute left-0 top-9 z-50 w-52 overflow-hidden rounded-lg border border-line bg-white py-1 shadow-pop">
+                <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-ink-3">Merge fields</div>
+                {CONTRACT_VARIABLES.map((v) => (
+                  <button
+                    key={v.key}
+                    type="button"
+                    onClick={() => {
+                      e.chain().focus().insertContent(`{{${v.key}}}`).run();
+                      setVarOpen(false);
+                    }}
+                    className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm text-ink-2 hover:bg-surface-3"
+                  >
+                    <span>{v.label}</span>
+                    <code className="text-[10px] text-ink-3">{`{{${v.key}}}`}</code>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
       <div className={cn("bg-white px-4 py-3", editable ? "rounded-b-lg border border-t-0 border-line" : "")}>
