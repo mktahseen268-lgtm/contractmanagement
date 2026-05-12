@@ -1,0 +1,79 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cm
+      POSTGRES_PASSWORD: cm
+      POSTGRES_DB: cm
+    ports:
+      - "5432:5432"
+    volumes:
+      - cm_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cm"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  api:
+    build:
+      context: ./apps/api
+    environment:
+      DATABASE_URL: postgresql+psycopg2://cm:cm@db:5432/cm
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: dev-only-change-me-please-0123456789abcdef
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      RUN_MIGRATIONS_ON_STARTUP: "true"
+      AUTO_SEED: "true"
+      CELERY_TASK_ALWAYS_EAGER: "false"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./apps/api
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q ocr,default
+    environment:
+      DATABASE_URL: postgresql+psycopg2://cm:cm@db:5432/cm
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: dev-only-change-me-please-0123456789abcdef
+      RUN_MIGRATIONS_ON_STARTUP: "false"
+      AUTO_SEED: "false"
+      CELERY_TASK_ALWAYS_EAGER: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  web:
+    build:
+      context: ./apps/web
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  cm_pgdata:
