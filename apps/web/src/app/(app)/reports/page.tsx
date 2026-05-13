@@ -1,0 +1,498 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { Calendar, Download, FileSpreadsheet, Gauge, ListChecks, PenLine, TrendingUp } from "lucide-react";
+import { api, ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
+import { Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton } from "@/components/ui";
+import { PageHeader } from "@/components/shell";
+import { KpiCard } from "@/components/widgets";
+import { contractTypeLabel, downloadBlob, formatDate, formatMoney, statusMeta, titleCase } from "@/lib/utils";
+import type { ReportSummary } from "@/lib/types";
+
+type Preset = { label: string; days: number };
+const PRESETS: Preset[] = [
+  { label: "30 days", days: 30 },
+  { label: "90 days", days: 90 },
+  { label: "6 months", days: 180 },
+  { label: "12 months", days: 365 },
+];
+
+function toIso(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function defaultRange(): { from: string; to: string } {
+  const to = new Date();
+  const from = new Date(to);
+  from.setDate(from.getDate() - 90);
+  return { from: toIso(from), to: toIso(to) };
+}
+
+export default function ReportsPage() {
+  const { me } = useAuth();
+  const currency = me?.tenant.currency;
+  const [range, setRange] = useState<{ from: string; to: string }>(defaultRange);
+  const [data, setData] = useState<ReportSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [csvBusy, setCsvBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(() => {
+    setLoading(true);
+    setError("");
+    api
+      .get<ReportSummary>(`/reports/summary?from=${range.from}&to=${range.to}`)
+      .then(setData)
+      .catch((e) => setError(e instanceof ApiError ? e.message : "Couldn't load the report."))
+      .finally(() => setLoading(false));
+  }, [range.from, range.to]);
+  useEffect(load, [load]);
+
+  function applyPreset(days: number) {
+    const to = new Date();
+    const from = new Date(to);
+    from.setDate(from.getDate() - days);
+    setRange({ from: toIso(from), to: toIso(to) });
+  }
+
+  async function exportCsv() {
+    setCsvBusy(true);
+    try {
+      const blob = await api.blob(`/reports/contracts.csv?from=${range.from}&to=${range.to}`);
+      downloadBlob(blob, `contracts_${range.from}_to_${range.to}.csv`);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't export the CSV.");
+    } finally {
+      setCsvBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <PageHeader
+        title="Reports"
+        subtitle="Portfolio analytics — distributions, cycle time, expiring & renewal pipeline, approver throughput."
+        actions={
+          <Button variant="secondary" size="sm" onClick={exportCsv} loading={csvBusy}>
+            <FileSpreadsheet className="h-3.5 w-3.5" /> Export CSV
+          </Button>
+        }
+      />
+
+      <div className="space-y-6 p-6">
+        {/* Range picker */}
+        <Card>
+          <CardBody className="flex flex-wrap items-end gap-3">
+            <div>
+              <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-3">From</label>
+              <input
+                type="date"
+                value={range.from}
+                onChange={(e) => setRange((r) => ({ ...r, from: e.target.value }))}
+                className="h-10 rounded-sm border border-line bg-white px-3 text-sm"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-3">To</label>
+              <input
+                type="date"
+                value={range.to}
+                onChange={(e) => setRange((r) => ({ ...r, to: e.target.value }))}
+                className="h-10 rounded-sm border border-line bg-white px-3 text-sm"
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {PRESETS.map((p) => (
+                <button
+                  key={p.days}
+                  onClick={() => applyPreset(p.days)}
+                  className="rounded-full border border-line bg-white px-3 py-1.5 text-xs font-medium text-ink-2 hover:border-accent hover:text-accent"
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            <div className="ml-auto flex items-center gap-1.5 text-xs text-ink-3">
+              <Calendar className="h-3.5 w-3.5" />
+              {data ? `${formatDate(data.range_from)} → ${formatDate(data.range_to)}` : ""}
+            </div>
+          </CardBody>
+        </Card>
+
+        {error && <ErrorBanner message={error} />}
+
+        {/* KPI strip */}
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          {loading || !data ? (
+            Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-24 rounded-xl" />)
+          ) : (
+            <>
+              <KpiCard label="Total contracts" value={data.total_contracts} href="/contracts" />
+              <KpiCard label="Created in range" value={data.created_in_range} sub={`Last ${daysBetween(data.range_from, data.range_to)} days`} />
+              <KpiCard label="Signed in range" value={data.signed_in_range} sub="Envelopes completed" />
+              <KpiCard label="Active" value={data.active_count} sub={formatMoney(data.active_value, currency)} href="/contracts?status=active" />
+              <KpiCard label="Expiring ≤30d" value={data.expiring_30d} tone={data.expiring_30d ? "warn" : "default"} href="/contracts?status=expiring" />
+              <KpiCard label="Expiring ≤90d" value={data.expiring_90d} tone={data.expiring_90d ? "warn" : "default"} />
+            </>
+          )}
+        </div>
+
+        {/* Distributions row */}
+        <div className="grid gap-6 lg:grid-cols-2">
+          <DistributionCard
+            title="By status"
+            icon={<ListChecks className="h-4 w-4" />}
+            buckets={data?.by_status ?? []}
+            labelOf={(b) => statusMeta(b.label).label}
+            href={(b) => `/contracts?status=${b.label}`}
+            loading={loading}
+          />
+          <DistributionCard
+            title="By type"
+            icon={<ListChecks className="h-4 w-4" />}
+            buckets={data?.by_type ?? []}
+            labelOf={(b) => contractTypeLabel(b.label)}
+            showValue
+            currency={currency}
+            href={(b) => `/contracts?type=${b.label}`}
+            loading={loading}
+          />
+          <DistributionCard
+            title="Risk (open contracts)"
+            icon={<Gauge className="h-4 w-4" />}
+            buckets={data?.by_risk ?? []}
+            labelOf={(b) => titleCase(b.label)}
+            colorOf={(b) =>
+              ({ low: "bg-emerald-500", medium: "bg-amber-500", high: "bg-orange-500", critical: "bg-red-500" })[b.label] ?? "bg-accent"
+            }
+            loading={loading}
+          />
+          <DistributionCard
+            title="Active value by department"
+            icon={<ListChecks className="h-4 w-4" />}
+            buckets={data?.by_department ?? []}
+            labelOf={(b) => b.label}
+            sortBy="value"
+            showValue
+            currency={currency}
+            loading={loading}
+          />
+        </div>
+
+        {/* New per month */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-1.5">
+              <TrendingUp className="h-4 w-4" /> Contracts created over time
+            </CardTitle>
+            <span className="text-xs text-ink-3">{data?.new_per_month.length ?? 0} months</span>
+          </CardHeader>
+          <CardBody>
+            {loading ? (
+              <Skeleton className="h-40" />
+            ) : !data || data.new_per_month.length === 0 ? (
+              <p className="text-sm text-ink-3">No contracts created in this range.</p>
+            ) : (
+              <MonthlySeries points={data.new_per_month} currency={currency} />
+            )}
+          </CardBody>
+        </Card>
+
+        {/* Cycle time + throughput */}
+        <div className="grid gap-6 lg:grid-cols-2">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-1.5">
+                <Gauge className="h-4 w-4" /> Cycle time
+              </CardTitle>
+              <span className="text-xs text-ink-3">In range</span>
+            </CardHeader>
+            <CardBody>
+              {loading || !data ? (
+                <Skeleton className="h-36" />
+              ) : (
+                <div className="grid grid-cols-3 gap-3 text-center">
+                  <CycleCell title="Approval" days={data.cycle_time.approval_avg_days} median={data.cycle_time.approval_median_days} n={data.cycle_time.approval_n} />
+                  <CycleCell title="Signature" days={data.cycle_time.signature_avg_days} median={data.cycle_time.signature_median_days} n={data.cycle_time.signature_n} />
+                  <CycleCell title="End-to-end" days={data.cycle_time.end_to_end_avg_days} n={data.cycle_time.end_to_end_n} sub="created → signed" />
+                </div>
+              )}
+              <p className="mt-3 text-[11px] text-ink-3">Approval = workflow-run completion (started → approved). Signature = envelope sent → completed. End-to-end = contract creation → signed.</p>
+            </CardBody>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-1.5">
+                <PenLine className="h-4 w-4" /> Throughput
+              </CardTitle>
+              <span className="text-xs text-ink-3">In range</span>
+            </CardHeader>
+            <CardBody>
+              {loading || !data ? (
+                <Skeleton className="h-36" />
+              ) : (
+                <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+                  <ThroughputRow label="Workflows started" v={data.throughput.workflow_runs_started} />
+                  <ThroughputRow label="Envelopes sent" v={data.throughput.envelopes_sent} />
+                  <ThroughputRow label="Workflows approved" v={data.throughput.workflow_runs_approved} tone="ok" />
+                  <ThroughputRow label="Envelopes completed" v={data.throughput.envelopes_completed} tone="ok" />
+                  <ThroughputRow label="Changes requested" v={data.throughput.workflow_runs_changes_requested} tone="warn" />
+                  <ThroughputRow label="Envelopes declined" v={data.throughput.envelopes_declined} tone="bad" />
+                  <ThroughputRow label="Workflows rejected" v={data.throughput.workflow_runs_rejected} tone="bad" />
+                  <ThroughputRow label="Envelopes voided" v={data.throughput.envelopes_voided} />
+                </div>
+              )}
+            </CardBody>
+          </Card>
+        </div>
+
+        {/* Expiring pipeline */}
+        <div className="grid gap-6 lg:grid-cols-2">
+          <Card>
+            <CardHeader>
+              <CardTitle>Renewal pipeline</CardTitle>
+              <Link href="/contracts?status=expiring" className="text-xs text-accent hover:underline">
+                See all
+              </Link>
+            </CardHeader>
+            <CardBody>
+              {loading || !data ? (
+                <Skeleton className="h-40" />
+              ) : (
+                <div className="grid grid-cols-4 gap-3 text-center">
+                  {data.expiring_buckets.map((b) => (
+                    <div key={b.label} className="rounded-lg border border-line bg-surface-2 p-3">
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">{b.label}</div>
+                      <div className="mt-1 text-2xl font-semibold text-ink tnum">{b.count}</div>
+                      <div className="mt-0.5 text-[11px] text-ink-3">{formatMoney(b.value, currency)}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <p className="mt-3 text-[11px] text-ink-3">Active / expiring contracts with an end date in the next 180 days, bucketed.</p>
+            </CardBody>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Expiring soonest</CardTitle>
+              <span className="text-xs text-ink-3">{data?.expiring_top.length ?? 0} contracts</span>
+            </CardHeader>
+            <CardBody>
+              {loading || !data ? (
+                <Skeleton className="h-40" />
+              ) : data.expiring_top.length === 0 ? (
+                <p className="text-sm text-ink-3">Nothing expiring in the next 180 days.</p>
+              ) : (
+                <div className="divide-y divide-line">
+                  {data.expiring_top.map((c) => (
+                    <Link key={c.id} href={`/contracts/${c.id}`} className="flex items-center gap-3 py-2.5 hover:bg-surface-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium text-ink">{c.title}</div>
+                        <div className="truncate text-xs text-ink-3">
+                          {c.reference_no}
+                          {c.counterparty ? ` · ${c.counterparty}` : ""}
+                          {c.value ? ` · ${formatMoney(c.value, c.currency)}` : ""}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className={`text-sm font-medium ${c.days_to_end <= 30 ? "text-danger" : c.days_to_end <= 60 ? "text-amber-700" : "text-ink-2"}`}>
+                          {c.days_to_end === 0 ? "today" : c.days_to_end < 0 ? `${-c.days_to_end}d overdue` : `${c.days_to_end}d`}
+                        </div>
+                        <div className="text-xs text-ink-3">{c.end_date ? formatDate(c.end_date) : ""}</div>
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </CardBody>
+          </Card>
+        </div>
+
+        {/* Top approvers */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Top approvers</CardTitle>
+            <span className="text-xs text-ink-3">Decisions in range</span>
+          </CardHeader>
+          <CardBody>
+            {loading || !data ? (
+              <Skeleton className="h-32" />
+            ) : data.top_approvers.length === 0 ? (
+              <p className="text-sm text-ink-3">No workflow decisions have been recorded in this range.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="text-left text-[11px] font-semibold uppercase tracking-wide text-ink-3">
+                    <tr>
+                      <th className="py-2 pr-3">Person</th>
+                      <th className="py-2 pr-3 text-right">Approved</th>
+                      <th className="py-2 pr-3 text-right">Changes</th>
+                      <th className="py-2 pr-3 text-right">Rejected</th>
+                      <th className="py-2 pr-3 text-right">Total</th>
+                      <th className="py-2 pr-3 text-right">Avg response</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-line">
+                    {data.top_approvers.map((a) => (
+                      <tr key={a.user_id}>
+                        <td className="py-2 pr-3 font-medium text-ink">{a.name || "—"}</td>
+                        <td className="py-2 pr-3 text-right text-emerald-700 tnum">{a.approved}</td>
+                        <td className="py-2 pr-3 text-right text-amber-700 tnum">{a.changes_requested}</td>
+                        <td className="py-2 pr-3 text-right text-red-700 tnum">{a.rejected}</td>
+                        <td className="py-2 pr-3 text-right font-semibold text-ink tnum">{a.total}</td>
+                        <td className="py-2 pr-3 text-right text-ink-2 tnum">{formatHours(a.avg_response_hours)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </CardBody>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function daysBetween(from: string, to: string): number {
+  const a = new Date(from).getTime();
+  const b = new Date(to).getTime();
+  return Math.max(Math.round((b - a) / 86400000), 0);
+}
+
+function formatHours(h: number): string {
+  if (!h) return "—";
+  if (h < 1) return `${Math.round(h * 60)}m`;
+  if (h < 48) return `${h.toFixed(1)}h`;
+  return `${(h / 24).toFixed(1)}d`;
+}
+
+function DistributionCard({
+  title,
+  icon,
+  buckets,
+  labelOf,
+  colorOf,
+  href,
+  showValue = false,
+  currency,
+  loading,
+  sortBy = "count",
+}: {
+  title: string;
+  icon?: React.ReactNode;
+  buckets: { label: string; count: number; value: number }[];
+  labelOf: (b: { label: string; count: number; value: number }) => string;
+  colorOf?: (b: { label: string; count: number; value: number }) => string;
+  href?: (b: { label: string; count: number; value: number }) => string;
+  showValue?: boolean;
+  currency?: string;
+  loading?: boolean;
+  sortBy?: "count" | "value";
+}) {
+  const ordered = useMemo(() => [...buckets].sort((a, b) => (sortBy === "value" ? b.value - a.value : b.count - a.count)), [buckets, sortBy]);
+  const max = useMemo(() => Math.max(1, ...ordered.map((b) => (sortBy === "value" ? b.value : b.count))), [ordered, sortBy]);
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-1.5">
+          {icon} {title}
+        </CardTitle>
+        <span className="text-xs text-ink-3">{ordered.length}</span>
+      </CardHeader>
+      <CardBody>
+        {loading ? (
+          <Skeleton className="h-36" />
+        ) : ordered.length === 0 ? (
+          <p className="text-sm text-ink-3">No data.</p>
+        ) : (
+          <div className="space-y-2">
+            {ordered.map((b) => {
+              const pct = ((sortBy === "value" ? b.value : b.count) / max) * 100;
+              const color = colorOf ? colorOf(b) : "bg-accent";
+              const row = (
+                <div className="group">
+                  <div className="mb-1 flex items-baseline justify-between gap-3 text-sm">
+                    <span className="truncate text-ink-2">{labelOf(b)}</span>
+                    <span className="shrink-0 text-ink tabular-nums">
+                      {b.count}
+                      {showValue ? <span className="ml-1 text-xs text-ink-3">· {formatMoney(b.value, currency)}</span> : null}
+                    </span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-surface-3">
+                    <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.max(pct, 2)}%` }} />
+                  </div>
+                </div>
+              );
+              return href ? (
+                <Link key={b.label} href={href(b)} className="block rounded-md p-1 hover:bg-surface-2">
+                  {row}
+                </Link>
+              ) : (
+                <div key={b.label} className="p-1">{row}</div>
+              );
+            })}
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
+function MonthlySeries({ points, currency }: { points: { label: string; count: number; value: number }[]; currency?: string }) {
+  const max = Math.max(1, ...points.map((p) => p.count));
+  return (
+    <div className="flex items-end gap-1 overflow-x-auto pb-1">
+      {points.map((p) => {
+        const h = Math.max((p.count / max) * 100, 2);
+        return (
+          <div key={p.label} className="flex min-w-[36px] flex-1 flex-col items-center" title={`${p.label}: ${p.count} contracts · ${formatMoney(p.value, currency)}`}>
+            <div className="flex h-32 w-full items-end">
+              <div className="w-full rounded-t bg-accent/80 transition-colors hover:bg-accent" style={{ height: `${h}%` }} />
+            </div>
+            <div className="mt-1 text-[10px] text-ink-3">{p.label.slice(5)}/{p.label.slice(2, 4)}</div>
+            <div className="text-[10px] font-medium text-ink-2">{p.count}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CycleCell({ title, days, median, n, sub }: { title: string; days: number; median?: number; n: number; sub?: string }) {
+  return (
+    <div className="rounded-lg border border-line bg-surface-2 p-3">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">{title}</div>
+      <div className="mt-1 text-2xl font-semibold text-ink tnum">{days ? `${days.toFixed(1)}d` : "—"}</div>
+      <div className="mt-0.5 text-[11px] text-ink-3">
+        {n ? (
+          <>
+            {median !== undefined ? `median ${median.toFixed(1)}d · ` : ""}
+            n={n}
+          </>
+        ) : (
+          "no completed runs"
+        )}
+      </div>
+      {sub && <div className="mt-0.5 text-[10px] text-ink-3">{sub}</div>}
+    </div>
+  );
+}
+
+function ThroughputRow({ label, v, tone = "default" }: { label: string; v: number; tone?: "default" | "ok" | "warn" | "bad" }) {
+  const cls = {
+    default: "text-ink",
+    ok: "text-emerald-700",
+    warn: "text-amber-700",
+    bad: "text-red-700",
+  }[tone];
+  return (
+    <div className="flex items-baseline justify-between gap-3 border-b border-line py-1.5 last:border-0">
+      <span className="text-ink-2">{label}</span>
+      <span className={`text-base font-semibold tabular-nums ${cls}`}>{v}</span>
+    </div>
+  );
+}

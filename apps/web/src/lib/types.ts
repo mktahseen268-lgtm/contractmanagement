@@ -308,6 +308,86 @@ export interface VersionDetail extends Version {
   body: string;
 }
 
+// ---------- reports & analytics ----------
+
+export interface ReportBucket {
+  label: string;
+  count: number;
+  value: number;
+}
+
+export interface ReportSeriesPoint {
+  label: string;
+  count: number;
+  value: number;
+}
+
+export interface ReportCycleTime {
+  approval_avg_days: number;
+  approval_median_days: number;
+  approval_n: number;
+  signature_avg_days: number;
+  signature_median_days: number;
+  signature_n: number;
+  end_to_end_avg_days: number;
+  end_to_end_n: number;
+}
+
+export interface ReportThroughput {
+  workflow_runs_started: number;
+  workflow_runs_approved: number;
+  workflow_runs_rejected: number;
+  workflow_runs_changes_requested: number;
+  envelopes_sent: number;
+  envelopes_completed: number;
+  envelopes_declined: number;
+  envelopes_voided: number;
+}
+
+export interface ReportApprover {
+  user_id: string;
+  name: string;
+  approved: number;
+  rejected: number;
+  changes_requested: number;
+  total: number;
+  avg_response_hours: number;
+}
+
+export interface ReportExpiringItem {
+  id: string;
+  reference_no: string;
+  title: string;
+  counterparty: string;
+  end_date: string | null;
+  days_to_end: number;
+  value: number;
+  currency: string;
+  status: string;
+}
+
+export interface ReportSummary {
+  range_from: string; // YYYY-MM-DD
+  range_to: string;
+  total_contracts: number;
+  created_in_range: number;
+  signed_in_range: number;
+  active_count: number;
+  active_value: number;
+  expiring_30d: number;
+  expiring_90d: number;
+  by_status: ReportBucket[];
+  by_type: ReportBucket[];
+  by_risk: ReportBucket[];
+  by_department: ReportBucket[];
+  new_per_month: ReportSeriesPoint[];
+  cycle_time: ReportCycleTime;
+  throughput: ReportThroughput;
+  expiring_buckets: ReportBucket[];
+  expiring_top: ReportExpiringItem[];
+  top_approvers: ReportApprover[];
+}
+
 export interface OcrJob {
   id: string;
   status: string;

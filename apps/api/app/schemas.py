@@ -489,6 +489,87 @@ class DeclineIn(BaseModel):
     reason: str = ""
 
 
+# ---------- reports & analytics ----------
+
+
+class ReportBucket(BaseModel):
+    label: str
+    count: int = 0
+    value: float = 0.0
+
+
+class ReportSeriesPoint(BaseModel):
+    label: str       # e.g. "2026-03"
+    count: int = 0
+    value: float = 0.0
+
+
+class ReportCycleTime(BaseModel):
+    approval_avg_days: float = 0.0
+    approval_median_days: float = 0.0
+    approval_n: int = 0
+    signature_avg_days: float = 0.0
+    signature_median_days: float = 0.0
+    signature_n: int = 0
+    end_to_end_avg_days: float = 0.0
+    end_to_end_n: int = 0
+
+
+class ReportThroughput(BaseModel):
+    workflow_runs_started: int = 0
+    workflow_runs_approved: int = 0
+    workflow_runs_rejected: int = 0
+    workflow_runs_changes_requested: int = 0
+    envelopes_sent: int = 0
+    envelopes_completed: int = 0
+    envelopes_declined: int = 0
+    envelopes_voided: int = 0
+
+
+class ReportApprover(BaseModel):
+    user_id: str
+    name: str
+    approved: int = 0
+    rejected: int = 0
+    changes_requested: int = 0
+    total: int = 0
+    avg_response_hours: float = 0.0
+
+
+class ReportExpiringItem(BaseModel):
+    id: str
+    reference_no: str
+    title: str
+    counterparty: str
+    end_date: dt.date | None = None
+    days_to_end: int = 0
+    value: float = 0.0
+    currency: str = "USD"
+    status: str = ""
+
+
+class ReportSummaryOut(BaseModel):
+    range_from: dt.date
+    range_to: dt.date
+    total_contracts: int = 0          # all in workspace (current)
+    created_in_range: int = 0         # created_at within [from, to]
+    signed_in_range: int = 0          # envelopes completed within [from, to]
+    active_count: int = 0
+    active_value: float = 0.0
+    expiring_30d: int = 0
+    expiring_90d: int = 0
+    by_status: list[ReportBucket] = []
+    by_type: list[ReportBucket] = []
+    by_risk: list[ReportBucket] = []
+    by_department: list[ReportBucket] = []
+    new_per_month: list[ReportSeriesPoint] = []
+    cycle_time: ReportCycleTime = ReportCycleTime()
+    throughput: ReportThroughput = ReportThroughput()
+    expiring_buckets: list[ReportBucket] = []      # "0–30d" / "31–60d" / "61–90d" / "91–180d"
+    expiring_top: list[ReportExpiringItem] = []    # the 10 soonest
+    top_approvers: list[ReportApprover] = []       # by total decisions in range
+
+
 class SigningInfoOut(BaseModel):
     """Public (token-auth) signing-page data."""
     valid: bool

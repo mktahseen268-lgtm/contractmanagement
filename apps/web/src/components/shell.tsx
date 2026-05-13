@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  BarChart3,
   Bell,
   FileText,
   LayoutDashboard,
@@ -25,6 +26,7 @@ const RAIL: { href: string; label: string; icon: typeof FileText; match: (p: str
   { href: "/dashboard", label: "Home", icon: LayoutDashboard, match: (p) => p.startsWith("/dashboard") },
   { href: "/contracts", label: "Contracts", icon: FileText, match: (p) => p.startsWith("/contracts") },
   { href: "/workflows", label: "Workflows", icon: Workflow, match: (p) => p.startsWith("/workflows") },
+  { href: "/reports", label: "Reports", icon: BarChart3, match: (p) => p.startsWith("/reports") },
   { href: "/intelligence", label: "Intelligence", icon: Sparkles, match: (p) => p.startsWith("/intelligence") },
   { href: "/audit", label: "Audit log", icon: ShieldCheck, match: (p) => p.startsWith("/audit") },
   { href: "/settings", label: "Settings", icon: Settings, match: (p) => p.startsWith("/settings") },
@@ -232,6 +234,13 @@ function Sidebar({ pathname }: { pathname: string }) {
     return (
       <div className="mt-4 flex-1 px-3 text-[13px] text-ink-3">
         <p>OCR &amp; AI workspace. Upload a scanned contract, review the extracted fields, then create a contract from it.</p>
+      </div>
+    );
+  }
+  if (pathname.startsWith("/reports")) {
+    return (
+      <div className="mt-4 flex-1 px-3 text-[13px] text-ink-3">
+        <p>Portfolio analytics — totals, distributions, cycle time, expiring &amp; renewal pipeline, approver throughput. Use the range picker at the top of the page and export the underlying contracts as CSV.</p>
       </div>
     );
   }
