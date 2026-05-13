@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from .. import lifecycle, models, schemas
 from .. import renewal_service
 from .. import signing_service as sig
+from .. import webhook_service
 from .. import workflow_service as wf
 from ..audit import record
 from ..database import get_db
@@ -244,6 +245,17 @@ def transition(contract_id: str, data: schemas.TransitionIn, request: Request, d
     )
     db.commit()
     db.refresh(c)
+    # fire outbound webhooks: a generic status_changed event + a specific terminal event when applicable
+    payload = {"contract_id": c.id, "reference_no": c.reference_no, "title": c.title, "from": prev, "to": target, "actor": {"id": user.id, "name": user.name}}
+    try:
+        webhook_service.dispatch(db, tenant_id=user.tenant_id, event="contract.status_changed", data=payload)
+        terminal = {"signed": "contract.signed", "active": "contract.active", "renewed": "contract.renewed",
+                    "expired": "contract.expired", "terminated": "contract.terminated", "voided": "contract.voided"}
+        if target in terminal:
+            webhook_service.dispatch(db, tenant_id=user.tenant_id, event=terminal[target], data=payload)
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
     return _detail(db, c)
 
 

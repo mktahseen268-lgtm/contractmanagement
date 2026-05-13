@@ -22,6 +22,15 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     }
   }, [me?.tenant.accent_color]);
 
+  // RTL / LTR flip based on tenant locale (Arabic ⇒ rtl)
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const loc = (me?.tenant.locale || "en").toLowerCase();
+    const isRtl = loc.startsWith("ar") || loc.startsWith("he") || loc.startsWith("fa") || loc.startsWith("ur");
+    document.documentElement.setAttribute("dir", isRtl ? "rtl" : "ltr");
+    document.documentElement.setAttribute("lang", loc.slice(0, 2));
+  }, [me?.tenant.locale]);
+
   if (loading || !me) {
     return (
       <div className="grid h-screen place-items-center bg-canvas">

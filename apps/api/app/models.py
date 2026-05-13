@@ -290,6 +290,83 @@ class SignatureEvent(Base):
     meta: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
 
 
+class ContractTemplate(Base):
+    """A reusable contract template — body (with {{variables}}) + default metadata so a user can
+    spin up a fresh draft in one click. Tenant-scoped; visibility scoped by RLS."""
+
+    __tablename__ = "contract_templates"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(String(500), default="")
+    contract_type: Mapped[str] = mapped_column(String(50), default="other")
+    body: Mapped[str] = mapped_column(Text, default="")
+    default_currency: Mapped[str] = mapped_column(String(3), default="USD")
+    default_term_months: Mapped[int] = mapped_column(Integer, default=12)
+    default_renewal_type: Mapped[str] = mapped_column(String(20), default="none")
+    default_risk_level: Mapped[str] = mapped_column(String(20), default="low")
+    default_governing_law: Mapped[str] = mapped_column(String(100), default="")
+    default_tags: Mapped[list] = mapped_column(JSON, default=list)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    usage_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_by: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+class ApiKey(Base):
+    """Long-lived bearer token for headless integrations (CI / scripts / 3rd-party apps). Stored
+    as a SHA-256 hash; the plaintext is only returned once at creation time. Tenant-scoped + role-
+    inherited from the creator (key acts on that user's behalf, with their role)."""
+
+    __tablename__ = "api_keys"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200))                  # human label e.g. "CI pipeline"
+    prefix: Mapped[str] = mapped_column(String(12), index=True)     # first 8 chars of the token, for display + lookup
+    token_hash: Mapped[str] = mapped_column(String(64), index=True, unique=True)
+    last_used_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+
+
+class WebhookEndpoint(Base):
+    """Outbound webhook destination — the workspace's URL we POST events to. v1 covers
+    contract.signed / .expired / .renewed / .completed-style events. Each delivery is signed with
+    an HMAC-SHA256 (header `X-CM-Signature`) using the secret stored here."""
+
+    __tablename__ = "webhook_endpoints"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    url: Mapped[str] = mapped_column(String(800))
+    description: Mapped[str] = mapped_column(String(300), default="")
+    secret: Mapped[str] = mapped_column(String(64))                # opaque random, used for HMAC
+    events: Mapped[list] = mapped_column(JSON, default=list)        # ["*"] for all, or e.g. ["contract.signed"]
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+    last_delivery_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    last_status: Mapped[str] = mapped_column(String(20), default="")  # "" | "ok" | "failed"
+
+
+class WebhookDelivery(Base):
+    """One attempted POST to a webhook endpoint. Logged for visibility + retry."""
+
+    __tablename__ = "webhook_deliveries"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    endpoint_id: Mapped[str] = mapped_column(ForeignKey("webhook_endpoints.id"), index=True)
+    event: Mapped[str] = mapped_column(String(60))
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)  # pending|ok|failed
+    response_code: Mapped[int] = mapped_column(Integer, default=0)
+    response_snippet: Mapped[str] = mapped_column(String(500), default="")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now, index=True)
+    delivered_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class BackgroundJob(Base):
     """A user-visible long-running job (PDF generation, envelope sealing, renewals sweep, …)
     surfaced in the Progress Tray. v1 is a simple record-and-poll. Tenant-scoped."""

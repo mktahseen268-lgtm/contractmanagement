@@ -176,8 +176,8 @@ def list_users(db: Session = Depends(get_db), user: models.User = Depends(get_cu
     return [schemas.UserOut.model_validate(r) for r in rows]
 
 
-@router.post("/users", response_model=schemas.UserOut, status_code=status.HTTP_201_CREATED)
-def invite_user(data: schemas.UserInviteIn, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.UserOut:
+@router.post("/users", response_model=schemas.UserInviteOut, status_code=status.HTTP_201_CREATED)
+def invite_user(data: schemas.UserInviteIn, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.UserInviteOut:
     if user.role not in _ADMIN_ROLES:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only owners/admins can add users.")
     if data.role not in {"admin", "manager", "author", "approver", "reviewer", "viewer", "auditor"}:
@@ -185,11 +185,19 @@ def invite_user(data: schemas.UserInviteIn, request: Request, db: Session = Depe
     email = data.email.lower()
     if db.scalar(select(models.User).where(models.User.tenant_id == user.tenant_id, func.lower(models.User.email) == email)) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A user with this email already exists in this workspace.")
+    # password: caller-provided, or auto-generated (returned once + emailed)
+    import secrets
+
+    plain_password = data.password
+    generated = False
+    if not plain_password:
+        plain_password = secrets.token_urlsafe(9)  # ~12-char readable string
+        generated = True
     colors = ["#3E7BFA", "#8B7BF5", "#2BC0D4", "#F6B83C", "#F5736B", "#3FBF7F"]
-    u = models.User(tenant_id=user.tenant_id, email=email, name=data.name, password_hash=security.hash_password(data.password), role=data.role, avatar_color=random.choice(colors))
+    u = models.User(tenant_id=user.tenant_id, email=email, name=data.name, password_hash=security.hash_password(plain_password), role=data.role, avatar_color=random.choice(colors))
     db.add(u)
     db.flush()
-    record(db, tenant_id=user.tenant_id, action="user.invited", actor=user, object_type="user", object_id=u.id, object_label=u.name, ip=client_ip(request), meta={"role": u.role})
+    record(db, tenant_id=user.tenant_id, action="user.invited", actor=user, object_type="user", object_id=u.id, object_label=u.name, ip=client_ip(request), meta={"role": u.role, "auto_password": generated})
     db.commit()
     db.refresh(u)
     # send welcome email through the outbox
@@ -200,15 +208,20 @@ def invite_user(data: schemas.UserInviteIn, request: Request, db: Session = Depe
         login_url = _settings.frontend_url.rstrip("/") + "/login"
         tenant = db.get(models.Tenant, user.tenant_id)
         org = (tenant.name if tenant else "Workspace") or "Workspace"
+        extra = f"\n\nA note from {user.name}:\n{data.welcome_message.strip()}\n" if data.welcome_message and data.welcome_message.strip() else ""
         email_mod.send_email(
             u.email,
             f"You've been added to {org} on Contract Management",
-            f"Hi {u.name},\n\n{user.name} added you to the {org} workspace as {u.role}.\n\nSign in here: {login_url}\nEmail: {u.email}\nTemporary password: {data.password}\n\nPlease change your password after first login (Settings → Security).",
+            f"Hi {u.name},\n\n{user.name} added you to the {org} workspace as {u.role}.\n\nSign in here: {login_url}\nEmail: {u.email}\nTemporary password: {plain_password}\n\nPlease change your password after first login (Settings → Security).{extra}",
             tenant_id=user.tenant_id,
         )
     except Exception:  # noqa: BLE001
         pass
-    return schemas.UserOut.model_validate(u)
+    out = schemas.UserInviteOut.model_validate(u)
+    # Only return the password back to the admin if we generated it — so they can hand it over
+    # in person if email is misconfigured. Caller-supplied passwords are not echoed.
+    out.generated_password = plain_password if generated else None
+    return out
 
 
 # ---------- notifications ----------

@@ -369,6 +369,19 @@ def signing_sign(token: str, data: schemas.SignIn, request: Request, db: Session
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     db.commit()
+    # fire webhooks: per-signature + envelope.completed when applicable
+    try:
+        from .. import webhook_service
+
+        webhook_service.dispatch(
+            db, tenant_id=env.tenant_id, event="envelope.signed",
+            data={"envelope_id": env.id, "contract_id": c.id, "reference_no": c.reference_no, "recipient": {"id": r.id, "name": r.name, "email": r.email}, "envelope_status": env.status},
+        )
+        if env.status == "completed":
+            webhook_service.dispatch(db, tenant_id=env.tenant_id, event="envelope.completed", data={"envelope_id": env.id, "contract_id": c.id, "reference_no": c.reference_no})
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
     if env.status == "completed":
         # render the executed PDF + certificate of completion (in its own session, so commit first)
         from ..tasks import seal_envelope

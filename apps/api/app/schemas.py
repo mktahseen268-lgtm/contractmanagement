@@ -239,6 +239,144 @@ class ObligationUpdateIn(BaseModel):
     status: str | None = None  # "pending" | "done" | "skipped"
 
 
+# ---------- templates ----------
+
+
+class ContractTemplateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str = ""
+    contract_type: str = "other"
+    body: str = ""
+    default_currency: str = "USD"
+    default_term_months: int = 12
+    default_renewal_type: str = "none"
+    default_risk_level: str = "low"
+    default_governing_law: str = ""
+    default_tags: list[str] = []
+    is_active: bool = True
+
+
+class ContractTemplateUpdateIn(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    contract_type: str | None = None
+    body: str | None = None
+    default_currency: str | None = None
+    default_term_months: int | None = None
+    default_renewal_type: str | None = None
+    default_risk_level: str | None = None
+    default_governing_law: str | None = None
+    default_tags: list[str] | None = None
+    is_active: bool | None = None
+
+
+class ContractTemplateOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    name: str
+    description: str
+    contract_type: str
+    body: str
+    default_currency: str
+    default_term_months: int
+    default_renewal_type: str
+    default_risk_level: str
+    default_governing_law: str
+    default_tags: list[str]
+    is_active: bool
+    usage_count: int
+    created_at: dt.datetime
+    updated_at: dt.datetime
+
+
+class UseTemplateIn(BaseModel):
+    """Spawn a contract from a template — override anything the user wants."""
+    title: str = Field(min_length=1, max_length=300)
+    counterparty: str = ""
+    department: str = ""
+    value: float = 0.0
+    effective_date: dt.date | None = None
+    end_date: dt.date | None = None
+    owner_id: str | None = None
+
+
+# ---------- API keys ----------
+
+
+class ApiKeyIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class ApiKeyOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    name: str
+    prefix: str
+    last_used_at: dt.datetime | None
+    revoked_at: dt.datetime | None
+    created_at: dt.datetime
+
+
+class ApiKeyCreateOut(ApiKeyOut):
+    """Includes the plaintext token — only returned once at creation."""
+    token: str = ""
+
+
+# ---------- webhooks ----------
+
+
+_WEBHOOK_EVENTS = [
+    "*",
+    "contract.created", "contract.status_changed", "contract.signed",
+    "contract.renewed", "contract.expired", "contract.terminated", "contract.voided",
+    "envelope.sent", "envelope.signed", "envelope.completed", "envelope.declined",
+    "obligation.overdue",
+]
+
+
+class WebhookEndpointIn(BaseModel):
+    url: str = Field(min_length=8, max_length=800)
+    description: str = ""
+    events: list[str] = ["*"]
+
+
+class WebhookEndpointUpdateIn(BaseModel):
+    url: str | None = None
+    description: str | None = None
+    events: list[str] | None = None
+    is_active: bool | None = None
+
+
+class WebhookEndpointOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    url: str
+    description: str
+    events: list[str]
+    is_active: bool
+    created_at: dt.datetime
+    last_delivery_at: dt.datetime | None
+    last_status: str
+
+
+class WebhookEndpointCreateOut(WebhookEndpointOut):
+    """Includes the signing secret — only returned once at creation."""
+    secret: str
+
+
+class WebhookDeliveryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    endpoint_id: str
+    event: str
+    status: str
+    response_code: int
+    response_snippet: str
+    attempts: int
+    created_at: dt.datetime
+    delivered_at: dt.datetime | None
+
+
 class BackgroundJobOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
@@ -385,7 +523,14 @@ class UserInviteIn(BaseModel):
     email: EmailStr
     name: str
     role: str = "author"
-    password: str = Field(min_length=8, max_length=128)
+    password: str | None = Field(default=None, min_length=8, max_length=128)  # if omitted the server generates one
+    welcome_message: str = ""
+
+
+class UserInviteOut(UserOut):
+    """Returned on POST /users — also includes the temp password (one-shot) so the admin can copy
+    it. The password is also emailed to the new user via the outbox."""
+    generated_password: str | None = None
 
 
 # ---------- files ----------

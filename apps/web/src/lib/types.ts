@@ -109,6 +109,58 @@ export interface SweepResult {
   obligations_overdue: number;
 }
 
+export interface ContractTemplate {
+  id: string;
+  name: string;
+  description: string;
+  contract_type: string;
+  body: string;
+  default_currency: string;
+  default_term_months: number;
+  default_renewal_type: string;
+  default_risk_level: string;
+  default_governing_law: string;
+  default_tags: string[];
+  is_active: boolean;
+  usage_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiKey {
+  id: string;
+  name: string;
+  prefix: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+  token?: string; // only present on create
+}
+
+export interface WebhookEndpoint {
+  id: string;
+  url: string;
+  description: string;
+  events: string[];
+  is_active: boolean;
+  created_at: string;
+  last_delivery_at: string | null;
+  last_status: string;
+  secret?: string; // only present on create
+}
+
+export interface WebhookDelivery {
+  id: string;
+  endpoint_id: string;
+  event: string;
+  status: string;
+  response_code: number;
+  response_snippet: string;
+  attempts: number;
+  created_at: string;
+  delivered_at: string | null;
+}
+
 export interface BackgroundJob {
   id: string;
   type: string;

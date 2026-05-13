@@ -7,6 +7,7 @@ import {
   Activity,
   BarChart3,
   Bell,
+  BookOpen,
   Check,
   FileText,
   Inbox,
@@ -18,6 +19,7 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  Users as UsersIcon,
   Workflow,
   X,
 } from "lucide-react";
@@ -27,14 +29,16 @@ import { cn, timeAgo, titleCase } from "@/lib/utils";
 import { Avatar } from "@/components/ui";
 import type { BackgroundJob, InboxSummary, Notification } from "@/lib/types";
 
-type RailItem = { href: string; label: string; icon: typeof FileText; match: (p: string) => boolean; badgeKey?: "inbox" };
+type RailItem = { href: string; label: string; icon: typeof FileText; match: (p: string) => boolean; badgeKey?: "inbox"; adminOnly?: boolean };
 const RAIL: RailItem[] = [
   { href: "/dashboard", label: "Home", icon: LayoutDashboard, match: (p) => p.startsWith("/dashboard") },
   { href: "/inbox", label: "Inbox", icon: Inbox, match: (p) => p.startsWith("/inbox"), badgeKey: "inbox" },
   { href: "/contracts", label: "Contracts", icon: FileText, match: (p) => p.startsWith("/contracts") },
+  { href: "/templates", label: "Templates", icon: BookOpen, match: (p) => p.startsWith("/templates") },
   { href: "/workflows", label: "Workflows", icon: Workflow, match: (p) => p.startsWith("/workflows") },
   { href: "/reports", label: "Reports", icon: BarChart3, match: (p) => p.startsWith("/reports") },
   { href: "/intelligence", label: "Intelligence", icon: Sparkles, match: (p) => p.startsWith("/intelligence") },
+  { href: "/team", label: "Team", icon: UsersIcon, match: (p) => p.startsWith("/team"), adminOnly: true },
   { href: "/audit", label: "Audit log", icon: ShieldCheck, match: (p) => p.startsWith("/audit") },
   { href: "/settings", label: "Settings", icon: Settings, match: (p) => p.startsWith("/settings") },
 ];
@@ -81,7 +85,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <Link href="/dashboard" className="mb-3 grid h-9 w-9 place-items-center rounded-lg bg-accent text-accent-fg font-bold">
           C
         </Link>
-        {RAIL.map((item) => {
+        {RAIL.filter((item) => !item.adminOnly || me?.user.role === "owner" || me?.user.role === "admin").map((item) => {
           const active = item.match(pathname);
           const Icon = item.icon;
           const badge = item.badgeKey === "inbox" ? inboxCount : 0;
@@ -315,6 +319,20 @@ function Sidebar({ pathname }: { pathname: string }) {
     return (
       <div className="mt-4 flex-1 px-3 text-[13px] text-ink-3">
         <p>Everything waiting on <em>you</em>, across all contracts — approval steps you can decide, and signature requests it&rsquo;s your turn to sign. High-priority items (waiting ≥24h, or high-risk contracts) float to the top.</p>
+      </div>
+    );
+  }
+  if (pathname.startsWith("/team")) {
+    return (
+      <div className="mt-4 flex-1 px-3 text-[13px] text-ink-3">
+        <p>Invite employees, set their role, and deactivate access. Roles drive every permission in the app — see the table below for what each one can do.</p>
+      </div>
+    );
+  }
+  if (pathname.startsWith("/templates")) {
+    return (
+      <div className="mt-4 flex-1 px-3 text-[13px] text-ink-3">
+        <p>A library of reusable contracts. Each template carries a body (with <code>{"{{counterparty}}"}</code> / <code>{"{{value}}"}</code> merge variables) and metadata defaults; one click spawns a fresh draft contract.</p>
       </div>
     );
   }
