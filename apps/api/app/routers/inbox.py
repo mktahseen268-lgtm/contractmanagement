@@ -185,3 +185,86 @@ def inbox(
     if kind in (None, "", "obligation"):
         items.extend(_collect_obligations(db, user))
     return _sorted(items)
+
+
+def _describe_assignee(step: models.WorkflowRunStep, names_by_id: dict[str, str]) -> str:
+    if step.assignee_kind == "user":
+        return f"@{names_by_id.get(step.assignee_value, 'a specific user')}"
+    role = (step.assignee_value or "").capitalize()
+    return f"any {role.lower()} (or above)"
+
+
+@router.get("/sent", response_model=list[schemas.InboxItem])
+def inbox_sent(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+) -> list[schemas.InboxItem]:
+    """Things YOU started that are waiting on someone else — workflow runs you submitted that
+    are still running, and signature envelopes you created that are still out for signature."""
+    items: list[schemas.InboxItem] = []
+    names_by_id = {r[0]: r[1] for r in db.execute(select(models.User.id, models.User.name).where(models.User.tenant_id == user.tenant_id)).all()}
+
+    # --- workflow runs I started, still running
+    rows = db.execute(
+        select(models.WorkflowRun, models.WorkflowRunStep, models.Contract)
+        .join(models.WorkflowRunStep, models.WorkflowRunStep.run_id == models.WorkflowRun.id)
+        .join(models.Contract, models.WorkflowRun.contract_id == models.Contract.id)
+        .where(
+            models.WorkflowRun.tenant_id == user.tenant_id,
+            models.WorkflowRun.started_by == user.id,
+            models.WorkflowRun.status == "running",
+            models.WorkflowRunStep.status == "active",
+        )
+    ).all()
+    for run, step, c in rows:
+        since = step.created_at or run.started_at
+        waiting_h = _waiting_hours(since)
+        items.append(schemas.InboxItem(
+            id=f"sent-step:{step.id}",
+            kind="approval",
+            contract_id=c.id, contract_title=c.title, contract_reference=c.reference_no, contract_status=c.status,
+            contract_type=c.type, risk_level=c.risk_level, value=c.value or 0.0, currency=c.currency,
+            title=f"Waiting on approval — “{c.title}”",
+            subtitle=f"Step {step.step_index + 1}: {step.name} · {_describe_assignee(step, names_by_id)}",
+            since=since, waiting_hours=round(waiting_h, 2),
+            priority=_priority(waiting_hours=waiting_h, risk_level=c.risk_level),
+            href=f"/contracts/{c.id}?tab=approvals",
+        ))
+
+    # --- envelopes I created, still out for signature
+    envs = db.scalars(
+        select(models.SignatureEnvelope).where(
+            models.SignatureEnvelope.tenant_id == user.tenant_id,
+            models.SignatureEnvelope.created_by == user.id,
+            models.SignatureEnvelope.status.in_(["sent", "partially_signed"]),
+        )
+    ).all()
+    for env in envs:
+        c = db.get(models.Contract, env.contract_id)
+        if c is None:
+            continue
+        pending = list(db.scalars(
+            select(models.SignatureRecipient).where(
+                models.SignatureRecipient.envelope_id == env.id,
+                models.SignatureRecipient.kind == "signer",
+                models.SignatureRecipient.status.in_(["sent", "viewed", "created"]),
+            )
+        ).all())
+        if not pending:
+            continue
+        names = ", ".join(p.name for p in pending[:3]) + (f" +{len(pending) - 3}" if len(pending) > 3 else "")
+        since = env.sent_at or env.created_at
+        waiting_h = _waiting_hours(since)
+        items.append(schemas.InboxItem(
+            id=f"sent-env:{env.id}",
+            kind="signature",
+            contract_id=c.id, contract_title=c.title, contract_reference=c.reference_no, contract_status=c.status,
+            contract_type=c.type, risk_level=c.risk_level, value=c.value or 0.0, currency=c.currency,
+            title=f"Waiting on signers — “{c.title}”",
+            subtitle=f"{len(pending)} pending: {names}",
+            since=since, waiting_hours=round(waiting_h, 2),
+            priority=_priority(waiting_hours=waiting_h, risk_level=c.risk_level),
+            href=f"/contracts/{c.id}?tab=signatures",
+        ))
+
+    return _sorted(items)

@@ -671,6 +671,19 @@ class ReportExpiringItem(BaseModel):
     status: str = ""
 
 
+class StuckItem(BaseModel):
+    """Something blocking a contract from moving forward — surfaced in Reports."""
+    kind: str            # "approval_step" | "envelope"
+    contract_id: str
+    contract_title: str
+    contract_reference: str
+    contract_status: str
+    risk_level: str = "low"
+    waiting_hours: float = 0.0
+    detail: str = ""     # "Owner sign-off — waiting on @Mark" / "Envelope — 2 of 3 signed; pending Sam, Tara"
+    href: str = ""
+
+
 class ReportSummaryOut(BaseModel):
     range_from: dt.date
     range_to: dt.date

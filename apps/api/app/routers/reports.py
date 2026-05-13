@@ -289,6 +289,77 @@ def summary(
     )
 
 
+@router.get("/stuck", response_model=list[schemas.StuckItem])
+def reports_stuck(
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+) -> list[schemas.StuckItem]:
+    """Across the workspace: every running approval step + every open signature envelope,
+    sorted oldest-waiting first. The "Where contracts are stuck" card on /reports reads this."""
+    tid = user.tenant_id
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    items: list[schemas.StuckItem] = []
+    names_by_id = {r[0]: r[1] for r in db.execute(select(models.User.id, models.User.name).where(models.User.tenant_id == tid)).all()}
+
+    # active workflow steps
+    rows = db.execute(
+        select(models.WorkflowRunStep, models.WorkflowRun, models.Contract)
+        .join(models.WorkflowRun, models.WorkflowRunStep.run_id == models.WorkflowRun.id)
+        .join(models.Contract, models.WorkflowRun.contract_id == models.Contract.id)
+        .where(
+            models.WorkflowRunStep.tenant_id == tid, models.WorkflowRunStep.status == "active",
+            models.WorkflowRun.status == "running",
+        )
+    ).all()
+    for step, run, c in rows:
+        since = step.created_at or run.started_at
+        waiting_h = max((now - since).total_seconds() / 3600.0, 0.0)
+        if step.assignee_kind == "user":
+            assignee = f"@{names_by_id.get(step.assignee_value, '—')}"
+        else:
+            assignee = f"any {(step.assignee_value or 'approver').lower()}+"
+        items.append(schemas.StuckItem(
+            kind="approval_step", contract_id=c.id, contract_title=c.title, contract_reference=c.reference_no,
+            contract_status=c.status, risk_level=c.risk_level, waiting_hours=round(waiting_h, 1),
+            detail=f"Approval — “{step.name}” → {assignee}", href=f"/contracts/{c.id}?tab=approvals",
+        ))
+
+    # open envelopes
+    envs = db.scalars(
+        select(models.SignatureEnvelope).where(
+            models.SignatureEnvelope.tenant_id == tid,
+            models.SignatureEnvelope.status.in_(["sent", "partially_signed"]),
+        )
+    ).all()
+    for env in envs:
+        c = db.get(models.Contract, env.contract_id)
+        if c is None:
+            continue
+        signers = list(db.scalars(
+            select(models.SignatureRecipient).where(
+                models.SignatureRecipient.envelope_id == env.id,
+                models.SignatureRecipient.kind == "signer",
+            )
+        ).all())
+        pending = [r for r in signers if r.status in ("sent", "viewed", "created")]
+        if not pending:
+            continue
+        signed_n = sum(1 for r in signers if r.status == "signed")
+        since = env.sent_at or env.created_at
+        waiting_h = max((now - since).total_seconds() / 3600.0, 0.0)
+        names = ", ".join(p.name for p in pending[:3]) + (f" +{len(pending) - 3}" if len(pending) > 3 else "")
+        items.append(schemas.StuckItem(
+            kind="envelope", contract_id=c.id, contract_title=c.title, contract_reference=c.reference_no,
+            contract_status=c.status, risk_level=c.risk_level, waiting_hours=round(waiting_h, 1),
+            detail=f"Signature — {signed_n} of {len(signers)} signed; pending {names}",
+            href=f"/contracts/{c.id}?tab=signatures",
+        ))
+
+    items.sort(key=lambda i: -i.waiting_hours)
+    return items[:limit]
+
+
 @router.get("/contracts.csv")
 def contracts_csv(
     date_from: dt.date | None = Query(None, alias="from"),

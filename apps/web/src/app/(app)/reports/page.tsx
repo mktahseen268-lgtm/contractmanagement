@@ -9,7 +9,7 @@ import { Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton } 
 import { PageHeader } from "@/components/shell";
 import { KpiCard } from "@/components/widgets";
 import { contractTypeLabel, downloadBlob, formatDate, formatMoney, statusMeta, titleCase } from "@/lib/utils";
-import type { ReportSummary } from "@/lib/types";
+import type { ReportSummary, StuckItem } from "@/lib/types";
 
 type Preset = { label: string; days: number };
 const PRESETS: Preset[] = [
@@ -35,6 +35,7 @@ export default function ReportsPage() {
   const currency = me?.tenant.currency;
   const [range, setRange] = useState<{ from: string; to: string }>(defaultRange);
   const [data, setData] = useState<ReportSummary | null>(null);
+  const [stuck, setStuck] = useState<StuckItem[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [csvBusy, setCsvBusy] = useState(false);
   const [error, setError] = useState("");
@@ -47,6 +48,7 @@ export default function ReportsPage() {
       .then(setData)
       .catch((e) => setError(e instanceof ApiError ? e.message : "Couldn't load the report."))
       .finally(() => setLoading(false));
+    api.get<StuckItem[]>("/reports/stuck?limit=10").then(setStuck).catch(() => setStuck([]));
   }, [range.from, range.to]);
   useEffect(load, [load]);
 
@@ -311,6 +313,45 @@ export default function ReportsPage() {
           </Card>
         </div>
 
+        {/* Where contracts are stuck */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-1.5">
+              <ListChecks className="h-4 w-4" /> Where contracts are stuck
+            </CardTitle>
+            <span className="text-xs text-ink-3">{stuck?.length ?? 0} blocking · oldest first</span>
+          </CardHeader>
+          <CardBody>
+            {stuck === null ? (
+              <Skeleton className="h-32" />
+            ) : stuck.length === 0 ? (
+              <p className="text-sm text-ink-3">Nothing is blocking right now. 🎉</p>
+            ) : (
+              <div className="divide-y divide-line">
+                {stuck.map((s, i) => (
+                  <Link key={`${s.kind}-${s.contract_id}-${i}`} href={s.href} className="flex flex-wrap items-center gap-3 py-2.5 hover:bg-surface-2">
+                    <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-md ${s.kind === "approval_step" ? "bg-violet-100 text-violet-700" : "bg-emerald-100 text-emerald-700"}`}>
+                      {s.kind === "approval_step" ? "A" : "S"}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium text-ink">{s.contract_title}</div>
+                      <div className="truncate text-xs text-ink-3">
+                        <span className="font-medium text-ink-2">{s.contract_reference}</span> · {s.detail}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className={`text-sm font-semibold tnum ${s.waiting_hours > 168 ? "text-danger" : s.waiting_hours > 24 ? "text-amber-700" : "text-ink-2"}`}>
+                        {formatWait(s.waiting_hours)}
+                      </div>
+                      <div className="text-[11px] text-ink-3">waiting</div>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </CardBody>
+        </Card>
+
         {/* Top approvers */}
         <Card>
           <CardHeader>
@@ -361,6 +402,12 @@ function daysBetween(from: string, to: string): number {
   const a = new Date(from).getTime();
   const b = new Date(to).getTime();
   return Math.max(Math.round((b - a) / 86400000), 0);
+}
+
+function formatWait(h: number): string {
+  if (h < 1) return `${Math.round(h * 60)}m`;
+  if (h < 48) return `${h.toFixed(1)}h`;
+  return `${Math.round(h / 24)}d`;
 }
 
 function formatHours(h: number): string {

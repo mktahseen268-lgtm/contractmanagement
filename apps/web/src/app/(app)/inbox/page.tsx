@@ -11,18 +11,21 @@ import { cn, contractTypeLabel, formatMoney, timeAgo } from "@/lib/utils";
 import type { InboxItem } from "@/lib/types";
 
 type Filter = "all" | "approval" | "signature" | "obligation";
+type Scope = "mine" | "sent";
 
 export default function InboxPage() {
   const [items, setItems] = useState<InboxItem[] | null>(null);
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
+  const [scope, setScope] = useState<Scope>("mine");
 
   const load = useCallback(() => {
+    setItems(null);
     api
-      .get<InboxItem[]>("/inbox")
+      .get<InboxItem[]>(scope === "sent" ? "/inbox/sent" : "/inbox")
       .then(setItems)
       .catch((e) => setError(e instanceof ApiError ? e.message : "Couldn't load your inbox."));
-  }, []);
+  }, [scope]);
   useEffect(load, [load]);
 
   const filtered = useMemo(() => (items ?? []).filter((i) => filter === "all" || i.kind === filter), [items, filter]);
@@ -42,9 +45,23 @@ export default function InboxPage() {
         subtitle={
           items === null
             ? "Loading…"
-            : counts.total === 0
-              ? "Nothing's waiting on you — nicely done."
-              : `${counts.total} item${counts.total === 1 ? "" : "s"} waiting on you${counts.high ? ` · ${counts.high} high priority` : ""}.`
+            : scope === "sent"
+              ? counts.total === 0
+                ? "Nothing you've started is waiting on someone else."
+                : `${counts.total} item${counts.total === 1 ? "" : "s"} you started, waiting on others.`
+              : counts.total === 0
+                ? "Nothing's waiting on you — nicely done."
+                : `${counts.total} item${counts.total === 1 ? "" : "s"} waiting on you${counts.high ? ` · ${counts.high} high priority` : ""}.`
+        }
+        actions={
+          <div className="inline-flex overflow-hidden rounded-full border border-line">
+            <button onClick={() => setScope("mine")} className={cn("px-3 py-1.5 text-xs font-medium", scope === "mine" ? "bg-accent text-accent-fg" : "bg-white text-ink-2 hover:bg-surface-2")}>
+              On you
+            </button>
+            <button onClick={() => setScope("sent")} className={cn("border-l border-line px-3 py-1.5 text-xs font-medium", scope === "sent" ? "bg-accent text-accent-fg" : "bg-white text-ink-2 hover:bg-surface-2")}>
+              Sent
+            </button>
+          </div>
         }
       />
       <div className="space-y-4 p-6">

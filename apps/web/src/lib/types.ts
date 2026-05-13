@@ -461,6 +461,18 @@ export interface ReportExpiringItem {
   status: string;
 }
 
+export interface StuckItem {
+  kind: "approval_step" | "envelope";
+  contract_id: string;
+  contract_title: string;
+  contract_reference: string;
+  contract_status: string;
+  risk_level: string;
+  waiting_hours: number;
+  detail: string;
+  href: string;
+}
+
 export interface ReportSummary {
   range_from: string; // YYYY-MM-DD
   range_to: string;
