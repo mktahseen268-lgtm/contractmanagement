@@ -165,3 +165,23 @@ def seal_envelope(envelope_id: str, tenant_id: str) -> str:
         env.certificate_file_id = _store(cert_bytes, "certificate", f"{ref}_certificate_of_completion")
         db.commit()
         return env.id
+
+
+@celery.task(name="renewals.sweep")
+def sweep_renewals() -> dict:
+    """Walk every tenant's active/expiring contracts, flip lifecycle as appropriate, and post
+    owner reminders. Returns the counts dict. In production this is scheduled via Celery beat
+    (see docs/14 §4); the scaffold also exposes POST /admin/sweep-renewals to run it on-demand."""
+    from . import renewal_service
+
+    with SessionLocal() as db:
+        out = renewal_service.sweep(db)
+        db.commit()
+        return out
+
+
+# Beat schedule: once an hour. Honoured when a beat scheduler is running (celery -A app.celery_app
+# beat ...). For the scaffold the manual endpoint covers most needs.
+celery.conf.beat_schedule = {
+    "renewals-sweep-hourly": {"task": "renewals.sweep", "schedule": 3600.0},
+}

@@ -68,6 +68,7 @@ class Contract(Base):
     tags: Mapped[list] = mapped_column(JSON, default=list)
     body: Mapped[str] = mapped_column(Text, default="")  # the contract document (markdown for the scaffold)
     source: Mapped[str] = mapped_column(String(20), default="manual")  # manual|template|ocr|import
+    renewed_from_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)  # set on the successor when this contract was created by renewing another
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now, onupdate=_now)

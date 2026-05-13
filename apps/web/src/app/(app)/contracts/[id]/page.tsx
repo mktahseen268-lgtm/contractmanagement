@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { Check, Copy, Download, Eye, FileCheck2, FileDown, FileText, History, Pencil, PenLine, RotateCcw, Send, Sparkles, Trash2, Workflow as WorkflowIcon, X } from "lucide-react";
+import { Check, Copy, Download, Eye, FileCheck2, FileDown, FileText, History, Pencil, PenLine, Repeat, RotateCcw, Send, Sparkles, Trash2, Workflow as WorkflowIcon, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton, Textarea } from "@/components/ui";
 
@@ -51,6 +51,8 @@ export default function ContractDetailPage() {
   const [pdfBusy, setPdfBusy] = useState(false);
   const [submitBusy, setSubmitBusy] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [renewOpen, setRenewOpen] = useState(false);
+  const [renewBusy, setRenewBusy] = useState(false);
 
   const load = useCallback(() => {
     api.get<ContractDetail>(`/contracts/${id}`).then(setContract).catch((e) => setError(e instanceof ApiError ? e.message : "Couldn't load this contract."));
@@ -123,6 +125,25 @@ export default function ContractDetailPage() {
     }
   }
 
+  async function submitRenew(effective: string, end: string, summary: string) {
+    if (!contract) return;
+    setRenewBusy(true);
+    setError("");
+    try {
+      const succ = await api.post<ContractDetail>(`/contracts/${contract.id}/renew`, {
+        effective_date: effective || null,
+        end_date: end || null,
+        change_summary: summary,
+      });
+      setRenewOpen(false);
+      router.push(`/contracts/${succ.id}`);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't renew this contract.");
+    } finally {
+      setRenewBusy(false);
+    }
+  }
+
   if (error && !contract) {
     return (
       <div className="p-6">
@@ -155,6 +176,7 @@ export default function ContractDetailPage() {
     (t) => NEGATIVE_TRANSITIONS.has(t) && !(hasActiveRun && (t === "rejected" || t === "changes_requested")) && !(hasActiveEnvelope && (t === "declined" || t === "voided")),
   );
   const canSubmit = EDITABLE_STATUSES.has(contract.status) && !hasActiveRun && contract.available_transitions.includes("in_review");
+  const canRenew = ["active", "expiring", "expired"].includes(contract.status);
 
   return (
     <div>
@@ -187,6 +209,11 @@ export default function ContractDetailPage() {
                 <Send className="h-3.5 w-3.5" /> Submit for approval
               </Button>
             )}
+            {canRenew && (
+              <Button variant="secondary" size="sm" onClick={() => setRenewOpen(true)} title="Create a renewal successor">
+                <Repeat className="h-3.5 w-3.5" /> Renew
+              </Button>
+            )}
             <Button variant="secondary" size="sm" onClick={downloadPdf} loading={pdfBusy} title="Generate & download PDF">
               <FileDown className="h-3.5 w-3.5" /> PDF
             </Button>
@@ -204,8 +231,36 @@ export default function ContractDetailPage() {
         }
       />
 
+      {renewOpen && <RenewModal contract={contract} busy={renewBusy} onCancel={() => setRenewOpen(false)} onSubmit={submitRenew} />}
+
       <div className="space-y-5 p-6">
         {error && <ErrorBanner message={error} />}
+
+        {(contract.renewed_from || contract.renewed_to) && (
+          <Card>
+            <CardBody className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2.5 text-sm">
+              <Repeat className="h-3.5 w-3.5 shrink-0 text-ink-3" />
+              {contract.renewed_from && (
+                <span className="text-ink-2">
+                  Renewed from{" "}
+                  <Link href={`/contracts/${contract.renewed_from.id}`} className="font-medium text-accent hover:underline">
+                    {contract.renewed_from.reference_no}
+                  </Link>
+                  <span className="ml-1 truncate text-ink-3">· {contract.renewed_from.title}</span>
+                </span>
+              )}
+              {contract.renewed_to && (
+                <span className="text-ink-2">
+                  Renewed by{" "}
+                  <Link href={`/contracts/${contract.renewed_to.id}`} className="font-medium text-accent hover:underline">
+                    {contract.renewed_to.reference_no}
+                  </Link>
+                  <span className="ml-1 truncate text-ink-3">· {contract.renewed_to.title}</span>
+                </span>
+              )}
+            </CardBody>
+          </Card>
+        )}
 
         {/* header card: lifecycle + key facts + actions */}
         <Card>
@@ -281,6 +336,77 @@ export default function ContractDetailPage() {
         {tab === "files" && <FilesTab contractId={contract.id} />}
         {tab === "versions" && <VersionsTab contract={contract} onRestored={load} onGoToDocument={() => setTab("document")} />}
       </div>
+    </div>
+  );
+}
+
+function RenewModal({
+  contract,
+  busy,
+  onCancel,
+  onSubmit,
+}: {
+  contract: ContractDetail;
+  busy: boolean;
+  onCancel: () => void;
+  onSubmit: (effective: string, end: string, summary: string) => void;
+}) {
+  // Suggested defaults: effective = old.end_date + 1d (or today); end = +1y unless we can compute the old term length.
+  const today = new Date();
+  function isoPlusDays(d: Date | string | null, days: number): string {
+    const base = d ? new Date(d as string) : new Date(today);
+    base.setDate(base.getDate() + days);
+    return base.toISOString().slice(0, 10);
+  }
+  const suggestedEffective = contract.end_date ? isoPlusDays(contract.end_date, 1) : isoPlusDays(null, 0);
+  let suggestedEnd = isoPlusDays(suggestedEffective, 365);
+  if (contract.effective_date && contract.end_date) {
+    const termDays = Math.max(
+      Math.round((new Date(contract.end_date).getTime() - new Date(contract.effective_date).getTime()) / 86400000),
+      30,
+    );
+    suggestedEnd = isoPlusDays(suggestedEffective, termDays);
+  }
+
+  const [effective, setEffective] = useState(suggestedEffective);
+  const [end, setEnd] = useState(suggestedEnd);
+  const [summary, setSummary] = useState(`Renewed from ${contract.reference_no}`);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onCancel}>
+      <Card className="w-full max-w-md" onClick={(e: React.MouseEvent) => e.stopPropagation()}>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-1.5">
+            <Repeat className="h-4 w-4" /> Renew this contract
+          </CardTitle>
+        </CardHeader>
+        <CardBody className="space-y-3">
+          <p className="text-sm text-ink-2">
+            Creates a fresh <strong>draft</strong> contract with the same metadata, body and parties, linked back to this one.
+            This contract becomes <strong>renewed</strong> and read-only.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-3">New effective</span>
+              <input type="date" value={effective} onChange={(e) => setEffective(e.target.value)} className="h-10 w-full rounded-sm border border-line bg-white px-3 text-sm" />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-3">New end</span>
+              <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} className="h-10 w-full rounded-sm border border-line bg-white px-3 text-sm" />
+            </label>
+          </div>
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-3">What changes? (optional)</span>
+            <input value={summary} onChange={(e) => setSummary(e.target.value)} placeholder="e.g. extended 1y at new rate" className="h-10 w-full rounded-sm border border-line bg-white px-3 text-sm" />
+          </label>
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
+            <Button size="sm" loading={busy} onClick={() => onSubmit(effective, end, summary)}>
+              <Repeat className="h-3.5 w-3.5" /> Renew &amp; open successor
+            </Button>
+          </div>
+        </CardBody>
+      </Card>
     </div>
   );
 }

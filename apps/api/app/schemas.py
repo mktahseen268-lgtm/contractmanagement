@@ -174,12 +174,37 @@ class ContractListItem(BaseModel):
     created_at: dt.datetime
 
 
+class ContractRef(BaseModel):
+    """Lightweight pointer to another contract (the predecessor or successor in a renewal chain)."""
+    id: str
+    reference_no: str
+    title: str
+    status: str = ""
+
+
 class ContractDetail(ContractListItem):
     governing_law: str
     ai_summary: str
     body: str
     created_by: str
     available_transitions: list[str] = []
+    renewed_from_id: str | None = None
+    renewed_from: ContractRef | None = None  # the predecessor we were renewed from (if any)
+    renewed_to: ContractRef | None = None    # the successor that renewed us (if any)
+
+
+class RenewIn(BaseModel):
+    """Inputs to /contracts/{id}/renew — the new term."""
+    effective_date: dt.date | None = None    # defaults to old.end_date + 1 day (or today)
+    end_date: dt.date | None = None          # defaults to effective_date + (old term length) or 12 months
+    change_summary: str = ""                 # appears on the successor's initial version
+    keep_workflow_status: bool = False       # if true, leaves the successor in current status (default: drops to "draft")
+
+
+class SweepResultOut(BaseModel):
+    flagged_expiring: int = 0
+    moved_to_expired: int = 0
+    reminders_sent: int = 0
 
 
 class ContractListOut(BaseModel):

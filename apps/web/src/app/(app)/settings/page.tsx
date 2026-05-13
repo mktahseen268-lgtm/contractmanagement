@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Settings as SettingsIcon, UserPlus } from "lucide-react";
+import { Repeat, Settings as SettingsIcon, UserPlus } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, ApiError } from "@/lib/api";
 import { PageHeader } from "@/components/shell";
 import { SecurityPanel } from "@/components/security-panel";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Field, Input, Select, Skeleton } from "@/components/ui";
 import { titleCase } from "@/lib/utils";
-import type { User } from "@/lib/types";
+import type { SweepResult, User } from "@/lib/types";
 
 export default function SettingsPage() {
   const { me } = useAuth();
@@ -20,6 +20,8 @@ export default function SettingsPage() {
   const [role, setRole] = useState("author");
   const [password, setPassword] = useState("demo1234");
   const [inviting, setInviting] = useState(false);
+  const [sweepBusy, setSweepBusy] = useState(false);
+  const [sweepResult, setSweepResult] = useState<SweepResult | null>(null);
 
   const isAdmin = me?.user.role === "owner" || me?.user.role === "admin";
 
@@ -27,6 +29,19 @@ export default function SettingsPage() {
     api.get<User[]>("/users").then(setUsers).catch(() => setUsers([]));
   }
   useEffect(load, []);
+
+  async function runSweep() {
+    setSweepBusy(true);
+    setError("");
+    try {
+      const r = await api.post<SweepResult>("/admin/sweep-renewals", {});
+      setSweepResult(r);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't run the sweep.");
+    } finally {
+      setSweepBusy(false);
+    }
+  }
 
   async function invite(e: React.FormEvent) {
     e.preventDefault();
@@ -68,6 +83,33 @@ export default function SettingsPage() {
         </Card>
 
         <SecurityPanel />
+
+        {isAdmin && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-1.5">
+                <Repeat className="h-4 w-4" /> Renewals sweep
+              </CardTitle>
+              <Button size="sm" variant="secondary" onClick={runSweep} loading={sweepBusy}>
+                <Repeat className="h-3.5 w-3.5" /> Run now
+              </Button>
+            </CardHeader>
+            <CardBody>
+              <p className="text-sm text-ink-2">
+                Walks every contract in this workspace, flips <code className="rounded bg-surface-2 px-1 text-xs">active → expiring</code> when the end
+                date is within 30 days, and <code className="rounded bg-surface-2 px-1 text-xs">expiring/active → expired</code> when it&rsquo;s past — and
+                posts the owner a reminder at the 30 / 7 / 1-day marks. Runs hourly in production (Celery beat); this button kicks one off now.
+              </p>
+              {sweepResult && (
+                <div className="mt-3 grid grid-cols-3 gap-2 text-center sm:max-w-md">
+                  <SweepStat label="Flagged expiring" v={sweepResult.flagged_expiring} />
+                  <SweepStat label="Moved to expired" v={sweepResult.moved_to_expired} />
+                  <SweepStat label="Reminders sent" v={sweepResult.reminders_sent} />
+                </div>
+              )}
+            </CardBody>
+          </Card>
+        )}
 
         <Card>
           <CardHeader>
@@ -150,6 +192,15 @@ export default function SettingsPage() {
           </CardBody>
         </Card>
       </div>
+    </div>
+  );
+}
+
+function SweepStat({ label, v }: { label: string; v: number }) {
+  return (
+    <div className="rounded-lg border border-line bg-surface-2 p-3">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">{label}</div>
+      <div className="mt-1 text-2xl font-semibold text-ink tnum">{v}</div>
     </div>
   );
 }

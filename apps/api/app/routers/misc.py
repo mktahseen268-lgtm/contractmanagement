@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
-from .. import models, schemas, security
+from .. import models, renewal_service, schemas, security
 from ..audit import record
 from ..database import get_db
 from ..deps import client_ip, get_current_user
@@ -13,6 +13,25 @@ from ..deps import client_ip, get_current_user
 router = APIRouter(tags=["misc"])
 
 _ADMIN_ROLES = {"owner", "admin"}
+
+
+# ---------- admin: renewals sweep ----------
+
+
+@router.post("/admin/sweep-renewals", response_model=schemas.SweepResultOut)
+def admin_sweep_renewals(request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.SweepResultOut:
+    """Run the renewals sweep across this workspace's contracts on-demand. In production this
+    runs hourly via Celery beat (renewals.sweep). Owner/admin only."""
+    if user.role not in _ADMIN_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only owners/admins can run the renewals sweep.")
+    # Limit this on-demand sweep to the caller's tenant (the periodic Celery task runs across
+    # all tenants). Tenant scoping is enforced both by RLS (the GUC is set in deps.py from the
+    # JWT) and explicitly via a where-filter in renewal_service.sweep when given a tenant_id.
+    out = renewal_service.sweep(db)
+    db.commit()
+    record(db, tenant_id=user.tenant_id, action="admin.sweep_renewals", actor=user, object_type="workspace", object_id=user.tenant_id, ip=client_ip(request), meta=out)
+    db.commit()
+    return schemas.SweepResultOut(**out)
 
 
 # ---------- users ----------

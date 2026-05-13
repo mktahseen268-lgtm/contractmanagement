@@ -82,12 +82,28 @@ export interface ContractListItem {
   created_at: string;
 }
 
+export interface ContractRef {
+  id: string;
+  reference_no: string;
+  title: string;
+  status: string;
+}
+
 export interface ContractDetail extends ContractListItem {
   governing_law: string;
   ai_summary: string;
   body: string;
   created_by: string;
   available_transitions: string[];
+  renewed_from_id: string | null;
+  renewed_from: ContractRef | null;
+  renewed_to: ContractRef | null;
+}
+
+export interface SweepResult {
+  flagged_expiring: number;
+  moved_to_expired: number;
+  reminders_sent: number;
 }
 
 export interface Paginated<T> {

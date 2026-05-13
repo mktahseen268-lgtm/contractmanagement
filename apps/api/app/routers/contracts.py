@@ -5,6 +5,7 @@ from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from .. import lifecycle, models, schemas
+from .. import renewal_service
 from .. import signing_service as sig
 from .. import workflow_service as wf
 from ..audit import record
@@ -97,6 +98,9 @@ def _detail(db: Session, c: models.Contract) -> schemas.ContractDetail:
     d = schemas.ContractDetail.model_validate(c)
     d.owner_name = names.get(c.owner_id, "")
     d.available_transitions = lifecycle.available(c.status)
+    pred, succ = renewal_service.chain_links(db, c)
+    d.renewed_from = schemas.ContractRef(id=pred.id, reference_no=pred.reference_no, title=pred.title, status=pred.status) if pred else None
+    d.renewed_to = schemas.ContractRef(id=succ.id, reference_no=succ.reference_no, title=succ.title, status=succ.status) if succ else None
     return d
 
 
@@ -240,6 +244,33 @@ def transition(contract_id: str, data: schemas.TransitionIn, request: Request, d
     db.commit()
     db.refresh(c)
     return _detail(db, c)
+
+
+# ---------- renew ----------
+
+
+@router.post("/{contract_id}/renew", response_model=schemas.ContractDetail, status_code=status.HTTP_201_CREATED)
+def renew_contract(contract_id: str, data: schemas.RenewIn, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.ContractDetail:
+    """Clone the contract into a draft successor + mark the predecessor `renewed`."""
+    c = _get_owned_contract(db, user, contract_id)
+    if user.role not in _EDIT_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to renew contracts.")
+    try:
+        successor = renewal_service.renew(
+            db, contract=c, by_user=user,
+            effective_date=data.effective_date, end_date=data.end_date, change_summary=data.change_summary,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    record(db, tenant_id=user.tenant_id, action="contract.renewed", actor=user,
+           object_type="contract", object_id=c.id, object_label=c.title, ip=client_ip(request),
+           meta={"successor_id": successor.id, "successor_reference": successor.reference_no})
+    record(db, tenant_id=user.tenant_id, action="contract.created", actor=user,
+           object_type="contract", object_id=successor.id, object_label=successor.title, ip=client_ip(request),
+           meta={"source": "renewal", "predecessor_id": c.id, "predecessor_reference": c.reference_no})
+    db.commit()
+    db.refresh(successor)
+    return _detail(db, successor)
 
 
 # ---------- comments ----------
