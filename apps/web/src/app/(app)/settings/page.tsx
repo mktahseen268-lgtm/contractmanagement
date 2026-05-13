@@ -8,10 +8,10 @@ import { PageHeader } from "@/components/shell";
 import { SecurityPanel } from "@/components/security-panel";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Field, Input, Select, Skeleton } from "@/components/ui";
 import { titleCase } from "@/lib/utils";
-import type { SweepResult, User } from "@/lib/types";
+import type { SweepResult, Tenant, User } from "@/lib/types";
 
 export default function SettingsPage() {
-  const { me } = useAuth();
+  const { me, refreshMe } = useAuth();
   const [users, setUsers] = useState<User[] | null>(null);
   const [error, setError] = useState("");
   // invite form
@@ -63,24 +63,8 @@ export default function SettingsPage() {
     <div>
       <PageHeader title="Settings" subtitle={me?.tenant.name} />
       <div className="space-y-5 p-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>Workspace</CardTitle>
-          </CardHeader>
-          <CardBody>
-            <dl className="grid gap-x-8 gap-y-3 sm:grid-cols-2 text-sm">
-              <Row k="Name" v={me?.tenant.name} />
-              <Row k="Subdomain" v={`${me?.tenant.slug}.app`} />
-              <Row k="Plan" v={titleCase(me?.tenant.plan ?? "")} />
-              <Row k="Default currency" v={me?.tenant.currency} />
-              <Row k="Locale" v={me?.tenant.locale} />
-              <Row k="Your role" v={titleCase(me?.user.role ?? "")} />
-            </dl>
-            <p className="mt-4 text-xs text-ink-3">
-              Branding, SSO/SCIM, custom fields, billing, retention &amp; the rest are specced in docs/08 &amp; docs/19.
-            </p>
-          </CardBody>
-        </Card>
+        <WorkspaceCard isAdmin={!!isAdmin} onSaved={refreshMe} />
+        <BrandingCard isAdmin={!!isAdmin} onSaved={refreshMe} />
 
         <SecurityPanel />
 
@@ -138,20 +122,7 @@ export default function SettingsPage() {
                     </tr>
                   )}
                   {users?.map((u) => (
-                    <tr key={u.id} className="border-b border-line last:border-0">
-                      <td className="py-2.5">
-                        <span className="inline-flex items-center gap-2">
-                          <Avatar name={u.name} color={u.avatar_color} size={24} />
-                          <span className="font-medium text-ink">{u.name}</span>
-                          {u.id === me?.user.id && <Badge tone="accent">you</Badge>}
-                        </span>
-                      </td>
-                      <td className="py-2.5 text-ink-2">{u.email}</td>
-                      <td className="py-2.5 text-ink-2">{titleCase(u.role)}</td>
-                      <td className="py-2.5">
-                        <Badge tone={u.is_active ? "neutral" : "neutral"}>{u.is_active ? "Active" : "Deactivated"}</Badge>
-                      </td>
-                    </tr>
+                    <UserRow key={u.id} u={u} isMe={u.id === me?.user.id} isAdmin={!!isAdmin} myRole={me?.user.role ?? "viewer"} onChanged={load} onError={setError} />
                   ))}
                 </tbody>
               </table>
@@ -193,6 +164,206 @@ export default function SettingsPage() {
         </Card>
       </div>
     </div>
+  );
+}
+
+function WorkspaceCard({ isAdmin, onSaved }: { isAdmin: boolean; onSaved: () => void }) {
+  const [t, setT] = useState<Tenant | null>(null);
+  const [name, setName] = useState("");
+  const [currency, setCurrency] = useState("");
+  const [locale, setLocale] = useState("");
+  const [tz, setTz] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+
+  useEffect(() => {
+    api.get<Tenant>("/tenant").then((tt) => {
+      setT(tt); setName(tt.name); setCurrency(tt.currency); setLocale(tt.locale); setTz(tt.timezone);
+    }).catch(() => {});
+  }, []);
+
+  async function save() {
+    setBusy(true); setErr("");
+    try {
+      const tt = await api.patch<Tenant>("/tenant", { name: name || null, currency: currency || null, locale: locale || null, timezone: tz || null });
+      setT(tt); setSavedAt(Date.now());
+      onSaved();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : "Couldn't save.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!t) return <Card><CardBody><Skeleton className="h-24" /></CardBody></Card>;
+  return (
+    <Card>
+      <CardHeader><CardTitle>Workspace</CardTitle></CardHeader>
+      <CardBody className="space-y-3">
+        {err && <ErrorBanner message={err} />}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Name">
+            <Input value={name} onChange={(e) => setName(e.target.value)} disabled={!isAdmin} />
+          </Field>
+          <Field label="Subdomain" hint="Read-only">
+            <Input value={`${t.slug}.app`} disabled readOnly />
+          </Field>
+          <Field label="Default currency">
+            <Input value={currency} onChange={(e) => setCurrency(e.target.value.toUpperCase())} maxLength={3} disabled={!isAdmin} />
+          </Field>
+          <Field label="Locale">
+            <Input value={locale} onChange={(e) => setLocale(e.target.value)} maxLength={10} disabled={!isAdmin} />
+          </Field>
+          <Field label="Timezone" hint="e.g. UTC, Europe/London, Asia/Dubai">
+            <Input value={tz} onChange={(e) => setTz(e.target.value)} disabled={!isAdmin} />
+          </Field>
+          <Field label="Plan" hint="Read-only">
+            <Input value={titleCase(t.plan)} disabled readOnly />
+          </Field>
+        </div>
+        {isAdmin && (
+          <div className="flex items-center justify-end gap-3">
+            {savedAt && <span className="text-xs text-emerald-700">Saved.</span>}
+            <Button size="sm" onClick={save} loading={busy}>Save workspace</Button>
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
+const PRESET_ACCENTS = ["#3E7BFA", "#8B7BF5", "#2BC0D4", "#F6B83C", "#F5736B", "#3FBF7F", "#111827"];
+
+function BrandingCard({ isAdmin, onSaved }: { isAdmin: boolean; onSaved: () => void }) {
+  const [t, setT] = useState<Tenant | null>(null);
+  const [color, setColor] = useState("#3E7BFA");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    api.get<Tenant>("/tenant").then((tt) => { setT(tt); setColor(tt.accent_color); }).catch(() => {});
+  }, []);
+
+  function preview(c: string) {
+    setColor(c);
+    if (typeof document !== "undefined") document.documentElement.style.setProperty("--color-accent", c);
+  }
+
+  async function save() {
+    setBusy(true); setErr("");
+    try {
+      await api.patch("/tenant", { accent_color: color });
+      onSaved();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : "Couldn't save.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!t) return null;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Branding</CardTitle>
+        <span className="text-xs text-ink-3">Accent color · used throughout the app</span>
+      </CardHeader>
+      <CardBody className="space-y-3">
+        {err && <ErrorBanner message={err} />}
+        <div className="flex flex-wrap items-center gap-2">
+          {PRESET_ACCENTS.map((c) => (
+            <button
+              key={c}
+              onClick={() => isAdmin && preview(c)}
+              disabled={!isAdmin}
+              className={`grid h-9 w-9 place-items-center rounded-full ring-offset-2 ${color.toLowerCase() === c.toLowerCase() ? "ring-2 ring-ink/70" : ""}`}
+              style={{ backgroundColor: c }}
+              title={c}
+            />
+          ))}
+          <input
+            type="color"
+            value={color}
+            onChange={(e) => preview(e.target.value)}
+            disabled={!isAdmin}
+            className="h-9 w-12 rounded-md border border-line bg-white"
+            title="Custom"
+          />
+          <span className="ml-2 font-mono text-xs text-ink-3">{color}</span>
+          {isAdmin && (
+            <Button size="sm" className="ml-auto" loading={busy} onClick={save}>
+              Save branding
+            </Button>
+          )}
+        </div>
+        <div className="rounded-md border border-line bg-surface-2 p-3 text-sm">
+          <span className="text-ink-3">Preview: </span>
+          <span className="font-medium text-accent">A button or active link</span> uses this colour.
+        </div>
+      </CardBody>
+    </Card>
+  );
+}
+
+const ALL_ROLES = ["owner", "admin", "manager", "author", "approver", "reviewer", "viewer", "auditor"];
+
+function UserRow({ u, isMe, isAdmin, myRole, onChanged, onError }: { u: User; isMe: boolean; isAdmin: boolean; myRole: string; onChanged: () => void; onError: (e: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  // admins can't touch owners
+  const canEdit = isAdmin && (u.role !== "owner" || myRole === "owner");
+  const canDeactivate = canEdit && !isMe;
+
+  async function patch(payload: Partial<{ role: string; is_active: boolean }>) {
+    setBusy(true);
+    try {
+      await api.patch<User>(`/users/${u.id}`, payload);
+      onError("");
+      onChanged();
+    } catch (e) {
+      onError(e instanceof ApiError ? e.message : "Couldn't update the user.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <tr className="border-b border-line last:border-0">
+      <td className="py-2.5">
+        <span className="inline-flex items-center gap-2">
+          <Avatar name={u.name} color={u.avatar_color} size={24} />
+          <span className="font-medium text-ink">{u.name}</span>
+          {isMe && <Badge tone="accent">you</Badge>}
+        </span>
+      </td>
+      <td className="py-2.5 text-ink-2">{u.email}</td>
+      <td className="py-2.5">
+        {canEdit && !isMe ? (
+          <select
+            value={u.role}
+            onChange={(e) => patch({ role: e.target.value })}
+            disabled={busy}
+            className="h-8 rounded-sm border border-line bg-white px-2 text-sm"
+          >
+            {ALL_ROLES.map((r) => (
+              <option key={r} value={r}>{titleCase(r)}</option>
+            ))}
+          </select>
+        ) : (
+          <span className="text-ink-2">{titleCase(u.role)}</span>
+        )}
+      </td>
+      <td className="py-2.5">
+        <div className="flex items-center gap-2">
+          <Badge tone="neutral">{u.is_active ? "Active" : "Deactivated"}</Badge>
+          {canDeactivate && (
+            <Button size="sm" variant="ghost" loading={busy} onClick={() => patch({ is_active: !u.is_active })}>
+              {u.is_active ? "Deactivate" : "Reactivate"}
+            </Button>
+          )}
+        </div>
+      </td>
+    </tr>
   );
 }
 

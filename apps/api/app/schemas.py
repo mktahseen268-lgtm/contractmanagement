@@ -83,6 +83,22 @@ class TenantOut(BaseModel):
     locale: str
     currency: str
     plan: str
+    accent_color: str = "#3E7BFA"
+    timezone: str = "UTC"
+
+
+class TenantUpdateIn(BaseModel):
+    name: str | None = Field(None, min_length=2, max_length=200)
+    currency: str | None = None
+    locale: str | None = None
+    timezone: str | None = None
+    accent_color: str | None = None  # CSS color (#RRGGBB recommended)
+
+
+class UserUpdateIn(BaseModel):
+    name: str | None = None
+    role: str | None = None
+    is_active: bool | None = None
 
 
 class UserOut(BaseModel):

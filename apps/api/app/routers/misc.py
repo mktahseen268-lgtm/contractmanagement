@@ -15,6 +15,111 @@ router = APIRouter(tags=["misc"])
 _ADMIN_ROLES = {"owner", "admin"}
 
 
+# ---------- workspace + user admin ----------
+
+
+_VALID_ROLES = {"owner", "admin", "manager", "author", "approver", "reviewer", "viewer", "auditor"}
+
+
+@router.get("/tenant", response_model=schemas.TenantOut)
+def get_tenant(db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.TenantOut:
+    t = db.get(models.Tenant, user.tenant_id)
+    if t is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+    return schemas.TenantOut.model_validate(t)
+
+
+@router.patch("/tenant", response_model=schemas.TenantOut)
+def update_tenant(data: schemas.TenantUpdateIn, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.TenantOut:
+    if user.role not in _ADMIN_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only owners/admins can update the workspace.")
+    t = db.get(models.Tenant, user.tenant_id)
+    if t is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+    payload = data.model_dump(exclude_unset=True)
+    settings_dict = dict(t.settings or {})
+    changes: dict = {}
+    if "name" in payload and payload["name"]:
+        t.name = payload["name"].strip()[:200]
+        changes["name"] = t.name
+    if "currency" in payload and payload["currency"]:
+        t.currency = payload["currency"].strip().upper()[:3]
+        changes["currency"] = t.currency
+    if "locale" in payload and payload["locale"]:
+        t.locale = payload["locale"].strip()[:10]
+        changes["locale"] = t.locale
+    if "timezone" in payload and payload["timezone"] is not None:
+        settings_dict["timezone"] = str(payload["timezone"])[:50]
+        changes["timezone"] = settings_dict["timezone"]
+    if "accent_color" in payload and payload["accent_color"] is not None:
+        # store as-is; the frontend uses it via a CSS custom property. Light validation.
+        ac = str(payload["accent_color"]).strip()[:32]
+        if not ac.startswith("#") and not ac.startswith("rgb"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="accent_color must look like a CSS color, e.g. #3E7BFA")
+        settings_dict["accent_color"] = ac
+        changes["accent_color"] = ac
+    t.settings = settings_dict
+    if changes:
+        record(db, tenant_id=user.tenant_id, action="workspace.updated", actor=user, object_type="workspace", object_id=t.id, object_label=t.name, ip=client_ip(request), meta=changes)
+        db.commit()
+        db.refresh(t)
+    return schemas.TenantOut.model_validate(t)
+
+
+@router.patch("/users/{user_id}", response_model=schemas.UserOut)
+def update_user(user_id: str, data: schemas.UserUpdateIn, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.UserOut:
+    """Admin/owner only. Update name, role, or is_active. Owners are protected (you can't demote
+    or deactivate the last owner; admins can't change another owner)."""
+    if user.role not in _ADMIN_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only owners/admins can update users.")
+    target = db.get(models.User, user_id)
+    if target is None or target.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    payload = data.model_dump(exclude_unset=True)
+    changes: dict = {}
+
+    # admins can't touch owners (only owners can)
+    if target.role == "owner" and user.role != "owner":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only an owner can change another owner.")
+
+    if "name" in payload and payload["name"] is not None:
+        nm = payload["name"].strip()[:200]
+        if not nm:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Name can't be empty.")
+        target.name = nm
+        changes["name"] = nm
+
+    if "role" in payload and payload["role"] is not None:
+        new_role = payload["role"].lower()
+        if new_role not in _VALID_ROLES:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid role.")
+        # don't allow demoting the last owner
+        if target.role == "owner" and new_role != "owner":
+            owners = db.scalar(select(func.count(models.User.id)).where(models.User.tenant_id == user.tenant_id, models.User.role == "owner", models.User.is_active.is_(True)))
+            if (owners or 0) <= 1:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="There must be at least one active owner in the workspace.")
+        target.role = new_role
+        changes["role"] = new_role
+
+    if "is_active" in payload and payload["is_active"] is not None:
+        if not payload["is_active"]:
+            # don't allow deactivating yourself, the last owner, or the last active user
+            if target.id == user.id:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="You can't deactivate yourself.")
+            if target.role == "owner":
+                owners = db.scalar(select(func.count(models.User.id)).where(models.User.tenant_id == user.tenant_id, models.User.role == "owner", models.User.is_active.is_(True)))
+                if (owners or 0) <= 1:
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="There must be at least one active owner.")
+        target.is_active = bool(payload["is_active"])
+        changes["is_active"] = target.is_active
+
+    if changes:
+        record(db, tenant_id=user.tenant_id, action="user.updated", actor=user, object_type="user", object_id=target.id, object_label=target.name, ip=client_ip(request), meta=changes)
+        db.commit()
+        db.refresh(target)
+    return schemas.UserOut.model_validate(target)
+
+
 # ---------- admin: renewals sweep ----------
 
 
@@ -87,6 +192,22 @@ def invite_user(data: schemas.UserInviteIn, request: Request, db: Session = Depe
     record(db, tenant_id=user.tenant_id, action="user.invited", actor=user, object_type="user", object_id=u.id, object_label=u.name, ip=client_ip(request), meta={"role": u.role})
     db.commit()
     db.refresh(u)
+    # send welcome email through the outbox
+    try:
+        from .. import email as email_mod
+        from ..config import settings as _settings
+
+        login_url = _settings.frontend_url.rstrip("/") + "/login"
+        tenant = db.get(models.Tenant, user.tenant_id)
+        org = (tenant.name if tenant else "Workspace") or "Workspace"
+        email_mod.send_email(
+            u.email,
+            f"You've been added to {org} on Contract Management",
+            f"Hi {u.name},\n\n{user.name} added you to the {org} workspace as {u.role}.\n\nSign in here: {login_url}\nEmail: {u.email}\nTemporary password: {data.password}\n\nPlease change your password after first login (Settings → Security).",
+            tenant_id=user.tenant_id,
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return schemas.UserOut.model_validate(u)
 
 

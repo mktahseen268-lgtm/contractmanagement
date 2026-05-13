@@ -28,6 +28,14 @@ class Tenant(Base):
 
     users: Mapped[list["User"]] = relationship(back_populates="tenant")
 
+    @property
+    def accent_color(self) -> str:
+        return (self.settings or {}).get("accent_color", "#3E7BFA")
+
+    @property
+    def timezone(self) -> str:
+        return (self.settings or {}).get("timezone", "UTC")
+
 
 class User(Base):
     __tablename__ = "users"
