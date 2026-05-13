@@ -10,15 +10,17 @@ import { ActivityFeed, EmptyState, KpiCard, QuickCreateTiles, StatusDistribution
 import { StatusPill, RiskBadge } from "@/components/lifecycle";
 import { contractTypeLabel, daysUntil, formatDate, formatMoney } from "@/lib/utils";
 import { Sparkles } from "lucide-react";
-import type { ContractListItem, Dashboard } from "@/lib/types";
+import type { ContractListItem, Dashboard, InboxSummary } from "@/lib/types";
 
 export default function DashboardPage() {
   const { me } = useAuth();
   const [data, setData] = useState<Dashboard | null>(null);
+  const [inbox, setInbox] = useState<InboxSummary | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
     api.get<Dashboard>("/dashboard").then(setData).catch((e) => setError(e.message));
+    api.get<InboxSummary>("/inbox/summary").then(setInbox).catch(() => {});
   }, []);
 
   const hour = new Date().getHours();
@@ -37,8 +39,14 @@ export default function DashboardPage() {
             Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-24 rounded-xl" />)
           ) : (
             <>
+              <KpiCard
+                label="On your plate"
+                value={inbox?.total ?? 0}
+                sub={inbox?.high_priority ? `${inbox.high_priority} high priority` : "Approvals & signatures"}
+                href="/inbox"
+                tone={inbox?.high_priority ? "warn" : inbox?.total ? "accent" : "default"}
+              />
               <KpiCard label="Total contracts" value={data.total_contracts} href="/contracts" />
-              <KpiCard label="Pending approvals" value={data.pending_approvals} href="/contracts?status=in_review" tone={data.pending_approvals ? "warn" : "default"} />
               <KpiCard label="Awaiting signature" value={data.awaiting_signature} href="/contracts?status=out_for_signature" />
               <KpiCard label="Expiring ≤30d" value={data.expiring_30d} href="/contracts?status=expiring" tone={data.expiring_30d ? "warn" : "default"} />
               <KpiCard label="Open risks" value={data.open_risks} tone={data.open_risks ? "danger" : "default"} />

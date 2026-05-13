@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import SessionLocal
-from .routers import audit, auth, contracts, dashboard, files, misc, reports, signatures, workflows
+from .routers import audit, auth, contracts, dashboard, files, inbox, misc, reports, signatures, workflows
 
 log = logging.getLogger("uvicorn.error")
 
@@ -66,6 +66,7 @@ app.include_router(files.router)
 app.include_router(workflows.router)
 app.include_router(signatures.router)
 app.include_router(reports.router)
+app.include_router(inbox.router)
 app.include_router(misc.router)
 
 

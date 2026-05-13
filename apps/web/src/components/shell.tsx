@@ -7,6 +7,7 @@ import {
   BarChart3,
   Bell,
   FileText,
+  Inbox,
   LayoutDashboard,
   LogOut,
   Plus,
@@ -20,10 +21,12 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { cn, titleCase } from "@/lib/utils";
 import { Avatar } from "@/components/ui";
-import type { Notification } from "@/lib/types";
+import type { InboxSummary, Notification } from "@/lib/types";
 
-const RAIL: { href: string; label: string; icon: typeof FileText; match: (p: string) => boolean }[] = [
+type RailItem = { href: string; label: string; icon: typeof FileText; match: (p: string) => boolean; badgeKey?: "inbox" };
+const RAIL: RailItem[] = [
   { href: "/dashboard", label: "Home", icon: LayoutDashboard, match: (p) => p.startsWith("/dashboard") },
+  { href: "/inbox", label: "Inbox", icon: Inbox, match: (p) => p.startsWith("/inbox"), badgeKey: "inbox" },
   { href: "/contracts", label: "Contracts", icon: FileText, match: (p) => p.startsWith("/contracts") },
   { href: "/workflows", label: "Workflows", icon: Workflow, match: (p) => p.startsWith("/workflows") },
   { href: "/reports", label: "Reports", icon: BarChart3, match: (p) => p.startsWith("/reports") },
@@ -39,12 +42,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [notifs, setNotifs] = useState<Notification[]>([]);
   const [notifOpen, setNotifOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [inboxSummary, setInboxSummary] = useState<InboxSummary | null>(null);
 
   useEffect(() => {
     api.get<Notification[]>("/notifications").then(setNotifs).catch(() => {});
+    api.get<InboxSummary>("/inbox/summary").then(setInboxSummary).catch(() => {});
   }, [pathname]);
 
   const unread = notifs.filter((n) => !n.read_at).length;
+  const inboxCount = inboxSummary?.total ?? 0;
+  const inboxHigh = (inboxSummary?.high_priority ?? 0) > 0;
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-canvas text-ink">
@@ -56,17 +63,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {RAIL.map((item) => {
           const active = item.match(pathname);
           const Icon = item.icon;
+          const badge = item.badgeKey === "inbox" ? inboxCount : 0;
           return (
             <Link
               key={item.href}
               href={item.href}
-              title={item.label}
+              title={item.badgeKey === "inbox" && badge ? `${item.label} (${badge})` : item.label}
               className={cn(
                 "group relative grid h-10 w-10 place-items-center rounded-lg transition-colors",
                 active ? "bg-accent-subtle text-accent" : "text-ink-3 hover:bg-surface-3 hover:text-ink",
               )}
             >
               <Icon className="h-[18px] w-[18px]" />
+              {badge > 0 && (
+                <span
+                  className={cn(
+                    "absolute right-0.5 top-0.5 grid h-4 min-w-4 place-items-center rounded-full px-1 text-[10px] font-semibold leading-none",
+                    inboxHigh ? "bg-amber-500 text-white" : "bg-accent text-accent-fg",
+                  )}
+                >
+                  {badge > 9 ? "9+" : badge}
+                </span>
+              )}
             </Link>
           );
         })}
@@ -241,6 +259,13 @@ function Sidebar({ pathname }: { pathname: string }) {
     return (
       <div className="mt-4 flex-1 px-3 text-[13px] text-ink-3">
         <p>Portfolio analytics — totals, distributions, cycle time, expiring &amp; renewal pipeline, approver throughput. Use the range picker at the top of the page and export the underlying contracts as CSV.</p>
+      </div>
+    );
+  }
+  if (pathname.startsWith("/inbox")) {
+    return (
+      <div className="mt-4 flex-1 px-3 text-[13px] text-ink-3">
+        <p>Everything waiting on <em>you</em>, across all contracts — approval steps you can decide, and signature requests it&rsquo;s your turn to sign. High-priority items (waiting ≥24h, or high-risk contracts) float to the top.</p>
       </div>
     );
   }

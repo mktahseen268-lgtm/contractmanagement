@@ -308,6 +308,34 @@ export interface VersionDetail extends Version {
   body: string;
 }
 
+// ---------- inbox ("waiting on you") ----------
+
+export interface InboxItem {
+  id: string;
+  kind: "approval" | "signature";
+  contract_id: string;
+  contract_title: string;
+  contract_reference: string;
+  contract_status: string;
+  contract_type: string;
+  risk_level: string;
+  value: number;
+  currency: string;
+  title: string;
+  subtitle: string;
+  since: string | null;
+  waiting_hours: number;
+  priority: "normal" | "high";
+  href: string;
+}
+
+export interface InboxSummary {
+  approvals: number;
+  signatures: number;
+  total: number;
+  high_priority: number;
+}
+
 // ---------- reports & analytics ----------
 
 export interface ReportBucket {

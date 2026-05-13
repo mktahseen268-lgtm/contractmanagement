@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { Check, Copy, Download, Eye, FileCheck2, FileDown, FileText, History, Pencil, PenLine, RotateCcw, Send, Sparkles, Trash2, Workflow as WorkflowIcon, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton, Textarea } from "@/components/ui";
@@ -41,10 +41,12 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 export default function ContractDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
+  const search = useSearchParams();
   const [contract, setContract] = useState<ContractDetail | null>(null);
   const [wfState, setWfState] = useState<ContractWorkflow | null>(null);
   const [sigState, setSigState] = useState<SignatureEnvelope | null>(null);
-  const [tab, setTab] = useState<Tab>("overview");
+  const initialTab = (search?.get("tab") as Tab | null) && TABS.includes(search!.get("tab") as Tab) ? (search!.get("tab") as Tab) : "overview";
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [error, setError] = useState("");
   const [pdfBusy, setPdfBusy] = useState(false);
   const [submitBusy, setSubmitBusy] = useState(false);

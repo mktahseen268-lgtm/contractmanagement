@@ -588,3 +588,33 @@ class SigningInfoOut(BaseModel):
     consent_text: str = ""
     envelope_status: str = ""
     sealed_pdf_path: str = ""   # populated once the envelope is completed
+
+
+# ---------- inbox ("waiting on you") ----------
+
+
+class InboxItem(BaseModel):
+    """A single thing waiting on the current user — either an approval step or a signature."""
+    id: str                       # stable per task ("step:<step_id>" or "sig:<recipient_id>")
+    kind: str                     # "approval" | "signature"
+    contract_id: str
+    contract_title: str = ""
+    contract_reference: str = ""
+    contract_status: str = ""
+    contract_type: str = ""
+    risk_level: str = "low"
+    value: float = 0.0
+    currency: str = "USD"
+    title: str = ""               # short headline ("Approve: <step name>" / "Your signature is needed")
+    subtitle: str = ""            # second line ("Step 2 of 3 — Owner sign-off" / "MSA — Globex")
+    since: dt.datetime | None = None      # when this task became yours (step.created_at or recipient.sent-ish)
+    waiting_hours: float = 0.0
+    priority: str = "normal"      # "normal" | "high"
+    href: str = ""                # frontend route to take action
+
+
+class InboxSummary(BaseModel):
+    approvals: int = 0
+    signatures: int = 0
+    total: int = 0
+    high_priority: int = 0
