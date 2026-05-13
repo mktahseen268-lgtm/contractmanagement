@@ -70,6 +70,57 @@ Open <http://localhost:3000>.
 
 ---
 
+## Sign-in credentials
+
+The first time the API boots it auto-seeds an **"Acme Holdings"** demo workspace populated with ~28 contracts, 4 users, 3 approval workflows, and audit history. The four seeded accounts all share the password `demo1234`:
+
+| Email | Role | Use for |
+|---|---|---|
+| `demo@acme.io` | **owner** | Full admin — everything (workspace edits, Team, API keys, webhooks, sweep, …) |
+| `manager@acme.io` | manager | Edit contracts, manage workflows, send for signature |
+| `approver@acme.io` | approver | Decide approval steps (role-gated by workflow_service hierarchy) |
+| `author@acme.io` | author | Create / edit contracts, can't manage users |
+
+You can also register a brand-new workspace from `/register` — that user becomes the **owner** of their own tenant (RLS keeps it isolated from Acme Holdings).
+
+### Running locally on non-default ports?
+
+If you started the API on `8099` and the web on `3099` (the setup from a recent session), the seeded credentials are unchanged but you'll log in at <http://localhost:3099>. The README's reference values for any local demo environment:
+
+```
+API  : http://localhost:8099   (default 8000 if you used the docker-compose / quickstart)
+Web  : http://localhost:3099   (default 3000)
+DB   : postgresql://postgres:admin@localhost:5432/cm   (or cm:cm@... per docker-compose)
+```
+
+### Example: a clean two-tenant demo
+
+For SaaS demos a useful pattern is one **platform/super-admin** workspace + one **trial/customer** workspace. Register both from `/register` (or POST to `/auth/register`):
+
+| Workspace | Owner email | Password |
+|---|---|---|
+| Platform Admin | `super.admin@platform.io` | `SuperAdmin#2026` |
+| Demo Trial Co | `tina@trialco.io` | `DemoUser#2026` |
+
+These are just examples — pick whatever you like at registration. Notes:
+
+- **`.local` / `.test` email TLDs are rejected** by `email-validator`. Use `.io`, `.com`, `.example`, etc.
+- A workspace's first user is always **owner**; subsequent users are invited from **Settings → Team** with any role except owner (promote an existing user to owner if you need a second one).
+- Inviting a user without a `password` field makes the server **auto-generate** a temp password — it's returned once in the API response, emailed through the Outbox, and visible briefly to the inviting admin on the Team page.
+- The first owner shouldn't be deactivated or demoted — the API blocks demoting / deactivating the **last active owner** with a 409.
+
+### API keys (for headless / CI usage)
+
+Owners and admins can mint long-lived bearer tokens at **Settings → API keys**. Use them the same way as a JWT:
+
+```bash
+curl -H "Authorization: Bearer cm_xxxxxxxx..." http://localhost:8099/contracts
+```
+
+The plaintext token is shown **once** at creation and only its SHA-256 is stored — copy it then. Revoking flips a flag; the next request returns 401.
+
+---
+
 ## What works
 
 - **Auth & multi-tenancy** — register a workspace (you become Owner) or sign in. **JWT access tokens** (short-lived, kept in browser memory only) + **rotating refresh tokens in an httpOnly cookie** with **reuse detection** (presenting an already-rotated refresh token revokes the whole session chain). **MFA**: enrol a TOTP authenticator (QR-key + recovery codes), then sign-in requires a second step — verifiable by your authenticator code, a one-time **email OTP**, or a single-use **recovery code**. Manage active sessions, sign out other devices, change password (which revokes other sessions). **Tenant isolation is enforced at the database level by PostgreSQL Row-Level Security** (every tenant-scoped table — `contracts`, `audit_log`, `sessions`, `otp_codes`, `recovery_codes`, `file_objects`, … — has a `tenant_isolation` policy keyed off a per-request `app.cm_tenant` session GUC set from the JWT) *plus* a `tenant_id` filter in the repository layer (defence in depth). Verified: a contract/file created in workspace B is invisible (404) to workspace A's token, and vice-versa; each workspace's dashboard/audit only shows its own data.
