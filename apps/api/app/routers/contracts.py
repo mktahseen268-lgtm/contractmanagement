@@ -193,6 +193,7 @@ def delete_contract(contract_id: str, request: Request, db: Session = Depends(ge
     label = c.title
     wf.delete_runs_for_contract(db, c.id)
     sig.delete_envelopes_for_contract(db, c.id)
+    db.query(models.Obligation).filter(models.Obligation.contract_id == c.id).delete()
     db.query(models.Comment).filter(models.Comment.contract_id == c.id).delete()
     db.query(models.ContractVersion).filter(models.ContractVersion.contract_id == c.id).delete()
     db.delete(c)

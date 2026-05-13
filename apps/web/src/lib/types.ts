@@ -104,6 +104,22 @@ export interface SweepResult {
   flagged_expiring: number;
   moved_to_expired: number;
   reminders_sent: number;
+  obligations_overdue: number;
+}
+
+export interface Obligation {
+  id: string;
+  contract_id: string;
+  title: string;
+  description: string;
+  due_date: string | null;
+  owner_id: string | null;
+  owner_name: string;
+  status: "pending" | "done" | "skipped" | "overdue";
+  completed_at: string | null;
+  completed_by_name: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Paginated<T> {
@@ -328,7 +344,7 @@ export interface VersionDetail extends Version {
 
 export interface InboxItem {
   id: string;
-  kind: "approval" | "signature";
+  kind: "approval" | "signature" | "obligation";
   contract_id: string;
   contract_title: string;
   contract_reference: string;
@@ -348,6 +364,7 @@ export interface InboxItem {
 export interface InboxSummary {
   approvals: number;
   signatures: number;
+  obligations: number;
   total: number;
   high_priority: number;
 }

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { Check, Copy, Download, Eye, FileCheck2, FileDown, FileText, History, Pencil, PenLine, Repeat, RotateCcw, Send, Sparkles, Trash2, Workflow as WorkflowIcon, X } from "lucide-react";
+import { Check, CheckSquare, Copy, Download, Eye, FileCheck2, FileDown, FileText, History, ListTodo, Pencil, PenLine, Plus, Repeat, RotateCcw, Send, Sparkles, Trash2, Workflow as WorkflowIcon, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton, Textarea } from "@/components/ui";
 
@@ -31,11 +31,11 @@ import {
   TRANSITION_LABELS,
   titleCase,
 } from "@/lib/utils";
-import type { ActivityItem, Comment, ContractDetail, ContractWorkflow, FileObject, SignatureEnvelope, SignatureRecipient, User, Version, VersionDetail, WorkflowRunStep } from "@/lib/types";
+import type { ActivityItem, Comment, ContractDetail, ContractWorkflow, FileObject, Obligation, SignatureEnvelope, SignatureRecipient, User, Version, VersionDetail, WorkflowRunStep } from "@/lib/types";
 
-type Tab = "overview" | "approvals" | "signatures" | "document" | "activity" | "comments" | "files" | "versions";
+type Tab = "overview" | "approvals" | "signatures" | "obligations" | "document" | "activity" | "comments" | "files" | "versions";
 const EDITABLE_STATUSES = new Set(["draft", "changes_requested"]);
-const TABS: Tab[] = ["overview", "approvals", "signatures", "document", "activity", "comments", "files", "versions"];
+const TABS: Tab[] = ["overview", "approvals", "signatures", "obligations", "document", "activity", "comments", "files", "versions"];
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export default function ContractDetailPage() {
@@ -330,6 +330,7 @@ export default function ContractDetailPage() {
         {tab === "overview" && <OverviewTab contract={contract} />}
         {tab === "approvals" && <ApprovalsTab contract={contract} wf={wfState} onChanged={load} />}
         {tab === "signatures" && <SignaturesTab contract={contract} env={sigState} onChanged={load} />}
+        {tab === "obligations" && <ObligationsTab contract={contract} />}
         {tab === "document" && <DocumentTab key={contract.id} contract={contract} />}
         {tab === "activity" && <ActivityTab contractId={contract.id} />}
         {tab === "comments" && <CommentsTab contractId={contract.id} />}
@@ -1020,6 +1021,201 @@ const RCPT_STATUS_TONE: Record<string, string> = {
 const INPUT_CLS = "h-10 rounded-sm border border-line bg-white px-3 text-sm text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none";
 
 type DraftRecipient = { name: string; email: string; kind: "signer" | "cc" };
+
+const OBL_TONE: Record<string, string> = {
+  pending: "text-slate-600 bg-slate-100",
+  done: "text-emerald-800 bg-emerald-100",
+  skipped: "text-slate-500 bg-slate-100",
+  overdue: "text-red-800 bg-red-100",
+};
+
+function ObligationsTab({ contract }: { contract: ContractDetail }) {
+  const [items, setItems] = useState<Obligation[] | null>(null);
+  const [users, setUsers] = useState<User[]>([]);
+  const [error, setError] = useState("");
+  // add form state
+  const [adding, setAdding] = useState(false);
+  const [title, setTitle] = useState("");
+  const [desc, setDesc] = useState("");
+  const [due, setDue] = useState("");
+  const [ownerId, setOwnerId] = useState<string>("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    api.get<Obligation[]>(`/contracts/${contract.id}/obligations`).then(setItems).catch(() => setItems([]));
+    api.get<User[]>("/users").then(setUsers).catch(() => {});
+  }, [contract.id]);
+  useEffect(load, [load]);
+
+  async function add() {
+    if (!title.trim()) return;
+    setError("");
+    setBusyId("__add__");
+    try {
+      await api.post<Obligation>(`/contracts/${contract.id}/obligations`, {
+        title: title.trim(),
+        description: desc.trim(),
+        due_date: due || null,
+        owner_id: ownerId || null,
+      });
+      setTitle(""); setDesc(""); setDue(""); setOwnerId("");
+      setAdding(false);
+      load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't add the obligation.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function update(o: Obligation, patch: Partial<Obligation>) {
+    setBusyId(o.id);
+    setError("");
+    try {
+      await api.patch<Obligation>(`/contracts/${contract.id}/obligations/${o.id}`, patch);
+      load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't update the obligation.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function remove(o: Obligation) {
+    if (!window.confirm(`Delete "${o.title}"?`)) return;
+    setBusyId(o.id);
+    try {
+      await api.del(`/contracts/${contract.id}/obligations/${o.id}`);
+      load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't delete the obligation.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const open = items?.filter((o) => o.status === "pending" || o.status === "overdue") ?? [];
+  const done = items?.filter((o) => o.status === "done" || o.status === "skipped") ?? [];
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-1.5">
+          <ListTodo className="h-4 w-4" /> Obligations
+        </CardTitle>
+        {!adding && (
+          <Button size="sm" variant="secondary" onClick={() => setAdding(true)}>
+            <Plus className="h-3.5 w-3.5" /> Add
+          </Button>
+        )}
+      </CardHeader>
+      <CardBody className="space-y-3">
+        {error && <ErrorBanner message={error} />}
+        {adding && (
+          <div className="space-y-2 rounded-lg border border-line bg-surface-2 p-3">
+            <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What needs to happen?" autoFocus className="h-10 w-full rounded-sm border border-line bg-white px-3 text-sm" />
+            <textarea value={desc} onChange={(e) => setDesc(e.target.value)} rows={2} placeholder="Notes (optional)" className="w-full rounded-sm border border-line bg-white px-3 py-2 text-sm" />
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-2 text-xs text-ink-3">
+                Due
+                <input type="date" value={due} onChange={(e) => setDue(e.target.value)} className="h-9 rounded-sm border border-line bg-white px-2 text-sm" />
+              </label>
+              <label className="flex items-center gap-2 text-xs text-ink-3">
+                Owner
+                <select value={ownerId} onChange={(e) => setOwnerId(e.target.value)} className="h-9 rounded-sm border border-line bg-white px-2 text-sm">
+                  <option value="">— Unassigned —</option>
+                  {users.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                </select>
+              </label>
+              <div className="ml-auto flex gap-2">
+                <Button size="sm" variant="ghost" onClick={() => { setAdding(false); setTitle(""); setDesc(""); setDue(""); setOwnerId(""); }}>Cancel</Button>
+                <Button size="sm" onClick={add} loading={busyId === "__add__"} disabled={!title.trim()}>
+                  <Plus className="h-3.5 w-3.5" /> Add obligation
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {items === null && <Skeleton className="h-16" />}
+        {items !== null && items.length === 0 && !adding && (
+          <p className="text-sm text-ink-3">No obligations yet. Add ones like "renewal notice by 60d before end" or "quarterly status report".</p>
+        )}
+
+        {open.length > 0 && (
+          <div className="space-y-1">
+            <div className="px-1 text-[11px] font-semibold uppercase tracking-wide text-ink-3">Open ({open.length})</div>
+            {open.map((o) => <ObligationRow key={o.id} o={o} busy={busyId === o.id} onUpdate={update} onDelete={remove} />)}
+          </div>
+        )}
+        {done.length > 0 && (
+          <div className="space-y-1 pt-2">
+            <div className="px-1 text-[11px] font-semibold uppercase tracking-wide text-ink-3">Completed ({done.length})</div>
+            {done.map((o) => <ObligationRow key={o.id} o={o} busy={busyId === o.id} onUpdate={update} onDelete={remove} />)}
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
+function ObligationRow({ o, busy, onUpdate, onDelete }: { o: Obligation; busy: boolean; onUpdate: (o: Obligation, patch: Partial<Obligation>) => void; onDelete: (o: Obligation) => void }) {
+  const isDone = o.status === "done";
+  const isSkipped = o.status === "skipped";
+  const isOverdue = o.status === "overdue";
+  return (
+    <div className={cn(
+      "flex flex-wrap items-center gap-3 rounded-md border border-line bg-white p-3",
+      isOverdue && "border-red-200 bg-red-50/40",
+      (isDone || isSkipped) && "opacity-70",
+    )}>
+      <button
+        onClick={() => onUpdate(o, { status: isDone ? "pending" : "done" } as Partial<Obligation>)}
+        disabled={busy}
+        title={isDone ? "Mark as pending" : "Mark as done"}
+        className={cn(
+          "grid h-6 w-6 shrink-0 place-items-center rounded border",
+          isDone ? "border-emerald-500 bg-emerald-500 text-white" : "border-line bg-white text-ink-3 hover:border-accent",
+        )}
+      >
+        {isDone && <Check className="h-3.5 w-3.5" />}
+      </button>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className={cn("text-sm font-medium text-ink", (isDone || isSkipped) && "line-through")}>{o.title}</span>
+          <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${OBL_TONE[o.status] ?? "text-slate-600 bg-slate-100"}`}>{o.status}</span>
+          {o.owner_name && <span className="text-[11px] text-ink-3">· {o.owner_name}</span>}
+        </div>
+        {o.description && <p className="mt-0.5 text-xs text-ink-3">{o.description}</p>}
+        <div className="mt-0.5 text-[11px] text-ink-3">
+          {o.due_date ? (
+            <span className={cn(isOverdue && "text-red-700 font-medium")}>
+              Due {formatDate(o.due_date)}
+            </span>
+          ) : <span>No due date</span>}
+          {o.completed_at && (
+            <span> · Completed {formatDateTime(o.completed_at)}{o.completed_by_name ? ` by ${o.completed_by_name}` : ""}</span>
+          )}
+        </div>
+      </div>
+      <div className="flex items-center gap-1">
+        {!isDone && !isSkipped && (
+          <Button size="sm" variant="ghost" onClick={() => onUpdate(o, { status: "skipped" } as Partial<Obligation>)} disabled={busy} title="Skip">
+            Skip
+          </Button>
+        )}
+        {(isDone || isSkipped) && (
+          <Button size="sm" variant="ghost" onClick={() => onUpdate(o, { status: "pending" } as Partial<Obligation>)} disabled={busy} title="Reopen">
+            Reopen
+          </Button>
+        )}
+        <Button size="sm" variant="ghost" onClick={() => onDelete(o)} disabled={busy} title="Delete">
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 function SignaturesTab({ contract, env, onChanged }: { contract: ContractDetail; env: SignatureEnvelope | null; onChanged: () => void }) {
   const [recips, setRecips] = useState<DraftRecipient[]>([{ name: "", email: "", kind: "signer" }]);

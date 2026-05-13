@@ -66,12 +66,14 @@ def _notify(db: Session, contract: models.Contract, *, kind: str, title: str, bo
 
 def sweep(db: Session, *, today: dt.date | None = None) -> dict[str, int]:
     """Walk every active/expiring contract in the DB, flip lifecycle as appropriate, and post
-    owner reminders. Returns counts. Caller commits."""
+    owner reminders. Also flips any pending obligation whose due_date is past to `overdue`.
+    Returns counts. Caller commits."""
     today = today or _today()
     horizon = today + dt.timedelta(days=RENEWAL_WINDOW_DAYS)
     flagged_expiring = 0
     moved_to_expired = 0
     reminders_sent = 0
+    obligations_overdue = 0
 
     # NB: no tenant filter — sweep runs across all tenants. RLS is bypassed when GUC is unset
     # (and we don't set it here).
@@ -132,7 +134,22 @@ def sweep(db: Session, *, today: dt.date | None = None) -> dict[str, int]:
                         reminders_sent += 1
                 break
 
-    return {"flagged_expiring": flagged_expiring, "moved_to_expired": moved_to_expired, "reminders_sent": reminders_sent}
+    # 4) pending obligations whose due date is past → overdue
+    o_rows = db.scalars(
+        select(models.Obligation).where(
+            models.Obligation.status == "pending",
+            models.Obligation.due_date.is_not(None),
+            models.Obligation.due_date < today,
+        )
+    ).all()
+    for o in o_rows:
+        o.status = "overdue"
+        obligations_overdue += 1
+
+    return {
+        "flagged_expiring": flagged_expiring, "moved_to_expired": moved_to_expired,
+        "reminders_sent": reminders_sent, "obligations_overdue": obligations_overdue,
+    }
 
 
 def renew(db: Session, *, contract: models.Contract, by_user: models.User,

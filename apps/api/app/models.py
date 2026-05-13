@@ -282,6 +282,28 @@ class SignatureEvent(Base):
     meta: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
 
 
+class Obligation(Base):
+    """A checklist item the workspace must do on a given contract — e.g. "renewal notice by 30d
+    before end", "invoice quarterly", "deliver report by Q3". Status flows pending → done|skipped;
+    a periodic sweep flips pending→overdue when due_date < today."""
+
+    __tablename__ = "obligations"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    contract_id: Mapped[str] = mapped_column(ForeignKey("contracts.id"), index=True)
+    title: Mapped[str] = mapped_column(String(300))
+    description: Mapped[str] = mapped_column(Text, default="")
+    due_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)  # pending|done|skipped|overdue
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_by_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    completed_by_name: Mapped[str] = mapped_column(String(200), default="")
+    created_by: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
 class FileObject(Base):
     __tablename__ = "file_objects"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)

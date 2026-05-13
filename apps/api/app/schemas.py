@@ -205,6 +205,38 @@ class SweepResultOut(BaseModel):
     flagged_expiring: int = 0
     moved_to_expired: int = 0
     reminders_sent: int = 0
+    obligations_overdue: int = 0
+
+
+class ObligationIn(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+    description: str = ""
+    due_date: dt.date | None = None
+    owner_id: str | None = None
+
+
+class ObligationUpdateIn(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    due_date: dt.date | None = None
+    owner_id: str | None = None
+    status: str | None = None  # "pending" | "done" | "skipped"
+
+
+class ObligationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    contract_id: str
+    title: str
+    description: str = ""
+    due_date: dt.date | None
+    owner_id: str | None
+    owner_name: str = ""
+    status: str
+    completed_at: dt.datetime | None
+    completed_by_name: str = ""
+    created_at: dt.datetime
+    updated_at: dt.datetime
 
 
 class ContractListOut(BaseModel):
@@ -641,5 +673,6 @@ class InboxItem(BaseModel):
 class InboxSummary(BaseModel):
     approvals: int = 0
     signatures: int = 0
+    obligations: int = 0
     total: int = 0
     high_priority: int = 0

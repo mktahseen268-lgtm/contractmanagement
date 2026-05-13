@@ -113,6 +113,48 @@ def _collect_signatures(db: Session, user: models.User) -> list[schemas.InboxIte
     return items
 
 
+def _collect_obligations(db: Session, user: models.User) -> list[schemas.InboxItem]:
+    """Obligations owned by this user that are overdue, or due within OBLIGATION_DUE_WINDOW days."""
+    today = dt.date.today()
+    horizon = today + dt.timedelta(days=7)
+    rows = db.execute(
+        select(models.Obligation, models.Contract)
+        .join(models.Contract, models.Obligation.contract_id == models.Contract.id)
+        .where(
+            models.Obligation.tenant_id == user.tenant_id,
+            models.Obligation.owner_id == user.id,
+            models.Obligation.status.in_(["pending", "overdue"]),
+            models.Obligation.due_date.is_not(None),
+            models.Obligation.due_date <= horizon,
+        )
+    ).all()
+    items: list[schemas.InboxItem] = []
+    for o, c in rows:
+        days_to_due = (o.due_date - today).days if o.due_date else 0
+        is_overdue = o.status == "overdue" or days_to_due < 0
+        # treat overdue or due-today as high priority; risk also bumps to high
+        waiting_h = max(-days_to_due, 0) * 24.0  # days overdue → "waiting" hours for sorting
+        priority = "high" if is_overdue or days_to_due <= 0 or (c.risk_level or "").lower() in _HIGH_RISK else "normal"
+        subtitle = (
+            f"Overdue by {-days_to_due} day{'s' if days_to_due != -1 else ''}"
+            if is_overdue else
+            f"Due {'today' if days_to_due == 0 else f'in {days_to_due} day{'s' if days_to_due != 1 else ''}'}"
+        )
+        items.append(schemas.InboxItem(
+            id=f"obl:{o.id}",
+            kind="obligation",
+            contract_id=c.id, contract_title=c.title, contract_reference=c.reference_no, contract_status=c.status,
+            contract_type=c.type, risk_level=c.risk_level, value=c.value or 0.0, currency=c.currency,
+            title=o.title,
+            subtitle=subtitle,
+            since=dt.datetime.combine(o.due_date, dt.time.min) if o.due_date else o.created_at,
+            waiting_hours=round(waiting_h, 2),
+            priority=priority,
+            href=f"/contracts/{c.id}?tab=obligations",
+        ))
+    return items
+
+
 def _sorted(items: list[schemas.InboxItem]) -> list[schemas.InboxItem]:
     # high priority first, then oldest waiting first
     return sorted(items, key=lambda i: (0 if i.priority == "high" else 1, -i.waiting_hours))
@@ -120,11 +162,12 @@ def _sorted(items: list[schemas.InboxItem]) -> list[schemas.InboxItem]:
 
 @router.get("/summary", response_model=schemas.InboxSummary)
 def inbox_summary(db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.InboxSummary:
-    items = _collect_approvals(db, user) + _collect_signatures(db, user)
+    items = _collect_approvals(db, user) + _collect_signatures(db, user) + _collect_obligations(db, user)
     approvals = sum(1 for x in items if x.kind == "approval")
     signatures = sum(1 for x in items if x.kind == "signature")
+    obligations = sum(1 for x in items if x.kind == "obligation")
     high = sum(1 for x in items if x.priority == "high")
-    return schemas.InboxSummary(approvals=approvals, signatures=signatures, total=len(items), high_priority=high)
+    return schemas.InboxSummary(approvals=approvals, signatures=signatures, obligations=obligations, total=len(items), high_priority=high)
 
 
 @router.get("", response_model=list[schemas.InboxItem])
@@ -133,10 +176,12 @@ def inbox(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ) -> list[schemas.InboxItem]:
-    """All items waiting on you. ?kind=approval or ?kind=signature to filter."""
+    """All items waiting on you. ?kind=approval|signature|obligation to filter."""
     items: list[schemas.InboxItem] = []
     if kind in (None, "", "approval"):
         items.extend(_collect_approvals(db, user))
     if kind in (None, "", "signature"):
         items.extend(_collect_signatures(db, user))
+    if kind in (None, "", "obligation"):
+        items.extend(_collect_obligations(db, user))
     return _sorted(items)

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Check, ChevronRight, FileText, Inbox as InboxIcon, PenLine, Workflow as WorkflowIcon } from "lucide-react";
+import { Check, ChevronRight, FileText, Inbox as InboxIcon, ListTodo, PenLine, Workflow as WorkflowIcon } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Card, CardBody, ErrorBanner, Skeleton } from "@/components/ui";
 import { PageHeader } from "@/components/shell";
@@ -10,7 +10,7 @@ import { RiskBadge } from "@/components/lifecycle";
 import { cn, contractTypeLabel, formatMoney, timeAgo } from "@/lib/utils";
 import type { InboxItem } from "@/lib/types";
 
-type Filter = "all" | "approval" | "signature";
+type Filter = "all" | "approval" | "signature" | "obligation";
 
 export default function InboxPage() {
   const [items, setItems] = useState<InboxItem[] | null>(null);
@@ -30,8 +30,9 @@ export default function InboxPage() {
     const total = items?.length ?? 0;
     const approvals = items?.filter((i) => i.kind === "approval").length ?? 0;
     const signatures = items?.filter((i) => i.kind === "signature").length ?? 0;
+    const obligations = items?.filter((i) => i.kind === "obligation").length ?? 0;
     const high = items?.filter((i) => i.priority === "high").length ?? 0;
-    return { total, approvals, signatures, high };
+    return { total, approvals, signatures, obligations, high };
   }, [items]);
 
   return (
@@ -54,6 +55,7 @@ export default function InboxPage() {
           <FilterPill active={filter === "all"} onClick={() => setFilter("all")} label={`All`} count={counts.total} />
           <FilterPill active={filter === "approval"} onClick={() => setFilter("approval")} label={`Approvals`} count={counts.approvals} />
           <FilterPill active={filter === "signature"} onClick={() => setFilter("signature")} label={`Signatures`} count={counts.signatures} />
+          <FilterPill active={filter === "obligation"} onClick={() => setFilter("obligation")} label={`Obligations`} count={counts.obligations} />
         </div>
 
         {items === null && (
@@ -114,18 +116,19 @@ function FilterPill({ active, onClick, label, count }: { active: boolean; onClic
 }
 
 function InboxRow({ item }: { item: InboxItem }) {
-  const Icon = item.kind === "approval" ? WorkflowIcon : PenLine;
+  const Icon = item.kind === "approval" ? WorkflowIcon : item.kind === "obligation" ? ListTodo : PenLine;
+  const tint =
+    item.kind === "approval"
+      ? "bg-violet-100 text-violet-700"
+      : item.kind === "obligation"
+        ? "bg-amber-100 text-amber-800"
+        : "bg-emerald-100 text-emerald-700";
   const isHigh = item.priority === "high";
   return (
     <Link href={item.href} className="block">
       <Card className={cn("p-4 transition-shadow hover:shadow-lift", isHigh && "ring-1 ring-amber-300")}>
         <div className="flex items-center gap-3">
-          <span
-            className={cn(
-              "grid h-10 w-10 shrink-0 place-items-center rounded-lg",
-              item.kind === "approval" ? "bg-violet-100 text-violet-700" : "bg-emerald-100 text-emerald-700",
-            )}
-          >
+          <span className={cn("grid h-10 w-10 shrink-0 place-items-center rounded-lg", tint)}>
             <Icon className="h-5 w-5" />
           </span>
           <div className="min-w-0 flex-1">
@@ -151,7 +154,13 @@ function InboxRow({ item }: { item: InboxItem }) {
             </div>
           </div>
           <div className="hidden items-center gap-1 text-xs text-accent sm:flex">
-            {item.kind === "approval" ? <><Check className="h-3.5 w-3.5" /> Review &amp; decide</> : <><PenLine className="h-3.5 w-3.5" /> Open &amp; sign</>}
+            {item.kind === "approval" ? (
+              <><Check className="h-3.5 w-3.5" /> Review &amp; decide</>
+            ) : item.kind === "obligation" ? (
+              <><ListTodo className="h-3.5 w-3.5" /> Open &amp; complete</>
+            ) : (
+              <><PenLine className="h-3.5 w-3.5" /> Open &amp; sign</>
+            )}
             <ChevronRight className="h-3.5 w-3.5" />
           </div>
         </div>
