@@ -1,0 +1,5 @@
+node_modules
+.next
+.turbo
+.env.local
+npm-debug.log*
