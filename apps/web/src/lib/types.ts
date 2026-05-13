@@ -206,6 +206,22 @@ export interface SignatureRecipient {
   signing_link: string | null;
 }
 
+export interface SignatureTab {
+  id: string;
+  envelope_id: string;
+  recipient_id: string;
+  kind: "signature" | "initials" | "date" | "text" | "checkbox";
+  page: number;
+  x: number;       // 0..1
+  y: number;       // 0..1 (from top)
+  width: number;   // 0..1
+  height: number;  // 0..1
+  required: boolean;
+  label: string;
+  value: string;
+  filled_at: string | null;
+}
+
 export interface SignatureEnvelope {
   id: string;
   contract_id: string;
@@ -220,6 +236,7 @@ export interface SignatureEnvelope {
   sent_at: string | null;
   completed_at: string | null;
   recipients: SignatureRecipient[];
+  tabs: SignatureTab[];
 }
 
 export interface SigningInfo {
@@ -239,6 +256,7 @@ export interface SigningInfo {
   consent_text: string;
   envelope_status: string;
   sealed_pdf_path: string;
+  tabs: SignatureTab[];
 }
 
 // ---------- workflows ----------

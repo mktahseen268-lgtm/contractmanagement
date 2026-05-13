@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
@@ -1217,6 +1217,123 @@ function ObligationRow({ o, busy, onUpdate, onDelete }: { o: Obligation; busy: b
   );
 }
 
+const TAB_KIND_LABEL: Record<string, string> = {
+  signature: "Signature",
+  initials: "Initials",
+  date: "Date",
+  text: "Text",
+  checkbox: "Checkbox",
+};
+
+function TabsPanel({ env, onChanged }: { env: SignatureEnvelope; onChanged: () => void }) {
+  const tabs = env.tabs;
+  const recipById = useMemo(() => Object.fromEntries(env.recipients.map((r) => [r.id, r])), [env.recipients]);
+  // default to the first signer
+  const firstSigner = env.recipients.find((r) => r.kind === "signer");
+  const [recipientId, setRecipientId] = useState<string>(firstSigner?.id ?? "");
+  const [kind, setKind] = useState<"signature" | "initials" | "date" | "text" | "checkbox">("signature");
+  const [page, setPage] = useState(1);
+  const [x, setX] = useState(0.62);
+  const [y, setY] = useState(0.85);
+  const [label, setLabel] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function addTab() {
+    if (!recipientId) { setError("Pick a recipient."); return; }
+    setBusy(true); setError("");
+    try {
+      await api.post(`/envelopes/${env.id}/tabs`, {
+        recipient_id: recipientId, kind, page, x, y, width: 0.25, height: 0.05, required: true, label: label.trim(),
+      });
+      setLabel("");
+      onChanged();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't add tab.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function removeTab(id: string) {
+    setBusy(true);
+    try {
+      await api.del(`/envelopes/${env.id}/tabs/${id}`);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't remove tab.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 rounded-lg border border-line bg-surface-2 p-3">
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-medium text-ink">Signature tabs <span className="text-ink-3">({tabs.length})</span></div>
+        <div className="text-[11px] text-ink-3">Placed on the document — recipients see &amp; fill these</div>
+      </div>
+      {error && <ErrorBanner message={error} />}
+      {tabs.length > 0 && (
+        <div className="space-y-1">
+          {tabs.map((t) => {
+            const r = recipById[t.recipient_id];
+            return (
+              <div key={t.id} className="flex flex-wrap items-center gap-2 rounded-md bg-white px-3 py-2 text-sm">
+                <span className="rounded-full bg-accent-subtle px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent">{TAB_KIND_LABEL[t.kind]}</span>
+                <span className="text-ink-2">{r?.name ?? "?"}</span>
+                <span className="text-[11px] text-ink-3">p.{t.page} · x={t.x.toFixed(2)} y={t.y.toFixed(2)}</span>
+                {t.label && <span className="text-[11px] text-ink-3">· “{t.label}”</span>}
+                {!t.required && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] uppercase text-ink-3">optional</span>}
+                <Button size="sm" variant="ghost" className="ml-auto" onClick={() => removeTab(t.id)} disabled={busy} title="Remove">
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-2 rounded-md bg-white p-3 sm:grid-cols-6">
+        <label className="col-span-2 text-xs text-ink-3">Recipient
+          <select value={recipientId} onChange={(e) => setRecipientId(e.target.value)} className="mt-1 block h-9 w-full rounded-sm border border-line bg-white px-2 text-sm">
+            {env.recipients.map((r) => (
+              <option key={r.id} value={r.id}>{r.name} ({r.kind})</option>
+            ))}
+          </select>
+        </label>
+        <label className="text-xs text-ink-3">Kind
+          <select value={kind} onChange={(e) => setKind(e.target.value as typeof kind)} className="mt-1 block h-9 w-full rounded-sm border border-line bg-white px-2 text-sm">
+            <option value="signature">Signature</option>
+            <option value="initials">Initials</option>
+            <option value="date">Date</option>
+            <option value="text">Text</option>
+            <option value="checkbox">Checkbox</option>
+          </select>
+        </label>
+        <label className="text-xs text-ink-3">Page
+          <input type="number" min={1} value={page} onChange={(e) => setPage(Math.max(1, Number(e.target.value) || 1))} className="mt-1 block h-9 w-full rounded-sm border border-line bg-white px-2 text-sm" />
+        </label>
+        <label className="text-xs text-ink-3">X (0–1)
+          <input type="number" step={0.01} min={0} max={1} value={x} onChange={(e) => setX(Math.max(0, Math.min(1, Number(e.target.value) || 0)))} className="mt-1 block h-9 w-full rounded-sm border border-line bg-white px-2 text-sm" />
+        </label>
+        <label className="text-xs text-ink-3">Y (0–1)
+          <input type="number" step={0.01} min={0} max={1} value={y} onChange={(e) => setY(Math.max(0, Math.min(1, Number(e.target.value) || 0)))} className="mt-1 block h-9 w-full rounded-sm border border-line bg-white px-2 text-sm" />
+        </label>
+        <label className="col-span-2 text-xs text-ink-3 sm:col-span-3">Label (optional)
+          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. Signature — Buyer" className="mt-1 block h-9 w-full rounded-sm border border-line bg-white px-2 text-sm" />
+        </label>
+        <div className="col-span-2 flex items-end justify-end sm:col-span-3">
+          <Button size="sm" onClick={addTab} loading={busy}>
+            <PenLine className="h-3.5 w-3.5" /> Add tab
+          </Button>
+        </div>
+      </div>
+      <p className="text-[11px] text-ink-3">
+        v1 placement is form-based — pick the page and (x, y) as fractions (0 = top-left). Drag-and-drop placement on a PDF preview is on the roadmap (docs/13). Tabs are stamped onto the executed PDF on completion.
+      </p>
+    </div>
+  );
+}
+
 function SignaturesTab({ contract, env, onChanged }: { contract: ContractDetail; env: SignatureEnvelope | null; onChanged: () => void }) {
   const [recips, setRecips] = useState<DraftRecipient[]>([{ name: "", email: "", kind: "signer" }]);
   const [order, setOrder] = useState<"sequential" | "parallel">("sequential");
@@ -1395,6 +1512,8 @@ function SignaturesTab({ contract, env, onChanged }: { contract: ContractDetail;
           {env.completed_at ? ` · completed ${timeAgo(env.completed_at)}` : ""}
         </div>
         {env.message && <div className="rounded-md bg-surface-2 px-3 py-2 text-sm text-ink-2">&ldquo;{env.message}&rdquo;</div>}
+
+        {env.status === "draft" && <TabsPanel env={env} onChanged={onChanged} />}
 
         <div className="divide-y divide-line overflow-hidden rounded-lg border border-line">
           {env.recipients.map((r: SignatureRecipient) => (

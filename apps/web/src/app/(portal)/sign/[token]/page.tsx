@@ -9,6 +9,13 @@ import type { SigningInfo } from "@/lib/types";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+function initialsOf(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
 export default function SignPage() {
   const { token } = useParams<{ token: string }>();
   const [info, setInfo] = useState<SigningInfo | null>(null);
@@ -20,6 +27,7 @@ export default function SignPage() {
   const [showConsent, setShowConsent] = useState(false);
   const [declineMode, setDeclineMode] = useState(false);
   const [declineReason, setDeclineReason] = useState("");
+  const [tabFills, setTabFills] = useState<Record<string, string>>({});
 
   useEffect(() => {
     api
@@ -38,7 +46,8 @@ export default function SignPage() {
     setBusy(true);
     setError("");
     try {
-      setInfo(await api.post<SigningInfo>(`/sign/${token}/sign`, { full_name: fullName.trim(), consent: true }));
+      const fills = Object.entries(tabFills).map(([tab_id, value]) => ({ tab_id, value }));
+      setInfo(await api.post<SigningInfo>(`/sign/${token}/sign`, { full_name: fullName.trim(), consent: true, tab_fills: fills }));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Couldn't record your signature.");
     } finally {
@@ -126,6 +135,50 @@ export default function SignPage() {
                     <span className="font-mono text-[10px] uppercase tracking-wide text-ink-3">Signature preview</span>
                     <div className="mt-0.5 text-2xl font-bold italic text-ink">/s/&nbsp;{fullName.trim() || "—"}</div>
                   </div>
+
+                  {info.tabs.length > 0 && (
+                    <div className="space-y-2 rounded-md bg-white px-3 py-3">
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">
+                        Fields the sender placed on the document ({info.tabs.length})
+                      </div>
+                      {info.tabs.map((t) => (
+                        <div key={t.id} className="flex flex-wrap items-center gap-2 text-sm">
+                          <span className="grid h-6 min-w-6 place-items-center rounded bg-surface-2 px-1.5 text-[10px] font-semibold uppercase text-ink-3">
+                            p{t.page}
+                          </span>
+                          <span className="font-medium text-ink">{t.label || `${t.kind} field`}</span>
+                          <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] uppercase tracking-wide text-ink-3">{t.kind}</span>
+                          {t.kind === "signature" && (
+                            <span className="ml-auto italic text-ink-2">/s/&nbsp;{fullName.trim() || "—"}</span>
+                          )}
+                          {t.kind === "initials" && (
+                            <span className="ml-auto font-bold text-ink-2">{initialsOf(fullName) || "—"}</span>
+                          )}
+                          {t.kind === "date" && (
+                            <span className="ml-auto text-ink-2">{new Date().toLocaleDateString()}</span>
+                          )}
+                          {t.kind === "text" && (
+                            <input
+                              value={tabFills[t.id] ?? ""}
+                              onChange={(e) => setTabFills((m) => ({ ...m, [t.id]: e.target.value }))}
+                              placeholder={t.required ? "Required" : "Optional"}
+                              className="ml-auto h-8 min-w-[10rem] flex-1 rounded-sm border border-line bg-white px-2 text-sm"
+                            />
+                          )}
+                          {t.kind === "checkbox" && (
+                            <label className="ml-auto inline-flex items-center gap-2 text-xs text-ink-2">
+                              <input
+                                type="checkbox"
+                                checked={(tabFills[t.id] ?? "") === "true"}
+                                onChange={(e) => setTabFills((m) => ({ ...m, [t.id]: e.target.checked ? "true" : "" }))}
+                              />
+                              I agree {t.required && <span className="text-danger">*</span>}
+                            </label>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   <div className="flex flex-wrap items-center gap-2">
                     <Button onClick={sign} loading={busy} disabled={!consent || !fullName.trim()}>
                       <CheckCircle2 className="h-4 w-4" /> I agree &amp; sign

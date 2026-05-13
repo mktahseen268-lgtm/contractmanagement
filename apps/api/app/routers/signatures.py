@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
@@ -42,11 +43,15 @@ def _envelope_out(db: Session, envelope: models.SignatureEnvelope, *, include_li
             signed_name=r.signed_name, signed_at=r.signed_at, declined_reason=r.declined_reason, ip=r.ip,
             signing_link=(f"/sign/{r.access_token}" if (include_links and r.access_token) else None),
         ))
+    tabs = db.scalars(
+        select(models.SignatureTab).where(models.SignatureTab.envelope_id == envelope.id).order_by(models.SignatureTab.page, models.SignatureTab.y, models.SignatureTab.x)
+    ).all()
+    tab_out = [schemas.SignatureTabOut.model_validate(t) for t in tabs]
     return schemas.EnvelopeOut(
         id=envelope.id, contract_id=envelope.contract_id, status=envelope.status, signing_order=envelope.signing_order,
         message=envelope.message, document_file_id=envelope.document_file_id, sealed_pdf_file_id=envelope.sealed_pdf_file_id,
         certificate_file_id=envelope.certificate_file_id, created_by=envelope.created_by, created_at=envelope.created_at,
-        sent_at=envelope.sent_at, completed_at=envelope.completed_at, recipients=rec_out,
+        sent_at=envelope.sent_at, completed_at=envelope.completed_at, recipients=rec_out, tabs=tab_out,
     )
 
 
@@ -92,6 +97,7 @@ def prepare_signature(contract_id: str, data: schemas.PrepareSignatureIn, reques
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This contract has already been executed.")
         if existing.status == "draft":
             # replace the draft
+            db.query(models.SignatureTab).filter(models.SignatureTab.envelope_id == existing.id).delete(synchronize_session=False)
             db.query(models.SignatureEvent).filter(models.SignatureEvent.envelope_id == existing.id).delete(synchronize_session=False)
             db.query(models.SignatureRecipient).filter(models.SignatureRecipient.envelope_id == existing.id).delete(synchronize_session=False)
             db.delete(existing)
@@ -183,6 +189,89 @@ def envelope_certificate(envelope_id: str, db: Session = Depends(get_db), user: 
     return _stream(db, env.certificate_file_id, "The certificate of completion isn't ready yet.")
 
 
+# ---------- tabs (placeable fields on the PDF, per recipient) ----------
+
+
+_TAB_KINDS = {"signature", "initials", "date", "text", "checkbox"}
+
+
+def _clamp01(v: float, default: float = 0.0) -> float:
+    try:
+        return max(0.0, min(1.0, float(v)))
+    except (TypeError, ValueError):
+        return default
+
+
+@router.post("/envelopes/{envelope_id}/tabs", response_model=schemas.SignatureTabOut, status_code=status.HTTP_201_CREATED)
+def add_tab(envelope_id: str, data: schemas.SignatureTabIn, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.SignatureTabOut:
+    env = _get_owned_envelope(db, user, envelope_id)
+    if env.status != "draft":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Tabs can only be edited while the envelope is a draft.")
+    if user.role not in _EDIT_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to place tabs.")
+    r = db.get(models.SignatureRecipient, data.recipient_id)
+    if r is None or r.envelope_id != env.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Recipient is not part of this envelope.")
+    if data.kind not in _TAB_KINDS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Tab kind must be one of: {sorted(_TAB_KINDS)}")
+    if r.kind == "cc" and data.kind in {"signature", "initials"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CC recipients can't be assigned signature/initials tabs.")
+    tab = models.SignatureTab(
+        tenant_id=env.tenant_id, envelope_id=env.id, recipient_id=r.id,
+        kind=data.kind, page=max(1, int(data.page)),
+        x=_clamp01(data.x, 0.5), y=_clamp01(data.y, 0.5),
+        width=_clamp01(data.width, 0.25), height=_clamp01(data.height, 0.05),
+        required=bool(data.required), label=(data.label or "")[:120],
+    )
+    db.add(tab)
+    db.commit()
+    db.refresh(tab)
+    return schemas.SignatureTabOut.model_validate(tab)
+
+
+@router.patch("/envelopes/{envelope_id}/tabs/{tab_id}", response_model=schemas.SignatureTabOut)
+def update_tab(envelope_id: str, tab_id: str, data: schemas.SignatureTabUpdateIn, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.SignatureTabOut:
+    env = _get_owned_envelope(db, user, envelope_id)
+    tab = db.get(models.SignatureTab, tab_id)
+    if tab is None or tab.envelope_id != env.id or tab.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tab not found")
+    if env.status != "draft":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Tabs can only be edited while the envelope is a draft.")
+    if user.role not in _EDIT_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to edit tabs.")
+    payload = data.model_dump(exclude_unset=True)
+    if "kind" in payload and payload["kind"] is not None:
+        if payload["kind"] not in _TAB_KINDS:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Tab kind must be one of: {sorted(_TAB_KINDS)}")
+        tab.kind = payload["kind"]
+    if "page" in payload and payload["page"] is not None:
+        tab.page = max(1, int(payload["page"]))
+    for fld in ("x", "y", "width", "height"):
+        if fld in payload and payload[fld] is not None:
+            setattr(tab, fld, _clamp01(payload[fld], getattr(tab, fld)))
+    if "required" in payload and payload["required"] is not None:
+        tab.required = bool(payload["required"])
+    if "label" in payload and payload["label"] is not None:
+        tab.label = (payload["label"] or "")[:120]
+    db.commit()
+    db.refresh(tab)
+    return schemas.SignatureTabOut.model_validate(tab)
+
+
+@router.delete("/envelopes/{envelope_id}/tabs/{tab_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_tab(envelope_id: str, tab_id: str, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> None:
+    env = _get_owned_envelope(db, user, envelope_id)
+    tab = db.get(models.SignatureTab, tab_id)
+    if tab is None or tab.envelope_id != env.id or tab.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tab not found")
+    if env.status != "draft":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Tabs can only be edited while the envelope is a draft.")
+    if user.role not in _EDIT_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to delete tabs.")
+    db.delete(tab)
+    db.commit()
+
+
 # ---------- token-authenticated signing (no account) ----------
 
 
@@ -221,6 +310,12 @@ def _signing_info(db: Session, recipient: models.SignatureRecipient | None) -> s
             waiting = "This request hasn't been sent yet."
         else:
             waiting = "It's not your turn to sign yet — an earlier signer hasn't signed."
+    my_tabs = list(db.scalars(
+        select(models.SignatureTab).where(
+            models.SignatureTab.envelope_id == env.id,
+            models.SignatureTab.recipient_id == recipient.id,
+        ).order_by(models.SignatureTab.page, models.SignatureTab.y, models.SignatureTab.x)
+    ).all())
     return schemas.SigningInfoOut(
         valid=True,
         org_name=(tenant.name if tenant else "") or "",
@@ -234,6 +329,7 @@ def _signing_info(db: Session, recipient: models.SignatureRecipient | None) -> s
         can_sign=can_sign,
         waiting_reason=waiting,
         document_path=f"/sign/{recipient.access_token}/document",
+        tabs=[schemas.SignatureTabOut.model_validate(t) for t in my_tabs],
         consent_text=sig.CONSENT_TEXT,
         envelope_status=env.status,
     )
@@ -269,7 +365,7 @@ def signing_sign(token: str, data: schemas.SignIn, request: Request, db: Session
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This signing link is no longer active.")
     c = db.get(models.Contract, env.contract_id)
     try:
-        sig.sign(db, envelope=env, recipient=r, contract=c, full_name=data.full_name, ip=client_ip(request), ua=request.headers.get("user-agent", ""))
+        sig.sign(db, envelope=env, recipient=r, contract=c, full_name=data.full_name, ip=client_ip(request), ua=request.headers.get("user-agent", ""), tab_fills=data.tab_fills)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     db.commit()

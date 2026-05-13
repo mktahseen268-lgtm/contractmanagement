@@ -512,6 +512,53 @@ class WorkflowDecideIn(BaseModel):
 # ---------- e-signature ----------
 
 
+class SignatureTabIn(BaseModel):
+    recipient_id: str
+    kind: str = "signature"   # signature|initials|date|text|checkbox
+    page: int = 1
+    x: float = 0.5
+    y: float = 0.5
+    width: float = 0.25
+    height: float = 0.05
+    required: bool = True
+    label: str = ""
+
+
+class SignatureTabUpdateIn(BaseModel):
+    kind: str | None = None
+    page: int | None = None
+    x: float | None = None
+    y: float | None = None
+    width: float | None = None
+    height: float | None = None
+    required: bool | None = None
+    label: str | None = None
+    value: str | None = None   # used by the signer to fill text/checkbox tabs
+
+
+class SignatureTabOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    envelope_id: str
+    recipient_id: str
+    kind: str
+    page: int
+    x: float
+    y: float
+    width: float
+    height: float
+    required: bool
+    label: str
+    value: str
+    filled_at: dt.datetime | None
+
+
+class TabFillIn(BaseModel):
+    """One tab's value during /sign/{token}/sign — only meaningful for text/checkbox tabs."""
+    tab_id: str
+    value: str
+
+
 class RecipientIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     email: EmailStr
@@ -546,6 +593,7 @@ class EnvelopeOut(BaseModel):
     sent_at: dt.datetime | None
     completed_at: dt.datetime | None
     recipients: list[RecipientOut] = []
+    tabs: list[SignatureTabOut] = []  # all tabs across all recipients (sender view)
 
 
 class PrepareSignatureIn(BaseModel):
@@ -557,6 +605,7 @@ class PrepareSignatureIn(BaseModel):
 class SignIn(BaseModel):
     full_name: str = Field(min_length=1, max_length=200)
     consent: bool = True
+    tab_fills: list[TabFillIn] = []  # values for text/checkbox tabs (signature/initials/date are auto-filled)
 
 
 class DeclineIn(BaseModel):
@@ -662,6 +711,7 @@ class SigningInfoOut(BaseModel):
     consent_text: str = ""
     envelope_status: str = ""
     sealed_pdf_path: str = ""   # populated once the envelope is completed
+    tabs: list[SignatureTabOut] = []  # fields THIS recipient must fill
 
 
 # ---------- inbox ("waiting on you") ----------

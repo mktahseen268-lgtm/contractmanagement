@@ -14,3 +14,4 @@ celery[redis]==5.4.0
 redis==5.2.1
 boto3==1.35.71
 reportlab==4.2.5
+pypdf==5.1.0

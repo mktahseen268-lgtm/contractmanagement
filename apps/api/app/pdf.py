@@ -232,6 +232,94 @@ def _fmt_dt(d) -> str:
     return str(d)
 
 
+def stamp_tabs_on_pdf(pdf_bytes: bytes, tabs: list[dict]) -> bytes:
+    """Overlay signature/initials/date/text/checkbox tabs onto an existing PDF, in place. Each
+    tab carries normalized coords (page 1-based; x,y,width,height as 0..1 fractions of the page;
+    y is measured from the top to match the UI). Returns the new PDF bytes.
+
+    Uses ReportLab to render a transparent overlay page that matches each base page's media-box,
+    then merges via pypdf. Unknown pages are silently skipped. If pypdf isn't importable, returns
+    the input unchanged (the appended Signatures page still records who signed)."""
+    if not tabs:
+        return pdf_bytes
+    try:
+        from pypdf import PdfReader, PdfWriter
+        from reportlab.pdfgen import canvas as _canvas
+    except Exception:  # noqa: BLE001
+        return pdf_bytes
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    n_pages = len(reader.pages)
+    by_page: dict[int, list[dict]] = {}
+    for t in tabs:
+        p = max(1, int(t.get("page", 1)))
+        if p > n_pages:
+            continue
+        by_page.setdefault(p, []).append(t)
+    if not by_page:
+        return pdf_bytes
+
+    writer = PdfWriter()
+    for idx, base in enumerate(reader.pages, start=1):
+        if idx not in by_page:
+            writer.add_page(base)
+            continue
+        # build an overlay matching this page's size
+        mb = base.mediabox
+        try:
+            pw = float(mb.width); ph = float(mb.height)
+        except Exception:  # noqa: BLE001
+            pw, ph = 595.0, 842.0  # A4 default points
+        ov_buf = io.BytesIO()
+        cv = _canvas.Canvas(ov_buf, pagesize=(pw, ph))
+        for t in by_page[idx]:
+            x = float(t.get("x", 0.5)) * pw
+            y_from_top = float(t.get("y", 0.5)) * ph
+            y = ph - y_from_top
+            w = float(t.get("width", 0.25)) * pw
+            h = float(t.get("height", 0.05)) * ph
+            kind = t.get("kind", "signature")
+            value = (t.get("value") or "").strip()
+            # subtle field box
+            cv.setStrokeColorRGB(0.24, 0.48, 0.98)
+            cv.setLineWidth(0.6)
+            cv.rect(x, y - h, w, h, stroke=1, fill=0)
+            if kind == "signature":
+                cv.setFont("Helvetica-BoldOblique", max(10, min(int(h * 0.7), 24)))
+                cv.setFillColorRGB(0.06, 0.13, 0.26)
+                cv.drawString(x + 2, y - h * 0.7, ("/s/ " + value)[:200] if value else "/s/")
+            elif kind == "initials":
+                cv.setFont("Helvetica-Bold", max(10, min(int(h * 0.7), 18)))
+                cv.setFillColorRGB(0.06, 0.13, 0.26)
+                cv.drawString(x + 2, y - h * 0.7, value[:8] if value else "—")
+            elif kind == "date":
+                cv.setFont("Helvetica", max(8, min(int(h * 0.6), 12)))
+                cv.setFillColorRGB(0.06, 0.13, 0.26)
+                cv.drawString(x + 2, y - h * 0.7, value or "—")
+            elif kind == "checkbox":
+                cv.setFont("Helvetica-Bold", max(8, min(int(h * 0.8), 16)))
+                cv.setFillColorRGB(0.06, 0.13, 0.26)
+                if value == "true":
+                    cv.drawString(x + 2, y - h * 0.75, "✓")
+            else:  # text
+                cv.setFont("Helvetica", max(8, min(int(h * 0.6), 11)))
+                cv.setFillColorRGB(0.06, 0.13, 0.26)
+                cv.drawString(x + 2, y - h * 0.7, value[:120] if value else "")
+        cv.showPage()
+        cv.save()
+        ov_buf.seek(0)
+        overlay = PdfReader(ov_buf).pages[0]
+        try:
+            base.merge_page(overlay)
+        except Exception:  # noqa: BLE001
+            pass
+        writer.add_page(base)
+
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
 def render_signed_pdf_bytes(*, contract, org_name: str, signers: list[dict]) -> bytes:
     """The executed contract: the contract body (no DRAFT watermark) + a Signatures page."""
     st = _styles()

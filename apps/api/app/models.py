@@ -345,6 +345,29 @@ class Obligation(Base):
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
 
+class SignatureTab(Base):
+    """A field placed on the contract PDF for a specific recipient to fill: signature, initials,
+    a date, free text or a checkbox. Coordinates are normalized (0..1 of page width/height) so
+    they survive a re-render. Filled on signing; stamped onto the executed PDF on seal."""
+
+    __tablename__ = "signature_tabs"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    envelope_id: Mapped[str] = mapped_column(ForeignKey("signature_envelopes.id"), index=True)
+    recipient_id: Mapped[str] = mapped_column(ForeignKey("signature_recipients.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="signature")  # signature|initials|date|text|checkbox
+    page: Mapped[int] = mapped_column(Integer, default=1)
+    x: Mapped[float] = mapped_column(Float, default=0.5)  # 0..1 (left)
+    y: Mapped[float] = mapped_column(Float, default=0.5)  # 0..1 (top, so 0 is top-of-page)
+    width: Mapped[float] = mapped_column(Float, default=0.2)
+    height: Mapped[float] = mapped_column(Float, default=0.05)
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    label: Mapped[str] = mapped_column(String(120), default="")
+    value: Mapped[str] = mapped_column(String(500), default="")  # filled on signing
+    filled_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
+
+
 class FileObject(Base):
     __tablename__ = "file_objects"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)

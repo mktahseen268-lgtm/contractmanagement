@@ -184,7 +184,61 @@ def mark_viewed(db: Session, recipient: models.SignatureRecipient, envelope: mod
         _log(db, envelope, "opened", recipient=recipient, ip=ip, ua=ua)
 
 
-def sign(db: Session, *, envelope: models.SignatureEnvelope, recipient: models.SignatureRecipient, contract: models.Contract, full_name: str, ip: str, ua: str) -> models.SignatureEnvelope:
+def _initials_of(name: str) -> str:
+    parts = [p for p in (name or "").strip().split() if p]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+    return (parts[0][0] + parts[-1][0]).upper()
+
+
+def fill_tabs_for_recipient(db: Session, *, envelope: models.SignatureEnvelope, recipient: models.SignatureRecipient,
+                             full_name: str, fills: list | None = None) -> tuple[int, list[str]]:
+    """Fill this recipient's tabs as part of signing. Returns (filled_count, missing_required_labels).
+    signature/initials/date are auto-filled; text/checkbox tabs use values from `fills` (a list of
+    objects with .tab_id and .value, or dicts)."""
+    rows = list(db.scalars(
+        select(models.SignatureTab).where(
+            models.SignatureTab.envelope_id == envelope.id,
+            models.SignatureTab.recipient_id == recipient.id,
+        )
+    ).all())
+    if not rows:
+        return 0, []
+    by_id: dict[str, str] = {}
+    for f in (fills or []):
+        tid = f.tab_id if hasattr(f, "tab_id") else f.get("tab_id")
+        val = f.value if hasattr(f, "value") else f.get("value", "")
+        if tid:
+            by_id[tid] = str(val or "")
+    now = _now()
+    today_str = now.date().isoformat()
+    filled = 0
+    missing: list[str] = []
+    signed_name = (full_name or recipient.name).strip()[:200]
+    for t in rows:
+        if t.kind == "signature":
+            t.value = signed_name
+        elif t.kind == "initials":
+            t.value = _initials_of(signed_name)
+        elif t.kind == "date":
+            t.value = today_str
+        elif t.kind == "text":
+            t.value = (by_id.get(t.id, "") or "").strip()[:500]
+        elif t.kind == "checkbox":
+            t.value = "true" if (by_id.get(t.id, "") or "").lower() in ("true", "1", "yes", "on") else ""
+        else:
+            t.value = ""
+        if t.required and not t.value:
+            missing.append(t.label or f"{t.kind} (p.{t.page})")
+        else:
+            filled += 1
+        t.filled_at = now
+    return filled, missing
+
+
+def sign(db: Session, *, envelope: models.SignatureEnvelope, recipient: models.SignatureRecipient, contract: models.Contract, full_name: str, ip: str, ua: str, tab_fills: list | None = None) -> models.SignatureEnvelope:
     if envelope.status not in ("sent", "partially_signed"):
         raise ValueError("This envelope is no longer open for signing.")
     if recipient.kind != "signer":
@@ -194,6 +248,10 @@ def sign(db: Session, *, envelope: models.SignatureEnvelope, recipient: models.S
     rs = recipients(db, envelope.id)
     if not is_recipients_turn(envelope, recipient, rs):
         raise ValueError("It's not your turn to sign yet — an earlier signer hasn't signed.")
+    # fill any tabs assigned to this recipient (required tabs must end up non-empty)
+    _, missing = fill_tabs_for_recipient(db, envelope=envelope, recipient=recipient, full_name=full_name, fills=tab_fills)
+    if missing:
+        raise ValueError(f"Please fill these required fields: {', '.join(missing)}")
     now = _now()
     recipient.signed_name = (full_name or recipient.name).strip()[:200]
     recipient.consent_at = now
@@ -271,6 +329,7 @@ def remind(db: Session, *, envelope: models.SignatureEnvelope, recipient: models
 def delete_envelopes_for_contract(db: Session, contract_id: str) -> None:
     env_ids = [e[0] for e in db.execute(select(models.SignatureEnvelope.id).where(models.SignatureEnvelope.contract_id == contract_id)).all()]
     if env_ids:
+        db.query(models.SignatureTab).filter(models.SignatureTab.envelope_id.in_(env_ids)).delete(synchronize_session=False)
         db.query(models.SignatureEvent).filter(models.SignatureEvent.envelope_id.in_(env_ids)).delete(synchronize_session=False)
         db.query(models.SignatureRecipient).filter(models.SignatureRecipient.envelope_id.in_(env_ids)).delete(synchronize_session=False)
         db.query(models.SignatureEnvelope).filter(models.SignatureEnvelope.contract_id == contract_id).delete(synchronize_session=False)

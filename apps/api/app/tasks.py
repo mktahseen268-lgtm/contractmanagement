@@ -14,7 +14,7 @@ from .celery_app import celery
 from .config import settings
 from . import models
 from .database import SessionLocal, set_request_tenant
-from .pdf import is_draftish, render_certificate_bytes, render_contract_pdf_bytes, render_signed_pdf_bytes
+from .pdf import is_draftish, render_certificate_bytes, render_contract_pdf_bytes, render_signed_pdf_bytes, stamp_tabs_on_pdf
 from .storage import get_storage, tenant_key
 
 _STUB_PARTIES = ["Acme Corporation", "Globex LLC", "Northstar Industries", "Initech FZE", "Stark Trading Co.", "Wayne Holdings"]
@@ -156,6 +156,16 @@ def seal_envelope(envelope_id: str, tenant_id: str) -> str:
             event_dicts = [{"at": e.at, "event": e.event, "recipient_name": e.recipient_name, "ip": e.ip} for e in events]
 
             signed_bytes = render_signed_pdf_bytes(contract=c, org_name=org, signers=signers)
+            # Stamp placed tabs onto the executed PDF (in-place by page coords).
+            tab_rows = list(db.scalars(
+                select(models.SignatureTab).where(models.SignatureTab.envelope_id == env.id).order_by(models.SignatureTab.page)
+            ).all())
+            if tab_rows:
+                tab_dicts = [
+                    {"page": t.page, "x": t.x, "y": t.y, "width": t.width, "height": t.height, "kind": t.kind, "value": t.value}
+                    for t in tab_rows
+                ]
+                signed_bytes = stamp_tabs_on_pdf(signed_bytes, tab_dicts)
             cert_bytes = render_certificate_bytes(envelope=env, contract=c, org_name=org, recipients=recip_dicts, events=event_dicts)
 
             storage = get_storage()
