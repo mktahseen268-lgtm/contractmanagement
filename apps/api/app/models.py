@@ -282,6 +282,47 @@ class SignatureEvent(Base):
     meta: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
 
 
+class BackgroundJob(Base):
+    """A user-visible long-running job (PDF generation, envelope sealing, renewals sweep, …)
+    surfaced in the Progress Tray. v1 is a simple record-and-poll. Tenant-scoped."""
+
+    __tablename__ = "background_jobs"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(index=True)
+    type: Mapped[str] = mapped_column(String(50), index=True)  # contract.pdf | signature.seal | renewals.sweep | ocr | ...
+    label: Mapped[str] = mapped_column(String(300))            # human-readable: "Generating PDF for Lease — HQ"
+    status: Mapped[str] = mapped_column(String(20), default="running", index=True)  # queued | running | succeeded | failed
+    progress: Mapped[int] = mapped_column(Integer, default=0)  # 0..100
+    result_summary: Mapped[str] = mapped_column(String(400), default="")
+    error: Mapped[str] = mapped_column(String(600), default="")
+    object_type: Mapped[str] = mapped_column(String(40), default="")
+    object_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    href: Mapped[str] = mapped_column(String(400), default="")  # frontend route to open the result
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now, index=True)
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class EmailOutbox(Base):
+    """All outbound email goes through here. send_email() inserts a row; the worker (or in
+    eager-celery dev, immediately) attempts delivery. Per-row retry + status visible from the
+    Progress Tray. (docs/14 §4)"""
+
+    __tablename__ = "email_outbox"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(default="", index=True)  # may be "" for auth / signing-link emails
+    to_email: Mapped[str] = mapped_column(String(255))
+    to_name: Mapped[str] = mapped_column(String(200), default="")
+    subject: Mapped[str] = mapped_column(String(400))
+    body: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)  # queued | sent | failed
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str] = mapped_column(String(500), default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now, index=True)
+    sent_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class Obligation(Base):
     """A checklist item the workspace must do on a given contract — e.g. "renewal notice by 30d
     before end", "invoice quarterly", "deliver report by Q3". Status flows pending → done|skipped;

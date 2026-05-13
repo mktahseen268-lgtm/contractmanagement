@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
-from .. import models, renewal_service, schemas, security
+from .. import jobs, models, renewal_service, schemas, security
 from ..audit import record
 from ..database import get_db
 from ..deps import client_ip, get_current_user
@@ -27,11 +27,39 @@ def admin_sweep_renewals(request: Request, db: Session = Depends(get_db), user: 
     # Limit this on-demand sweep to the caller's tenant (the periodic Celery task runs across
     # all tenants). Tenant scoping is enforced both by RLS (the GUC is set in deps.py from the
     # JWT) and explicitly via a where-filter in renewal_service.sweep when given a tenant_id.
-    out = renewal_service.sweep(db)
+    job = jobs.create_job(db, tenant_id=user.tenant_id, type="renewals.sweep", label="Renewals sweep", created_by=user.id, href="/settings")
     db.commit()
+    try:
+        out = renewal_service.sweep(db)
+        summary = f"Flagged {out['flagged_expiring']} expiring · {out['moved_to_expired']} expired · {out['obligations_overdue']} obligations overdue · {out['reminders_sent']} reminders"
+        jobs.succeed(db, job, summary=summary)
+        db.commit()
+    except Exception as e:  # noqa: BLE001
+        jobs.fail(db, job, error=str(e))
+        db.commit()
+        raise
     record(db, tenant_id=user.tenant_id, action="admin.sweep_renewals", actor=user, object_type="workspace", object_id=user.tenant_id, ip=client_ip(request), meta=out)
     db.commit()
     return schemas.SweepResultOut(**out)
+
+
+# ---------- progress tray ----------
+
+
+@router.get("/jobs", response_model=list[schemas.BackgroundJobOut])
+def list_jobs(
+    status: str | None = None,
+    limit: int = 30,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+) -> list[schemas.BackgroundJobOut]:
+    """Recent background jobs for the current workspace (PDF generation, envelope sealing,
+    renewals sweep, …). RLS scopes this to the caller's tenant. Defaults to the 30 most recent."""
+    stmt = select(models.BackgroundJob).where(models.BackgroundJob.tenant_id == user.tenant_id)
+    if status:
+        stmt = stmt.where(models.BackgroundJob.status == status)
+    rows = db.scalars(stmt.order_by(desc(models.BackgroundJob.created_at)).limit(max(1, min(limit, 100)))).all()
+    return [schemas.BackgroundJobOut.model_validate(r) for r in rows]
 
 
 # ---------- users ----------

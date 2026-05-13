@@ -82,89 +82,107 @@ def process_ocr_job(job_id: str, tenant_id: str) -> str:
 def render_contract_pdf(contract_id: str, tenant_id: str, created_by: str) -> str:
     """Render the contract to a PDF, store it in object storage, and create a FileObject row.
     Returns the new file id (or '' if the contract is gone)."""
+    from . import jobs
+
     set_request_tenant(tenant_id)
     with SessionLocal() as db:
         c = db.get(models.Contract, contract_id)
         if c is None:
             return ""
-        tenant = db.get(models.Tenant, tenant_id)
-        org_name = (tenant.name if tenant else "Workspace") or "Workspace"
-        pdf_bytes = render_contract_pdf_bytes(contract=c, org_name=org_name, draft=is_draftish(c.status))
-        ref, title = c.reference_no, (c.title or "Contract")
-
-        storage = get_storage()
-        storage.ensure_ready()
-        fid = uuid.uuid4().hex
-        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{ref}_{title}").strip("_")[:120] or "contract"
-        name = f"{safe}.pdf"
-        key = tenant_key(tenant_id, "contract_pdf", f"{fid}-{name}")
-        storage.put(key, pdf_bytes, "application/pdf")
-
-        db.add(
-            models.FileObject(
-                id=fid,
-                tenant_id=tenant_id,
-                key=key,
-                bucket=settings.s3_bucket if settings.use_s3 else "",
-                backend=storage.name,
-                content_type="application/pdf",
-                size=len(pdf_bytes),
-                sha256=hashlib.sha256(pdf_bytes).hexdigest(),
-                original_name=name,
-                kind="contract_pdf",
-                parent_type="contract",
-                parent_id=contract_id,
-                created_by=created_by,
-            )
+        job = jobs.create_job(
+            db, tenant_id=tenant_id, type="contract.pdf", label=f"Generating PDF — {c.title}",
+            created_by=created_by, object_type="contract", object_id=contract_id, href=f"/contracts/{contract_id}",
         )
         db.commit()
-        return fid
+        try:
+            tenant = db.get(models.Tenant, tenant_id)
+            org_name = (tenant.name if tenant else "Workspace") or "Workspace"
+            pdf_bytes = render_contract_pdf_bytes(contract=c, org_name=org_name, draft=is_draftish(c.status))
+            ref, title = c.reference_no, (c.title or "Contract")
+
+            storage = get_storage()
+            storage.ensure_ready()
+            fid = uuid.uuid4().hex
+            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{ref}_{title}").strip("_")[:120] or "contract"
+            name = f"{safe}.pdf"
+            key = tenant_key(tenant_id, "contract_pdf", f"{fid}-{name}")
+            storage.put(key, pdf_bytes, "application/pdf")
+
+            db.add(
+                models.FileObject(
+                    id=fid, tenant_id=tenant_id, key=key,
+                    bucket=settings.s3_bucket if settings.use_s3 else "", backend=storage.name,
+                    content_type="application/pdf", size=len(pdf_bytes),
+                    sha256=hashlib.sha256(pdf_bytes).hexdigest(), original_name=name,
+                    kind="contract_pdf", parent_type="contract", parent_id=contract_id, created_by=created_by,
+                )
+            )
+            jobs.succeed(db, job, summary=f"Generated {name}", href=f"/contracts/{contract_id}")
+            db.commit()
+            return fid
+        except Exception as e:  # noqa: BLE001
+            jobs.fail(db, job, error=str(e))
+            db.commit()
+            raise
 
 
 @celery.task(name="signatures.seal_envelope")
 def seal_envelope(envelope_id: str, tenant_id: str) -> str:
     """Render the executed PDF + the Certificate of Completion for a completed envelope and link them."""
+    from . import jobs
+
     set_request_tenant(tenant_id)
     with SessionLocal() as db:
         env = db.get(models.SignatureEnvelope, envelope_id)
         if env is None or env.status != "completed":
             return ""
         c = db.get(models.Contract, env.contract_id)
-        tenant = db.get(models.Tenant, tenant_id)
-        org = (tenant.name if tenant else "Workspace") or "Workspace"
-        recips = list(db.scalars(select(models.SignatureRecipient).where(models.SignatureRecipient.envelope_id == env.id).order_by(models.SignatureRecipient.sequence)).all())
-        events = list(db.scalars(select(models.SignatureEvent).where(models.SignatureEvent.envelope_id == env.id).order_by(models.SignatureEvent.at)).all())
-        decline_times = {e.recipient_id: e.at for e in events if e.event == "declined"}
-        signers = [{"name": r.name, "email": r.email, "signed_name": r.signed_name, "signed_at": r.signed_at, "ip": r.ip} for r in recips if r.status == "signed" and r.kind == "signer"]
-        recip_dicts = [
-            {"name": r.name, "email": r.email, "kind": r.kind, "status": r.status, "signed_at": r.signed_at, "declined_at": decline_times.get(r.id), "declined_reason": r.declined_reason, "ip": r.ip}
-            for r in recips
-        ]
-        event_dicts = [{"at": e.at, "event": e.event, "recipient_name": e.recipient_name, "ip": e.ip} for e in events]
-
-        signed_bytes = render_signed_pdf_bytes(contract=c, org_name=org, signers=signers)
-        cert_bytes = render_certificate_bytes(envelope=env, contract=c, org_name=org, recipients=recip_dicts, events=event_dicts)
-
-        storage = get_storage()
-        storage.ensure_ready()
-        ref = c.reference_no or "contract"
-
-        def _store(data: bytes, kind: str, name: str) -> str:
-            fid = uuid.uuid4().hex
-            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")[:120] or "doc"
-            key = tenant_key(tenant_id, kind, f"{fid}-{safe}.pdf")
-            storage.put(key, data, "application/pdf")
-            db.add(models.FileObject(
-                id=fid, tenant_id=tenant_id, key=key, bucket=settings.s3_bucket if settings.use_s3 else "", backend=storage.name,
-                content_type="application/pdf", size=len(data), sha256=hashlib.sha256(data).hexdigest(), original_name=f"{safe}.pdf",
-                kind=kind, parent_type="contract", parent_id=c.id, created_by=env.created_by,
-            ))
-            return fid
-
-        env.sealed_pdf_file_id = _store(signed_bytes, "signed_pdf", f"{ref}_executed")
-        env.certificate_file_id = _store(cert_bytes, "certificate", f"{ref}_certificate_of_completion")
+        job = jobs.create_job(
+            db, tenant_id=tenant_id, type="signature.seal", label=f"Sealing executed PDF — {c.title}",
+            created_by=env.created_by, object_type="contract", object_id=c.id, href=f"/contracts/{c.id}?tab=signatures",
+        )
         db.commit()
-        return env.id
+        try:
+            tenant = db.get(models.Tenant, tenant_id)
+            org = (tenant.name if tenant else "Workspace") or "Workspace"
+            recips = list(db.scalars(select(models.SignatureRecipient).where(models.SignatureRecipient.envelope_id == env.id).order_by(models.SignatureRecipient.sequence)).all())
+            events = list(db.scalars(select(models.SignatureEvent).where(models.SignatureEvent.envelope_id == env.id).order_by(models.SignatureEvent.at)).all())
+            decline_times = {e.recipient_id: e.at for e in events if e.event == "declined"}
+            signers = [{"name": r.name, "email": r.email, "signed_name": r.signed_name, "signed_at": r.signed_at, "ip": r.ip} for r in recips if r.status == "signed" and r.kind == "signer"]
+            recip_dicts = [
+                {"name": r.name, "email": r.email, "kind": r.kind, "status": r.status, "signed_at": r.signed_at, "declined_at": decline_times.get(r.id), "declined_reason": r.declined_reason, "ip": r.ip}
+                for r in recips
+            ]
+            event_dicts = [{"at": e.at, "event": e.event, "recipient_name": e.recipient_name, "ip": e.ip} for e in events]
+
+            signed_bytes = render_signed_pdf_bytes(contract=c, org_name=org, signers=signers)
+            cert_bytes = render_certificate_bytes(envelope=env, contract=c, org_name=org, recipients=recip_dicts, events=event_dicts)
+
+            storage = get_storage()
+            storage.ensure_ready()
+            ref = c.reference_no or "contract"
+
+            def _store(data: bytes, kind: str, name: str) -> str:
+                fid = uuid.uuid4().hex
+                safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")[:120] or "doc"
+                key = tenant_key(tenant_id, kind, f"{fid}-{safe}.pdf")
+                storage.put(key, data, "application/pdf")
+                db.add(models.FileObject(
+                    id=fid, tenant_id=tenant_id, key=key, bucket=settings.s3_bucket if settings.use_s3 else "", backend=storage.name,
+                    content_type="application/pdf", size=len(data), sha256=hashlib.sha256(data).hexdigest(), original_name=f"{safe}.pdf",
+                    kind=kind, parent_type="contract", parent_id=c.id, created_by=env.created_by,
+                ))
+                return fid
+
+            env.sealed_pdf_file_id = _store(signed_bytes, "signed_pdf", f"{ref}_executed")
+            env.certificate_file_id = _store(cert_bytes, "certificate", f"{ref}_certificate_of_completion")
+            jobs.succeed(db, job, summary=f"Executed PDF + certificate produced for {ref}.")
+            db.commit()
+            return env.id
+        except Exception as e:  # noqa: BLE001
+            jobs.fail(db, job, error=str(e))
+            db.commit()
+            raise
 
 
 @celery.task(name="renewals.sweep")
@@ -180,8 +198,20 @@ def sweep_renewals() -> dict:
         return out
 
 
-# Beat schedule: once an hour. Honoured when a beat scheduler is running (celery -A app.celery_app
-# beat ...). For the scaffold the manual endpoint covers most needs.
+@celery.task(name="email.flush_outbox")
+def flush_email_outbox() -> dict:
+    """Retry any queued/failed outbox rows. Called from Celery beat every 60s; safe to re-run."""
+    from . import email as email_mod
+
+    with SessionLocal() as db:
+        out = email_mod.flush_outbox(db)
+        db.commit()
+        return out
+
+
+# Beat schedule. Honoured when a beat scheduler is running (celery -A app.celery_app beat ...).
+# For the scaffold the manual endpoint + immediate delivery cover most needs.
 celery.conf.beat_schedule = {
     "renewals-sweep-hourly": {"task": "renewals.sweep", "schedule": 3600.0},
+    "email-outbox-flush-1m": {"task": "email.flush_outbox", "schedule": 60.0},
 }

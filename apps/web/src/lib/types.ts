@@ -107,6 +107,22 @@ export interface SweepResult {
   obligations_overdue: number;
 }
 
+export interface BackgroundJob {
+  id: string;
+  type: string;
+  label: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  progress: number;
+  result_summary: string;
+  error: string;
+  object_type: string;
+  object_id: string | null;
+  href: string;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
 export interface Obligation {
   id: string;
   contract_id: string;

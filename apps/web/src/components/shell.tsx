@@ -4,11 +4,14 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  Activity,
   BarChart3,
   Bell,
+  Check,
   FileText,
   Inbox,
   LayoutDashboard,
+  Loader2,
   LogOut,
   Plus,
   Search,
@@ -16,12 +19,13 @@ import {
   ShieldCheck,
   Sparkles,
   Workflow,
+  X,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { cn, titleCase } from "@/lib/utils";
+import { cn, timeAgo, titleCase } from "@/lib/utils";
 import { Avatar } from "@/components/ui";
-import type { InboxSummary, Notification } from "@/lib/types";
+import type { BackgroundJob, InboxSummary, Notification } from "@/lib/types";
 
 type RailItem = { href: string; label: string; icon: typeof FileText; match: (p: string) => boolean; badgeKey?: "inbox" };
 const RAIL: RailItem[] = [
@@ -42,16 +46,33 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [notifs, setNotifs] = useState<Notification[]>([]);
   const [notifOpen, setNotifOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [trayOpen, setTrayOpen] = useState(false);
   const [inboxSummary, setInboxSummary] = useState<InboxSummary | null>(null);
+  const [jobs, setJobs] = useState<BackgroundJob[]>([]);
+
+  function loadJobs() {
+    api.get<BackgroundJob[]>("/jobs?limit=15").then(setJobs).catch(() => {});
+  }
 
   useEffect(() => {
     api.get<Notification[]>("/notifications").then(setNotifs).catch(() => {});
     api.get<InboxSummary>("/inbox/summary").then(setInboxSummary).catch(() => {});
+    loadJobs();
   }, [pathname]);
+
+  // poll jobs when there's running work
+  useEffect(() => {
+    const anyRunning = jobs.some((j) => j.status === "running" || j.status === "queued");
+    if (!anyRunning) return;
+    const id = setInterval(loadJobs, 3000);
+    return () => clearInterval(id);
+  }, [jobs]);
 
   const unread = notifs.filter((n) => !n.read_at).length;
   const inboxCount = inboxSummary?.total ?? 0;
   const inboxHigh = (inboxSummary?.high_priority ?? 0) > 0;
+  const runningCount = jobs.filter((j) => j.status === "running" || j.status === "queued").length;
+  const failedCount = jobs.filter((j) => j.status === "failed").length;
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-canvas text-ink">
@@ -138,7 +159,33 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <div className="relative">
               <button
                 onClick={() => {
+                  setTrayOpen((o) => !o);
+                  setNotifOpen(false);
+                  setMenuOpen(false);
+                  loadJobs();
+                }}
+                className="relative grid h-9 w-9 place-items-center rounded-md text-ink-2 hover:bg-surface-3"
+                title={runningCount ? `${runningCount} running` : "Background jobs"}
+              >
+                {runningCount > 0 ? <Loader2 className="h-[18px] w-[18px] animate-spin" /> : <Activity className="h-[18px] w-[18px]" />}
+                {(runningCount > 0 || failedCount > 0) && (
+                  <span
+                    className={cn(
+                      "absolute right-1 top-1 grid h-4 min-w-4 place-items-center rounded-full px-1 text-[10px] font-semibold",
+                      failedCount > 0 ? "bg-danger text-white" : "bg-accent text-accent-fg",
+                    )}
+                  >
+                    {(runningCount + failedCount) > 9 ? "9+" : runningCount + failedCount}
+                  </span>
+                )}
+              </button>
+              {trayOpen && <ProgressTray jobs={jobs} />}
+            </div>
+            <div className="relative">
+              <button
+                onClick={() => {
                   setNotifOpen((o) => !o);
+                  setTrayOpen(false);
                   setMenuOpen(false);
                 }}
                 className="relative grid h-9 w-9 place-items-center rounded-md text-ink-2 hover:bg-surface-3"
@@ -184,6 +231,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 onClick={() => {
                   setMenuOpen((o) => !o);
                   setNotifOpen(false);
+                  setTrayOpen(false);
                 }}
                 className="grid h-9 w-9 place-items-center rounded-md hover:bg-surface-3"
               >
@@ -216,6 +264,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           onClick={() => {
             setNotifOpen(false);
             setMenuOpen(false);
+            setTrayOpen(false);
           }}
         >
           {children}
@@ -273,6 +322,55 @@ function Sidebar({ pathname }: { pathname: string }) {
     <div className="mt-4 flex-1 px-3 text-[13px] text-ink-3">
       <p>Welcome. Jump back to your contracts, scan a document, or review the audit log.</p>
     </div>
+  );
+}
+
+function ProgressTray({ jobs }: { jobs: BackgroundJob[] }) {
+  return (
+    <div className="absolute right-0 top-11 z-50 w-96 overflow-hidden rounded-lg border border-line bg-white shadow-pop">
+      <div className="flex items-center justify-between border-b border-line px-3 py-2">
+        <span className="text-sm font-semibold">Background jobs</span>
+        <span className="text-[11px] text-ink-3">{jobs.length} recent</span>
+      </div>
+      <div className="max-h-96 overflow-y-auto">
+        {jobs.length === 0 && <div className="px-3 py-6 text-center text-sm text-ink-3">Nothing running.</div>}
+        {jobs.map((j) => (
+          <JobRow key={j.id} job={j} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function JobRow({ job }: { job: BackgroundJob }) {
+  const Icon =
+    job.status === "succeeded" ? Check :
+    job.status === "failed" ? X :
+    Loader2;
+  const tint =
+    job.status === "succeeded" ? "bg-emerald-100 text-emerald-700" :
+    job.status === "failed" ? "bg-red-100 text-red-700" :
+    "bg-amber-100 text-amber-700";
+  const inner = (
+    <div className="flex items-start gap-3 border-b border-line px-3 py-2.5 last:border-0 hover:bg-surface-2">
+      <span className={cn("grid h-7 w-7 shrink-0 place-items-center rounded-md", tint)}>
+        <Icon className={cn("h-3.5 w-3.5", (job.status === "running" || job.status === "queued") && "animate-spin")} />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm text-ink">{job.label}</div>
+        <div className="text-[11px] text-ink-3">
+          {job.status === "succeeded" && job.result_summary ? job.result_summary : null}
+          {job.status === "failed" && job.error ? <span className="text-danger">{job.error}</span> : null}
+          {(job.status === "running" || job.status === "queued") ? "Running…" : null}
+          <span className="ml-1">· {timeAgo(job.completed_at ?? job.started_at ?? job.created_at)}</span>
+        </div>
+      </div>
+    </div>
+  );
+  return job.href ? (
+    <Link href={job.href} className="block">{inner}</Link>
+  ) : (
+    <div>{inner}</div>
   );
 }
 

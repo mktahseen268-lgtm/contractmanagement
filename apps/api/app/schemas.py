@@ -223,6 +223,23 @@ class ObligationUpdateIn(BaseModel):
     status: str | None = None  # "pending" | "done" | "skipped"
 
 
+class BackgroundJobOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    type: str
+    label: str
+    status: str        # queued | running | succeeded | failed
+    progress: int
+    result_summary: str = ""
+    error: str = ""
+    object_type: str = ""
+    object_id: str | None = None
+    href: str = ""
+    created_at: dt.datetime
+    started_at: dt.datetime | None = None
+    completed_at: dt.datetime | None = None
+
+
 class ObligationOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
