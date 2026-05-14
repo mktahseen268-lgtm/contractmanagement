@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: contract-management
+  labels:
+    app.kubernetes.io/name: contract-management
+    pod-security.kubernetes.io/enforce: "restricted"
+    pod-security.kubernetes.io/warn: "restricted"
+    pod-security.kubernetes.io/audit: "restricted"

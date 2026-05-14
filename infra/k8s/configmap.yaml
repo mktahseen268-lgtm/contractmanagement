@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm-config
+  namespace: contract-management
+data:
+  ENV: "production"
+  APP_NAME: "Contract Management API"
+  LOG_FORMAT: "json"
+  LOG_LEVEL: "INFO"
+  COOKIE_SECURE: "true"
+  COOKIE_SAMESITE: "lax"
+  CORS_ORIGINS: "https://app.example.com"
+  FRONTEND_URL: "https://app.example.com"
+  RATE_LIMIT_ENABLED: "true"
+  RATE_LIMIT_STORE: "redis"
+  SECURITY_HEADERS_ENABLED: "true"
+  RUN_MIGRATIONS_ON_STARTUP: "true"
+  AUTO_SEED: "false"
+  CELERY_TASK_ALWAYS_EAGER: "false"
+  RETENTION_AUDIT_HOT_DAYS: "365"
+  RETENTION_AUDIT_ARCHIVE_DAYS: "3650"

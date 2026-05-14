@@ -1,3 +1,4 @@
+import datetime as dt
 import re
 import uuid
 
@@ -82,16 +83,47 @@ def register(data: schemas.RegisterIn, request: Request, response: Response, db:
 
 @router.post("/login", response_model=None)
 def login(data: schemas.LoginIn, request: Request, response: Response, db: Session = Depends(get_db)):
-    user = db.scalar(select(models.User).where(func.lower(models.User.email) == data.email.lower()))
+    email = data.email.lower()
+    user = db.scalar(select(models.User).where(func.lower(models.User.email) == email))
+
+    # 1) Lockout check (before checking password — short-circuit constant-time wise it's fine
+    #    because the attacker already knows the email exists; the lockout is the deterrent).
+    if user is not None:
+        set_request_tenant(user.tenant_id)
+        locked, until = svc.is_locked_out(db, user)
+        if locked:
+            record(db, tenant_id=user.tenant_id, action="auth.login.locked", actor=user, object_type="user", object_id=user.id, object_label=user.name, ip=client_ip(request))
+            db.commit()
+            retry_after = max(1, int((until - dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)).total_seconds()))
+            raise HTTPException(
+                status_code=status.HTTP_423_LOCKED,
+                detail=f"This account is temporarily locked due to too many failed sign-in attempts. Try again in about {retry_after // 60 + 1} minute(s).",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+    # 2) Credentials check
     if user is None or not user.is_active or not security.verify_password(data.password, user.password_hash):
+        reason = "unknown_user" if user is None else ("inactive" if not user.is_active else "bad_password")
+        if user is not None:
+            svc.record_failed_login(db, user=user, email=email, reason=reason, request=request)
+            record(db, tenant_id=user.tenant_id, action="auth.login.failed", actor=user, object_type="user", object_id=user.id, object_label=user.name, ip=client_ip(request), meta={"reason": reason})
+        else:
+            # don't link to a real user — but still keep the audit trail (unknown-email attempts)
+            db.add(models.LoginAttempt(
+                tenant_id="", user_id=None, email=email, success=False, reason=reason,
+                ip=client_ip(request), user_agent=(request.headers.get("user-agent", "") or "")[:400], at=dt.datetime.now(dt.timezone.utc).replace(tzinfo=None),
+            ))
+        db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password.")
-    set_request_tenant(user.tenant_id)
+
+    # 3) Successful primary auth
     if user.mfa_enabled:
         record(db, tenant_id=user.tenant_id, action="auth.mfa_challenge", actor=user, object_type="user", object_id=user.id, object_label=user.name, ip=client_ip(request))
         db.commit()
         return schemas.MfaChallengeOut(mfa_token=security.create_mfa_token(user.id, user.tenant_id))
+    svc.record_successful_login(db, user=user, request=request)
     tenant = db.get(models.Tenant, user.tenant_id)
-    record(db, tenant_id=user.tenant_id, action="auth.login", actor=user, object_type="user", object_id=user.id, object_label=user.name, ip=client_ip(request))
+    record(db, tenant_id=user.tenant_id, action="auth.login.success", actor=user, object_type="user", object_id=user.id, object_label=user.name, ip=client_ip(request))
     out = _auth_response(db, response, user, tenant, request)
     db.commit()
     return out

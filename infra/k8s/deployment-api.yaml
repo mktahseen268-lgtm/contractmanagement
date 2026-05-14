@@ -1,0 +1,134 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cm-api
+  namespace: contract-management
+  labels: { app: cm-api, component: api }
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: "25%", maxUnavailable: 0 }
+  selector: { matchLabels: { app: cm-api } }
+  template:
+    metadata:
+      labels: { app: cm-api, component: api }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: { matchLabels: { app: cm-api } }
+      containers:
+        - name: api
+          image: ghcr.io/your-org/cm-api:0.3.0   # replace; admission policy verifies cosign sig
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 8000, name: http }]
+          envFrom:
+            - configMapRef: { name: cm-config }
+            - secretRef: { name: cm-secrets }
+          resources:
+            requests: { cpu: 500m, memory: 512Mi }
+            limits:   { cpu: "2",   memory: 2Gi }
+          readinessProbe:
+            httpGet: { path: /healthz/ready, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cm-web
+  namespace: contract-management
+  labels: { app: cm-web, component: web }
+spec:
+  replicas: 2
+  strategy: { type: RollingUpdate, rollingUpdate: { maxSurge: "25%", maxUnavailable: 0 } }
+  selector: { matchLabels: { app: cm-web } }
+  template:
+    metadata: { labels: { app: cm-web, component: web } }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: web
+          image: ghcr.io/your-org/cm-web:0.3.0
+          ports: [{ containerPort: 3000, name: http }]
+          env:
+            - { name: NEXT_PUBLIC_API_URL, value: "https://api.example.com" }
+          resources: { requests: { cpu: 200m, memory: 256Mi }, limits: { cpu: "1", memory: 1Gi } }
+          readinessProbe: { httpGet: { path: /, port: http }, periodSeconds: 10 }
+          livenessProbe:  { httpGet: { path: /, port: http }, periodSeconds: 30 }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }, { name: cache, mountPath: /app/.next/cache }]
+      volumes: [{ name: tmp, emptyDir: {} }, { name: cache, emptyDir: {} }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cm-worker
+  namespace: contract-management
+  labels: { app: cm-worker, component: worker }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: cm-worker } }
+  template:
+    metadata: { labels: { app: cm-worker, component: worker } }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: worker
+          image: ghcr.io/your-org/cm-api:0.3.0
+          command: ["celery"]
+          args: ["-A", "app.celery_app", "worker", "--loglevel=info", "--concurrency=2", "-Q", "default,ocr"]
+          envFrom: [{ configMapRef: { name: cm-config } }, { secretRef: { name: cm-secrets } }]
+          resources: { requests: { cpu: 500m, memory: 512Mi }, limits: { cpu: "2", memory: 2Gi } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cm-beat
+  namespace: contract-management
+  labels: { app: cm-beat, component: beat }
+spec:
+  replicas: 1     # SINGLETON — Celery beat must not run multi-instance
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: cm-beat } }
+  template:
+    metadata: { labels: { app: cm-beat, component: beat } }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: beat
+          image: ghcr.io/your-org/cm-api:0.3.0
+          command: ["celery"]
+          args: ["-A", "app.celery_app", "beat", "--loglevel=info"]
+          envFrom: [{ configMapRef: { name: cm-config } }, { secretRef: { name: cm-secrets } }]
+          resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: 500m, memory: 256Mi } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }

@@ -3,6 +3,7 @@ product this is where the real OCR engine + LLM provider run (see docs/09)."""
 
 import datetime as dt
 import hashlib
+import json
 import random
 import re
 import time
@@ -219,9 +220,78 @@ def flush_email_outbox() -> dict:
         return out
 
 
+@celery.task(name="retention.purge")
+def retention_purge() -> dict:
+    """Archive + delete rows according to the retention policy in `docs/22-infra-deployment.md` §8.
+    Idempotent — re-runnable safely. Returns counts. RFI §C.8–C.11."""
+    import logging as _logging
+
+    from sqlalchemy import delete
+
+    _log = _logging.getLogger("uvicorn.error")
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    counts = {"audit_archived": 0, "audit_deleted": 0, "webhook_deliveries_deleted": 0,
+              "background_jobs_deleted": 0, "email_outbox_deleted": 0, "recovery_codes_deleted": 0, "otp_codes_deleted": 0}
+    audit_hot_cutoff = now - dt.timedelta(days=settings.retention_audit_hot_days)
+    audit_archive_cutoff = now - dt.timedelta(days=settings.retention_audit_archive_days)
+    wh_cutoff = now - dt.timedelta(days=settings.retention_webhook_delivery_days)
+    bg_cutoff = now - dt.timedelta(days=settings.retention_background_job_days)
+    eo_cutoff = now - dt.timedelta(days=settings.retention_email_outbox_days)
+    code_cutoff = now - dt.timedelta(hours=24)
+
+    with SessionLocal() as db:
+        # 1) Audit log: archive rows older than the hot window (default 1y) up to the archive
+        #    cutoff (default 10y) to object storage as NDJSON. Best-effort: if S3 isn't set,
+        #    rows stay in the hot store for the operator to handle out of band.
+        try:
+            rows = list(db.scalars(select(models.AuditLog).where(
+                models.AuditLog.at < audit_hot_cutoff,
+                models.AuditLog.at >= audit_archive_cutoff,
+            ).limit(50_000)).all())
+            if rows and settings.use_s3:
+                ndjson_lines = []
+                for r in rows:
+                    ndjson_lines.append(json.dumps({
+                        "id": r.id, "tenant_id": r.tenant_id,
+                        "at": r.at.isoformat() if r.at else None,
+                        "actor_name": r.actor_name, "action": r.action,
+                        "object_type": r.object_type, "object_id": r.object_id,
+                        "object_label": r.object_label, "meta": r.meta, "ip": r.ip,
+                    }, default=str))
+                key = f"archive/audit/{now.strftime('%Y/%m')}/audit-{now.strftime('%Y%m%d-%H%M%S')}.ndjson"
+                get_storage().put(key, "\n".join(ndjson_lines).encode("utf-8"), "application/x-ndjson")
+                ids = [r.id for r in rows]
+                db.execute(delete(models.AuditLog).where(models.AuditLog.id.in_(ids)))
+                counts["audit_archived"] = len(ids)
+        except Exception:  # noqa: BLE001
+            _log.exception("retention.purge: audit archive failed (rows remain in hot store)")
+
+        # 2) Audit log: hard-delete anything older than the archive cutoff (10 yr)
+        r = db.execute(delete(models.AuditLog).where(models.AuditLog.at < audit_archive_cutoff))
+        counts["audit_deleted"] = r.rowcount or 0
+        # 3) Webhook deliveries > 90 days
+        r = db.execute(delete(models.WebhookDelivery).where(models.WebhookDelivery.created_at < wh_cutoff))
+        counts["webhook_deliveries_deleted"] = r.rowcount or 0
+        # 4) Background jobs > 90 days
+        r = db.execute(delete(models.BackgroundJob).where(models.BackgroundJob.created_at < bg_cutoff))
+        counts["background_jobs_deleted"] = r.rowcount or 0
+        # 5) Email outbox > 30 days
+        r = db.execute(delete(models.EmailOutbox).where(models.EmailOutbox.created_at < eo_cutoff))
+        counts["email_outbox_deleted"] = r.rowcount or 0
+        # 6) Used/expired OTP + recovery codes > 24 h
+        r = db.execute(delete(models.OtpCode).where(models.OtpCode.created_at < code_cutoff))
+        counts["otp_codes_deleted"] = r.rowcount or 0
+        r = db.execute(delete(models.RecoveryCode).where(models.RecoveryCode.used_at.is_not(None), models.RecoveryCode.used_at < code_cutoff))
+        counts["recovery_codes_deleted"] = r.rowcount or 0
+
+        db.commit()
+    return counts
+
+
 # Beat schedule. Honoured when a beat scheduler is running (celery -A app.celery_app beat ...).
 # For the scaffold the manual endpoint + immediate delivery cover most needs.
 celery.conf.beat_schedule = {
     "renewals-sweep-hourly": {"task": "renewals.sweep", "schedule": 3600.0},
     "email-outbox-flush-1m": {"task": "email.flush_outbox", "schedule": 60.0},
+    "retention-purge-nightly": {"task": "retention.purge", "schedule": 86400.0},  # 24h
 }

@@ -1,11 +1,12 @@
-"""Session (rotating refresh token) + MFA (TOTP / recovery codes) + email-OTP helpers."""
+"""Session (rotating refresh token) + MFA (TOTP / recovery codes) + email-OTP helpers +
+per-account login lockout (RFI §A.7)."""
 
 import datetime as dt
 import uuid
 
 import pyotp
 from fastapi import Request, Response
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session as DbSession
 
 from . import models, security
@@ -231,3 +232,77 @@ def verify_otp(db: DbSession, user: models.User, code: str, purpose: str = "logi
         rec.used_at = _now()
         return True
     return False
+
+
+# ---------- login lockout (RFI §A.7) ----------
+
+
+def _get_lockout(db: DbSession, user: models.User) -> models.LockoutState | None:
+    return db.scalar(select(models.LockoutState).where(models.LockoutState.user_id == user.id))
+
+
+def is_locked_out(db: DbSession, user: models.User) -> tuple[bool, dt.datetime | None]:
+    """Returns (locked, until_naive_utc)."""
+    state = _get_lockout(db, user)
+    if state is None or state.locked_until is None:
+        return False, None
+    if state.locked_until <= _now():
+        # lockout expired — clear it so the next failed attempt starts a fresh window
+        state.failure_count = 0
+        state.locked_until = None
+        db.flush()
+        return False, None
+    return True, state.locked_until
+
+
+def record_failed_login(db: DbSession, *, user: models.User | None, email: str, reason: str, request: Request) -> tuple[bool, dt.datetime | None]:
+    """Log the failure + bump the lockout counter. Returns the new lockout state (locked,
+    until). Caller commits."""
+    now = _now()
+    db.add(models.LoginAttempt(
+        tenant_id=(user.tenant_id if user else ""),
+        user_id=(user.id if user else None), email=(email or "").lower()[:255],
+        success=False, reason=reason,
+        ip=client_ip(request), user_agent=(request.headers.get("user-agent", "") or "")[:400], at=now,
+    ))
+    if user is None:
+        return False, None
+    state = _get_lockout(db, user)
+    if state is None:
+        state = models.LockoutState(tenant_id=user.tenant_id, user_id=user.id, failure_count=0, locked_until=None, last_failure_at=now)
+        db.add(state)
+        db.flush()
+    # rolling window: if the last failure was older than the window, reset the counter
+    window = dt.timedelta(minutes=settings.login_failure_window_minutes)
+    if state.last_failure_at is None or (now - state.last_failure_at) > window:
+        state.failure_count = 0
+    state.failure_count = (state.failure_count or 0) + 1
+    state.last_failure_at = now
+    if state.failure_count >= settings.login_max_failures:
+        state.locked_until = now + dt.timedelta(minutes=settings.login_lockout_minutes)
+    db.flush()
+    return (state.locked_until is not None and state.locked_until > now), state.locked_until
+
+
+def record_successful_login(db: DbSession, *, user: models.User, request: Request) -> None:
+    """Reset lockout state, log success. Caller commits."""
+    now = _now()
+    db.add(models.LoginAttempt(
+        tenant_id=user.tenant_id, user_id=user.id, email=user.email.lower()[:255],
+        success=True, reason="ok",
+        ip=client_ip(request), user_agent=(request.headers.get("user-agent", "") or "")[:400], at=now,
+    ))
+    state = _get_lockout(db, user)
+    if state is not None:
+        state.failure_count = 0
+        state.locked_until = None
+        state.last_failure_at = None
+
+
+def admin_reset_lockout(db: DbSession, user: models.User) -> None:
+    """Admin-side reset (e.g. user locked out, can prove identity over support channel)."""
+    state = _get_lockout(db, user)
+    if state is not None:
+        state.failure_count = 0
+        state.locked_until = None
+        state.last_failure_at = None

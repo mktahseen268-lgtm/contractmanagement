@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata: { name: cm-backup, namespace: contract-management }
+spec:
+  schedule: "0 3 * * *"          # nightly 03:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata: { labels: { app: cm-backup, component: backup } }
+        spec:
+          restartPolicy: OnFailure
+          securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+          containers:
+            - name: backup
+              image: ghcr.io/your-org/cm-backup:0.3.0     # contains pg_dump, age, aws cli
+              command: ["/bin/bash", "/scripts/backup.sh"]
+              envFrom: [{ secretRef: { name: cm-secrets } }, { secretRef: { name: cm-backup-secrets } }]
+              env:
+                - { name: S3_BACKUP_BUCKET, value: "cm-backups-prod" }
+                - { name: KEEP_DAYS, value: "35" }
+              volumeMounts: [{ name: scripts, mountPath: /scripts }]
+          volumes:
+            - name: scripts
+              configMap:
+                name: cm-backup-scripts
+                defaultMode: 0755
