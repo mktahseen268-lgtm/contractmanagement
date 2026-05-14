@@ -1,10 +1,36 @@
 import datetime as dt
 import uuid
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, TypeDecorator
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
+
+
+class EncryptedString(TypeDecorator):
+    """A SQLAlchemy column type that transparently encrypts/decrypts at the application layer
+    using AES-256-GCM (via Fernet/MultiFernet, see `secrets_box`). Storage column is a
+    String — long enough to fit a Fernet token (≈ 100 chars for short plaintexts). RFI §A.8."""
+
+    impl = String
+    cache_ok = True
+
+    def __init__(self, length: int = 256, **kw):
+        super().__init__(length=length, **kw)
+
+    def process_bind_param(self, value, dialect):  # noqa: ARG002
+        if value is None:
+            return None
+        from .secrets_box import get_box
+
+        return get_box().encrypt(value)
+
+    def process_result_value(self, value, dialect):  # noqa: ARG002
+        if value is None:
+            return None
+        from .secrets_box import get_box
+
+        return get_box().decrypt(value)
 
 
 def _uuid() -> str:
@@ -48,7 +74,7 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     avatar_color: Mapped[str] = mapped_column(String(7), default="#3E7BFA")
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    mfa_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)  # base32 TOTP secret (set during setup; "active" once mfa_enabled)
+    mfa_secret: Mapped[str | None] = mapped_column(EncryptedString(256), nullable=True)  # base32 TOTP secret — encrypted at rest (AES-256-GCM via secrets_box)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now)
 
     tenant: Mapped[Tenant] = relationship(back_populates="users")
@@ -288,6 +314,37 @@ class SignatureEvent(Base):
     ip: Mapped[str] = mapped_column(String(64), default="")
     user_agent: Mapped[str] = mapped_column(String(400), default="")
     meta: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
+
+
+class LoginAttempt(Base):
+    """Record of every authentication attempt (success or failure). Drives the per-account
+    lockout (5 failures / 10 min → 15-min lockout) + serves as security-audit source for
+    'who tried to log in as me from where'. Tenant-isolated when we can tell the tenant; rows
+    for unknown-email attempts carry tenant_id=''. RFI §A.7."""
+
+    __tablename__ = "login_attempts"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(default="", index=True)
+    user_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    success: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    reason: Mapped[str] = mapped_column(String(60), default="")   # ok | bad_password | unknown_user | inactive | locked | mfa_failed
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    user_agent: Mapped[str] = mapped_column(String(400), default="")
+    at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now, index=True)
+
+
+class LockoutState(Base):
+    """One row per user capturing the active lockout (if any). Cleared on a successful sign-in
+    or admin reset. Reads are O(1) per login attempt."""
+
+    __tablename__ = "lockout_states"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(default="", index=True)
+    user_id: Mapped[str] = mapped_column(String(32), index=True, unique=True)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    last_failure_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class ContractTemplate(Base):

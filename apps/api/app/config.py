@@ -1,19 +1,23 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+_DEV_SECRET_KEY = "dev-only-change-me-please-0123456789abcdef"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "Contract Management API"
-    env: str = "dev"
+    env: Literal["dev", "test", "uat", "staging", "production"] = "dev"
 
-    # --- Database (PostgreSQL is the target stack). SQLite is accepted for a zero-setup quick look. ---
+    # --- Database (PostgreSQL is the target stack). SQLite is accepted for a zero-setup quick look. MSSQL is portable. ---
     database_url: str = "postgresql+psycopg2://cm:cm@localhost:5432/cm"
 
     # --- Auth / JWT ---
-    secret_key: str = "dev-only-change-me-please-0123456789abcdef"
+    secret_key: str = _DEV_SECRET_KEY
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30          # short-lived; refreshed via the rotating refresh cookie
     refresh_token_expire_days: int = 14            # opaque server-side token (rotated on use)
@@ -26,8 +30,38 @@ class Settings(BaseSettings):
     cookie_secure: bool = False                    # MUST be true in prod (https); false for local http
     cookie_samesite: str = "lax"                   # lax | strict | none
 
+    # --- Login lockout (RFI §A.7) ---
+    login_max_failures: int = 5                    # consecutive failures before lockout
+    login_failure_window_minutes: int = 10         # rolling window the failures are counted in
+    login_lockout_minutes: int = 15                # how long the user stays locked out
+
+    # --- Encryption-at-rest for sensitive columns (MFA secret today; more later) ---
+    # Newline-separated Fernet keys; the first is the current encryption key, the rest are kept
+    # for read-side rotation. Empty in dev — the EncryptedString type then passes values through.
+    mfa_encryption_keys: str = ""
+
+    # --- Rate limit (RFI §A.7) ---
+    rate_limit_enabled: bool = True
+    rate_limit_store: Literal["memory", "redis"] = "memory"  # redis recommended in prod
+
+    # --- Security headers (CSP can be loosened via env if frontend hosts elsewhere) ---
+    security_headers_enabled: bool = True
+    csp_extra_connect: str = ""                    # extra `connect-src` origins (comma-separated)
+    csp_report_only: bool = False
+
+    # --- Logging ---
+    log_format: Literal["json", "text"] = "json"   # text in dev for human readability, json in prod
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    # --- Retention policy (RFI §C.8-C.11) ---
+    retention_audit_hot_days: int = 365            # 1 year in DB
+    retention_audit_archive_days: int = 3650       # 10 years total
+    retention_webhook_delivery_days: int = 90
+    retention_background_job_days: int = 90
+    retention_email_outbox_days: int = 30
+
     # --- Email (for OTP / notifications). console = log it (dev); smtp = real send. ---
-    email_backend: str = "console"                 # console | smtp
+    email_backend: Literal["console", "smtp"] = "console"
     email_from: str = "no-reply@contract-management.local"
     smtp_host: str = "localhost"
     smtp_port: int = 25
@@ -64,6 +98,10 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     @property
+    def csp_extra_connect_list(self) -> list[str]:
+        return [o.strip() for o in self.csp_extra_connect.split(",") if o.strip()]
+
+    @property
     def broker_url(self) -> str:
         return self.celery_broker_url or self.redis_url
 
@@ -72,8 +110,24 @@ class Settings(BaseSettings):
         return self.celery_result_backend or self.redis_url
 
     @property
+    def db_dialect(self) -> str:
+        """`postgresql`, `mssql`, `sqlite`, … — first segment of the URL up to `+` or `://`."""
+        url = self.database_url.lower()
+        # postgresql+psycopg2://…  -> postgresql
+        head = url.split("://", 1)[0].split("+", 1)[0]
+        return head
+
+    @property
     def is_postgres(self) -> bool:
-        return self.database_url.startswith("postgres")
+        return self.db_dialect == "postgresql"
+
+    @property
+    def is_mssql(self) -> bool:
+        return self.db_dialect == "mssql"
+
+    @property
+    def is_sqlite(self) -> bool:
+        return self.db_dialect == "sqlite"
 
     @property
     def use_s3(self) -> bool:
@@ -82,6 +136,29 @@ class Settings(BaseSettings):
     @property
     def is_dev(self) -> bool:
         return self.env == "dev"
+
+    @property
+    def is_production(self) -> bool:
+        return self.env in ("production", "staging", "uat")
+
+    def validate_for_production(self) -> list[str]:
+        """Return a list of fatal misconfigurations when running outside dev. The app raises on
+        these at startup so the operator can't accidentally launch with dev defaults."""
+        errors: list[str] = []
+        if not self.is_dev:
+            if self.secret_key == _DEV_SECRET_KEY:
+                errors.append("SECRET_KEY is still the dev default — set a 32+ byte secret from a CSPRNG.")
+            if len(self.secret_key) < 32:
+                errors.append("SECRET_KEY must be at least 32 bytes.")
+            if not self.cookie_secure:
+                errors.append("COOKIE_SECURE must be true outside of dev (https).")
+            if not self.mfa_encryption_keys:
+                errors.append("MFA_ENCRYPTION_KEYS must be set (one or more Fernet keys, newline-separated).")
+            if self.cors_origins.startswith("http://localhost") and "localhost" in self.cors_origins:
+                errors.append("CORS_ORIGINS still contains localhost — narrow to the real frontend domain(s).")
+            if self.is_sqlite:
+                errors.append("SQLite is not supported outside dev — switch to PostgreSQL (or MSSQL).")
+        return errors
 
 
 @lru_cache

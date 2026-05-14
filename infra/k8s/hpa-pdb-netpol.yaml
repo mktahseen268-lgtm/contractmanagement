@@ -1,0 +1,88 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: cm-api, namespace: contract-management }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: cm-api }
+  minReplicas: 2
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
+    - type: Resource
+      resource: { name: memory, target: { type: Utilization, averageUtilization: 75 } }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: cm-web, namespace: contract-management }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: cm-web }
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: cm-worker, namespace: contract-management }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: cm-worker }
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 75 } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: cm-api, namespace: contract-management }
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app: cm-api } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: cm-web, namespace: contract-management }
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app: cm-web } }
+---
+# Default-deny + explicit allow. Egress is restricted to the namespace + cluster DNS + the
+# data services. Block RFC1918 / link-local / cloud-metadata egress at the CNI level for full
+# SSRF defence (Cilium / Calico-style egress rules — out of scope of this manifest).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny, namespace: contract-management }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-ingress-from-nginx, namespace: contract-management }
+spec:
+  podSelector: { matchLabels: { component: api } }
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
+      ports: [{ port: 8000, protocol: TCP }]
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-egress, namespace: contract-management }
+spec:
+  podSelector: {}
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    # In-namespace (API ↔ worker ↔ web)
+    - to:
+        - podSelector: {}
+    # Upstream TLS — narrow to the actual hostnames you depend on at the CNI level
+    - to:
+        - namespaceSelector: {}
+      ports: [{ port: 443, protocol: TCP }, { port: 5432, protocol: TCP }, { port: 6379, protocol: TCP }, { port: 587, protocol: TCP }, { port: 25, protocol: TCP }]
+  policyTypes: [Egress]

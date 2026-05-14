@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: contract-management
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  # `secret.example.yaml` is a TEMPLATE — replace with your real Secret + commit through your
+  # secrets pipeline (External Secrets Operator / Vault Operator) before apply.
+  - secret.example.yaml
+  - deployment-api.yaml
+  - service-ingress.yaml
+  - hpa-pdb-netpol.yaml
+  - backup-cronjob.yaml

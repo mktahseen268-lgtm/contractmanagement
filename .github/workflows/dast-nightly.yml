@@ -1,0 +1,27 @@
+name: DAST nightly (ZAP)
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  zap:
+    runs-on: ubuntu-latest
+    env:
+      TARGET: ${{ vars.STAGING_BASE_URL }}   # set in repo Variables, e.g. https://staging-api.example.com
+    if: ${{ vars.STAGING_BASE_URL != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: ZAP Baseline
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: "${{ env.TARGET }}"
+          rules_file_name: .zap/rules.tsv
+          cmd_options: "-a -m 8 -T 8"
+          fail_action: false
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: report_html.html

@@ -1,0 +1,32 @@
+title = "Contract Management — Gitleaks Config"
+
+# Built-in rules + a few project-specific allow-lists. CI runs `gitleaks detect --no-git`
+# on every PR.
+
+[allowlist]
+description = "Allowlisted patterns — paths or matches the scanner should ignore"
+paths = [
+    '''docs/snippets/''',
+    '''docs/.*\\.md''',                 # documentation snippets often contain example tokens
+    '''infra/k8s/secret\\.example\\.yaml''',
+    '''apps/api/\\.env\\.example''',
+    '''apps/web/\\.env\\.local\\.example''',
+]
+regexes = [
+    '''cm_[A-Za-z0-9_-]{20,}''',         # API-key shape that's deliberately shown in copies
+    '''SuperAdmin#2026''',               # example credentials in README
+    '''DemoUser#2026''',
+    '''demo1234''',
+]
+
+[[rules]]
+id = "generic-bearer-jwt"
+description = "JWT bearer token"
+regex = '''eyJ[A-Za-z0-9_-]{20,}\\.eyJ[A-Za-z0-9_-]{20,}\\.[A-Za-z0-9_-]{20,}'''
+tags = ["jwt"]
+
+[[rules]]
+id = "fernet-key"
+description = "Fernet key (base64 32 bytes)"
+regex = '''[A-Za-z0-9_-]{43}='''
+tags = ["fernet"]
