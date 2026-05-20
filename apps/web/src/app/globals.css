@@ -103,3 +103,121 @@ body {
   border: 2px solid transparent;
   background-clip: content-box;
 }
+
+/* Toast entrance — quiet slide+fade, no bounce (enterprise-restrained). */
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Drawer entrance — slide in from the right. */
+@keyframes drawer-in {
+  from {
+    transform: translateX(16px);
+    opacity: 0.6;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* ============================================================
+   Premium UI layer — uses the existing brand palette (accent
+   azure + ai violet), CSS-only, performance-safe. Honors
+   prefers-reduced-motion. (Design language ported from the
+   approved concept; colors kept as-is.)
+   ============================================================ */
+
+/* Subtle accent-tinted aurora behind the whole app shell — lifts the flat
+   gray canvas to something premium without hurting text contrast. */
+.app-aurora {
+  background:
+    radial-gradient(900px 460px at -8% -12%, rgba(62, 123, 250, 0.10), transparent 60%),
+    radial-gradient(820px 420px at 108% -6%, rgba(124, 92, 252, 0.07), transparent 60%),
+    var(--color-canvas);
+}
+
+/* Frosted glass for the top bar / sidebar over the aurora. */
+.glass {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.66));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+@supports not ((backdrop-filter: blur(12px)) or (-webkit-backdrop-filter: blur(12px))) {
+  .glass { background: var(--color-surface); }
+}
+
+/* Accent gradient text for hero headings / brand. */
+.text-gradient-accent {
+  background: linear-gradient(120deg, var(--color-accent) 0%, var(--color-ai) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+/* Display heading treatment — tight tracking, no new font file. */
+.font-display {
+  letter-spacing: -0.02em;
+}
+
+/* Reusable interactive card lift — quiet (2px), 160ms, no bounce. */
+.card-interactive {
+  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+}
+.card-interactive:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 0 0 1px rgba(62, 123, 250, 0.12), 0 16px 40px -18px rgba(62, 123, 250, 0.35);
+  border-color: rgba(62, 123, 250, 0.35);
+}
+
+/* Live status dot — gentle pulse. */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.3); }
+}
+.pulse-dot { animation: pulse-dot 1.8s ease-in-out infinite; }
+
+/* Spinner-free shimmer for skeletons (slightly richer than the flat pulse). */
+@keyframes shimmer {
+  100% { transform: translateX(100%); }
+}
+
+/* Chart line draw-on — sparklines + area chart trace in on first paint. */
+@keyframes chart-draw {
+  from { stroke-dashoffset: var(--dash, 600); }
+  to { stroke-dashoffset: 0; }
+}
+.chart-draw {
+  stroke-dasharray: var(--dash, 600);
+  animation: chart-draw 0.9s ease-out forwards;
+}
+@keyframes chart-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.chart-fade { animation: chart-fade 0.9s ease-out forwards; }
+
+/* Horizontal bar grow-in (distribution bars). transform-origin left keeps it anchored. */
+@keyframes bar-grow {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+.bar-grow {
+  transform-origin: left;
+  animation: bar-grow 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot,
+  .card-interactive { animation: none; transition: none; }
+  .card-interactive:hover { transform: none; }
+  .chart-draw, .chart-fade, .bar-grow { animation: none; stroke-dashoffset: 0; opacity: 1; transform: none; }
+}

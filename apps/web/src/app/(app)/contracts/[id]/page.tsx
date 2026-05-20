@@ -13,6 +13,7 @@ const BlockEditor = dynamic(() => import("@/components/block-editor").then((m) =
   loading: () => <div className="cm-doc min-h-[42vh] px-1 py-2 text-sm text-ink-3">Loading editor…</div>,
 });
 import { PageHeader } from "@/components/shell";
+import { useToast } from "@/components/toast";
 import { ActivityFeed } from "@/components/widgets";
 import { LifecycleBar, RiskBadge, StatusPill } from "@/components/lifecycle";
 import {
@@ -42,6 +43,7 @@ export default function ContractDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const search = useSearchParams();
+  const toast = useToast();
   const [contract, setContract] = useState<ContractDetail | null>(null);
   const [wfState, setWfState] = useState<ContractWorkflow | null>(null);
   const [sigState, setSigState] = useState<SignatureEnvelope | null>(null);
@@ -70,8 +72,11 @@ export default function ContractDetailPage() {
       await api.post<ContractDetail>(`/contracts/${contract.id}/submit-for-approval`, {});
       load();
       setTab("approvals");
+      toast.success("Submitted for approval");
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Couldn't submit for approval.");
+      const msg = e instanceof ApiError ? e.message : "Couldn't submit for approval.";
+      setError(msg);
+      toast.error("Couldn't submit for approval", msg);
     } finally {
       setSubmitBusy(false);
     }
@@ -90,8 +95,11 @@ export default function ContractDetailPage() {
     try {
       const updated = await api.post<ContractDetail>(`/contracts/${contract.id}/transition`, { status: toStatus, comment });
       setContract(updated);
+      toast.success(`Moved to ${(TRANSITION_LABELS[toStatus] ?? titleCase(toStatus)).replace(/^→\s*/, "")}`);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Couldn't update the contract.");
+      const msg = e instanceof ApiError ? e.message : "Couldn't update the contract.";
+      setError(msg);
+      toast.error("Couldn't update the contract", msg);
     } finally {
       setBusy(false);
     }
@@ -105,8 +113,11 @@ export default function ContractDetailPage() {
       const fo = await api.post<FileObject>(`/contracts/${contract.id}/pdf`);
       const blob = await api.blob(`/files/${fo.id}/download`);
       downloadBlob(blob, fo.original_name);
+      toast.success("PDF ready", "Your download has started.");
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Couldn't generate the PDF.");
+      const msg = e instanceof ApiError ? e.message : "Couldn't generate the PDF.";
+      setError(msg);
+      toast.error("Couldn't generate the PDF", msg);
     } finally {
       setPdfBusy(false);
     }
@@ -118,9 +129,12 @@ export default function ContractDetailPage() {
     setBusy(true);
     try {
       await api.del(`/contracts/${contract.id}`);
+      toast.success("Contract deleted");
       router.push("/contracts");
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Couldn't delete.");
+      const msg = e instanceof ApiError ? e.message : "Couldn't delete.";
+      setError(msg);
+      toast.error("Couldn't delete", msg);
       setBusy(false);
     }
   }
@@ -136,9 +150,12 @@ export default function ContractDetailPage() {
         change_summary: summary,
       });
       setRenewOpen(false);
+      toast.success("Renewal created", "Opened the successor contract.");
       router.push(`/contracts/${succ.id}`);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Couldn't renew this contract.");
+      const msg = e instanceof ApiError ? e.message : "Couldn't renew this contract.";
+      setError(msg);
+      toast.error("Couldn't renew", msg);
     } finally {
       setRenewBusy(false);
     }
@@ -792,6 +809,7 @@ const STEP_TONE: Record<string, string> = {
 };
 
 function ApprovalsTab({ contract, wf, onChanged }: { contract: ContractDetail; wf: ContractWorkflow | null; onChanged: () => void }) {
+  const toast = useToast();
   const [users, setUsers] = useState<User[]>([]);
   const [chosenWf, setChosenWf] = useState<string>("");
   const [submitBusy, setSubmitBusy] = useState(false);
@@ -826,8 +844,11 @@ function ApprovalsTab({ contract, wf, onChanged }: { contract: ContractDetail; w
     try {
       await api.post<ContractDetail>(`/contracts/${contract.id}/submit-for-approval`, { workflow_id: chosenWf || null });
       onChanged();
+      toast.success("Submitted for approval");
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Couldn't submit for approval.");
+      const msg = e instanceof ApiError ? e.message : "Couldn't submit for approval.";
+      setError(msg);
+      toast.error("Couldn't submit for approval", msg);
     } finally {
       setSubmitBusy(false);
     }
@@ -840,8 +861,12 @@ function ApprovalsTab({ contract, wf, onChanged }: { contract: ContractDetail; w
       await api.post<ContractDetail>(`/contracts/${contract.id}/workflow/decide`, { decision, comment: decideComment.trim() });
       setDecideComment("");
       onChanged();
+      const verb = decision === "approve" ? "Approved" : decision === "reject" ? "Rejected" : "Changes requested";
+      toast.success(verb, "Your decision was recorded.");
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Couldn't record your decision.");
+      const msg = e instanceof ApiError ? e.message : "Couldn't record your decision.";
+      setError(msg);
+      toast.error("Couldn't record your decision", msg);
     } finally {
       setDecideBusy(null);
     }
@@ -1335,6 +1360,7 @@ function TabsPanel({ env, onChanged }: { env: SignatureEnvelope; onChanged: () =
 }
 
 function SignaturesTab({ contract, env, onChanged }: { contract: ContractDetail; env: SignatureEnvelope | null; onChanged: () => void }) {
+  const toast = useToast();
   const [recips, setRecips] = useState<DraftRecipient[]>([{ name: "", email: "", kind: "signer" }]);
   const [order, setOrder] = useState<"sequential" | "parallel">("sequential");
   const [message, setMessage] = useState("");
@@ -1354,21 +1380,27 @@ function SignaturesTab({ contract, env, onChanged }: { contract: ContractDetail;
     try {
       await api.post(`/contracts/${contract.id}/prepare-signature`, { recipients: clean, message: message.trim(), signing_order: order });
       onChanged();
+      toast.success("Signing request prepared", `${clean.length} recipient${clean.length === 1 ? "" : "s"} added — review, then send.`);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Couldn't prepare the signing request.");
+      const msg = e instanceof ApiError ? e.message : "Couldn't prepare the signing request.";
+      setError(msg);
+      toast.error("Couldn't prepare the signing request", msg);
     } finally {
       setBusy(null);
     }
   }
 
-  async function act(key: string, fn: () => Promise<unknown>, fail: string) {
+  async function act(key: string, fn: () => Promise<unknown>, fail: string, ok?: string) {
     setBusy(key);
     setError("");
     try {
       await fn();
       onChanged();
+      if (ok) toast.success(ok);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : fail);
+      const msg = e instanceof ApiError ? e.message : fail;
+      setError(msg);
+      toast.error(fail, msg === fail ? undefined : msg);
     } finally {
       setBusy(null);
     }
@@ -1549,7 +1581,7 @@ function SignaturesTab({ contract, env, onChanged }: { contract: ContractDetail;
                   size="sm"
                   variant="ghost"
                   loading={busy === `remind-${r.id}`}
-                  onClick={() => act(`remind-${r.id}`, () => api.post(`/envelopes/${env.id}/recipients/${r.id}/remind`), "Couldn't send a reminder.")}
+                  onClick={() => act(`remind-${r.id}`, () => api.post(`/envelopes/${env.id}/recipients/${r.id}/remind`), "Couldn't send a reminder.", "Reminder sent")}
                 >
                   <Send className="h-3.5 w-3.5" /> Remind
                 </Button>
@@ -1561,10 +1593,10 @@ function SignaturesTab({ contract, env, onChanged }: { contract: ContractDetail;
         <div className="flex flex-wrap items-center gap-2">
           {env.status === "draft" && (
             <>
-              <Button loading={busy === "send"} onClick={() => act("send", () => api.post(`/envelopes/${env.id}/send`), "Couldn't send the request.")}>
+              <Button loading={busy === "send"} onClick={() => act("send", () => api.post(`/envelopes/${env.id}/send`), "Couldn't send the request.", "Sent for signature")}>
                 <Send className="h-4 w-4" /> Send for signature
               </Button>
-              <Button variant="ghost" loading={busy === "void"} onClick={() => act("void", () => api.post(`/envelopes/${env.id}/void`), "Couldn't discard the draft.")}>
+              <Button variant="ghost" loading={busy === "void"} onClick={() => act("void", () => api.post(`/envelopes/${env.id}/void`), "Couldn't discard the draft.", "Draft discarded")}>
                 <Trash2 className="h-4 w-4" /> Discard
               </Button>
             </>
@@ -1576,7 +1608,7 @@ function SignaturesTab({ contract, env, onChanged }: { contract: ContractDetail;
                   <FileText className="h-3.5 w-3.5" /> View sent document
                 </Button>
               )}
-              <Button variant="ghost" size="sm" loading={busy === "void"} onClick={() => act("void", () => api.post(`/envelopes/${env.id}/void`), "Couldn't void the envelope.")}>
+              <Button variant="ghost" size="sm" loading={busy === "void"} onClick={() => act("void", () => api.post(`/envelopes/${env.id}/void`), "Couldn't void the envelope.", "Envelope voided")}>
                 <X className="h-3.5 w-3.5" /> Void envelope
               </Button>
             </>

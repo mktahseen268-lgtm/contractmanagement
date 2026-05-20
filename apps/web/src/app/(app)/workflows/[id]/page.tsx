@@ -1,14 +1,20 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
 import { Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton } from "@/components/ui";
 import { PageHeader } from "@/components/shell";
-import { WorkflowBuilder } from "@/components/workflow-builder";
 import { timeAgo } from "@/lib/utils";
 import type { WorkflowDefinitionDetail, WorkflowRunListItem } from "@/lib/types";
+
+// Lazy-load the heavy builder (see /workflows/new for rationale).
+const WorkflowBuilder = dynamic(() => import("@/components/workflow-builder").then((m) => m.WorkflowBuilder), {
+  ssr: false,
+  loading: () => <div className="mx-auto max-w-2xl p-6"><Skeleton className="h-96 rounded-xl" /></div>,
+});
 
 const RUN_TONE: Record<string, string> = {
   running: "text-amber-800 bg-amber-100",

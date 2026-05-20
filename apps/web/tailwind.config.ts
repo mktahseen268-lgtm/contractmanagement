@@ -49,6 +49,8 @@ const config: Config = {
         card: "0 1px 2px rgba(20,33,61,.04), 0 4px 12px rgba(20,33,61,.06)",
         pop: "0 4px 16px rgba(20,33,61,.10), 0 2px 6px rgba(20,33,61,.06)",
         lift: "0 2px 4px rgba(20,33,61,.05), 0 8px 24px rgba(20,33,61,.10)",
+        // accent-tinted emphasis glow (brand azure) for active/featured surfaces
+        glow: "0 0 0 1px rgba(62,123,250,.15), 0 18px 44px -18px rgba(62,123,250,.40)",
       },
       fontFamily: {
         sans: ["Inter", "ui-sans-serif", "system-ui", "Segoe UI", "sans-serif"],

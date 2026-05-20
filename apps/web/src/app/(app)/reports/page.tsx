@@ -2,11 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Calendar, Download, FileSpreadsheet, Gauge, ListChecks, PenLine, TrendingUp } from "lucide-react";
+import { CalendarClock, Calendar, FileCheck2, FilePlus2, FileText, FileSpreadsheet, Gauge, ListChecks, PenLine, TrendingUp, Wallet } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton } from "@/components/ui";
 import { PageHeader } from "@/components/shell";
+import { AreaChart } from "@/components/charts";
 import { KpiCard } from "@/components/widgets";
 import { contractTypeLabel, downloadBlob, formatDate, formatMoney, statusMeta, titleCase } from "@/lib/utils";
 import type { ReportSummary, StuckItem } from "@/lib/types";
@@ -131,12 +132,12 @@ export default function ReportsPage() {
             Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-24 rounded-xl" />)
           ) : (
             <>
-              <KpiCard label="Total contracts" value={data.total_contracts} href="/contracts" />
-              <KpiCard label="Created in range" value={data.created_in_range} sub={`Last ${daysBetween(data.range_from, data.range_to)} days`} />
-              <KpiCard label="Signed in range" value={data.signed_in_range} sub="Envelopes completed" />
-              <KpiCard label="Active" value={data.active_count} sub={formatMoney(data.active_value, currency)} href="/contracts?status=active" />
-              <KpiCard label="Expiring ≤30d" value={data.expiring_30d} tone={data.expiring_30d ? "warn" : "default"} href="/contracts?status=expiring" />
-              <KpiCard label="Expiring ≤90d" value={data.expiring_90d} tone={data.expiring_90d ? "warn" : "default"} />
+              <KpiCard label="Total contracts" value={data.total_contracts} href="/contracts" icon={FileText} />
+              <KpiCard label="Created in range" value={data.created_in_range} sub={`Last ${daysBetween(data.range_from, data.range_to)} days`} icon={FilePlus2} />
+              <KpiCard label="Signed in range" value={data.signed_in_range} sub="Envelopes completed" icon={FileCheck2} tone="accent" />
+              <KpiCard label="Active" value={data.active_count} sub={formatMoney(data.active_value, currency)} href="/contracts?status=active" icon={Wallet} />
+              <KpiCard label="Expiring ≤30d" value={data.expiring_30d} tone={data.expiring_30d ? "warn" : "default"} href="/contracts?status=expiring" icon={CalendarClock} />
+              <KpiCard label="Expiring ≤90d" value={data.expiring_90d} tone={data.expiring_90d ? "warn" : "default"} icon={CalendarClock} />
             </>
           )}
         </div>
@@ -470,7 +471,7 @@ function DistributionCard({
                     </span>
                   </div>
                   <div className="h-2 overflow-hidden rounded-full bg-surface-3">
-                    <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.max(pct, 2)}%` }} />
+                    <div className={`bar-grow h-full rounded-full ${color}`} style={{ width: `${Math.max(pct, 2)}%` }} />
                   </div>
                 </div>
               );
@@ -490,23 +491,14 @@ function DistributionCard({
 }
 
 function MonthlySeries({ points, currency }: { points: { label: string; count: number; value: number }[]; currency?: string }) {
-  const max = Math.max(1, ...points.map((p) => p.count));
-  return (
-    <div className="flex items-end gap-1 overflow-x-auto pb-1">
-      {points.map((p) => {
-        const h = Math.max((p.count / max) * 100, 2);
-        return (
-          <div key={p.label} className="flex min-w-[36px] flex-1 flex-col items-center" title={`${p.label}: ${p.count} contracts · ${formatMoney(p.value, currency)}`}>
-            <div className="flex h-32 w-full items-end">
-              <div className="w-full rounded-t bg-accent/80 transition-colors hover:bg-accent" style={{ height: `${h}%` }} />
-            </div>
-            <div className="mt-1 text-[10px] text-ink-3">{p.label.slice(5)}/{p.label.slice(2, 4)}</div>
-            <div className="text-[10px] font-medium text-ink-2">{p.count}</div>
-          </div>
-        );
-      })}
-    </div>
-  );
+  // Reuse the interactive area chart (hover tooltip + animated draw). Map month labels to a
+  // compact MM/YY and the report's {count} to the chart's {contracts} field.
+  const chartPoints = points.map((p) => ({
+    label: `${p.label.slice(5)}/${p.label.slice(2, 4)}`,
+    contracts: p.count,
+    value: p.value,
+  }));
+  return <AreaChart points={chartPoints} formatValue={(v) => formatMoney(v, currency)} />;
 }
 
 function CycleCell({ title, days, median, n, sub }: { title: string; days: number; median?: number; n: number; sub?: string }) {

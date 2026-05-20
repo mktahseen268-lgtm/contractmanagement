@@ -1,4 +1,5 @@
 import datetime as dt
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -165,6 +166,23 @@ class ContractUpdateIn(BaseModel):
 class TransitionIn(BaseModel):
     status: str
     comment: str = ""
+
+
+class ContractBulkIn(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=200)
+    action: Literal["delete"] = "delete"
+
+
+class ContractBulkSkip(BaseModel):
+    id: str
+    reason: str
+
+
+class ContractBulkResult(BaseModel):
+    requested: int
+    succeeded: int
+    deleted_ids: list[str]
+    skipped: list[ContractBulkSkip]
 
 
 class ContractListItem(BaseModel):
@@ -475,6 +493,34 @@ class DashboardOut(BaseModel):
     recent_activity: list[ActivityItem]
     my_open: list[ContractListItem]
     expiring_soon: list[ContractListItem]
+
+
+# Focused dashboard slices — let the web fetch each widget independently so the fast KPI row
+# paints without waiting on the heavier activity / attention queries.
+class DashboardKpisOut(BaseModel):
+    total_contracts: int
+    pending_approvals: int
+    awaiting_signature: int
+    expiring_30d: int
+    active_value: float
+    open_risks: int
+
+
+class DashboardDistributionOut(BaseModel):
+    by_status: list[StatusCount]
+    by_type: list[StatusCount]
+
+
+class DashboardTrendPoint(BaseModel):
+    label: str          # week start, e.g. "May 12"
+    contracts: int      # contracts created that week
+    value: float        # total contract value created that week
+
+
+class DashboardTrendsOut(BaseModel):
+    points: list[DashboardTrendPoint]   # oldest → newest (8 weeks)
+    total_contracts: int                # sum over the window
+    delta_pct: float                    # last week vs the previous week, %
 
 
 # ---------- audit ----------

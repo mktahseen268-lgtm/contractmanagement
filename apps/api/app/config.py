@@ -35,14 +35,32 @@ class Settings(BaseSettings):
     login_failure_window_minutes: int = 10         # rolling window the failures are counted in
     login_lockout_minutes: int = 15                # how long the user stays locked out
 
-    # --- Encryption-at-rest for sensitive columns (MFA secret today; more later) ---
+    # --- Encryption-at-rest for sensitive columns (MFA secret + signing-link secret +
+    # webhook HMAC secret). Same key chain so one rotation rotates everything. ---
     # Newline-separated Fernet keys; the first is the current encryption key, the rest are kept
     # for read-side rotation. Empty in dev — the EncryptedString type then passes values through.
     mfa_encryption_keys: str = ""
 
+    # --- Audit-log tamper-evidence chain (RFI §A.16 / docs/19) ---
+    # HMAC key for the per-tenant hash chain on `audit_log`. Defaults to deriving from
+    # `secret_key` when empty (still useful — every row is HMAC'd; an attacker needs *both*
+    # the DB and this key to forge a consistent chain). In production set explicitly so JWT
+    # signing-key rotation doesn't invalidate historical verification.
+    audit_chain_key: str = ""
+
+    # --- Password policy (RFI §A.7) ---
+    password_min_length: int = 12                  # production minimum; dev override below
+    password_min_length_dev: int = 8               # used when env=dev for ergonomics
+    password_require_classes: int = 3              # require >= N of {lower, upper, digit, symbol}
+    password_max_length: int = 128                 # bcrypt truncates at 72 bytes anyway; cap at 128
+
+    # --- Signing-link tokens ---
+    signing_token_ttl_days: int = 14               # expiry for /sign/{token} URLs
+
     # --- Rate limit (RFI §A.7) ---
     rate_limit_enabled: bool = True
     rate_limit_store: Literal["memory", "redis"] = "memory"  # redis recommended in prod
+    rate_limit_redis_url: str = ""                 # falls back to `redis_url` when empty
 
     # --- Security headers (CSP can be loosened via env if frontend hosts elsewhere) ---
     security_headers_enabled: bool = True
@@ -52,6 +70,14 @@ class Settings(BaseSettings):
     # --- Logging ---
     log_format: Literal["json", "text"] = "json"   # text in dev for human readability, json in prod
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    # --- Observability (RFI T-1 / docs/26) ---
+    # `/metrics` (Prometheus) is always on. OpenTelemetry tracing is opt-in: set otel_enabled
+    # AND point otel_exporter_otlp_endpoint at a collector (OTLP/HTTP, e.g. http://otel:4318).
+    # Requires the optional extras in `requirements-otel.txt`; degrades to a no-op otherwise.
+    otel_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = ""          # e.g. http://otel-collector:4318
+    otel_service_name: str = "cm-api"
 
     # --- Retention policy (RFI §C.8-C.11) ---
     retention_audit_hot_days: int = 365            # 1 year in DB
@@ -90,6 +116,10 @@ class Settings(BaseSettings):
     s3_access_key: str = ""
     s3_secret_key: str = ""
     s3_region: str = "us-east-1"
+    # Per-object server-side encryption — empty disables (e.g. for MinIO without KMS in dev).
+    # "AES256" = SSE-S3 (default AWS-managed key). "aws:kms" = SSE-KMS (requires `s3_sse_kms_key_id`).
+    s3_sse: Literal["", "AES256", "aws:kms"] = ""
+    s3_sse_kms_key_id: str = ""
     local_storage_dir: str = "./storage"
     max_upload_mb: int = 50
 
@@ -140,6 +170,19 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.env in ("production", "staging", "uat")
+
+    @property
+    def effective_password_min_length(self) -> int:
+        return self.password_min_length_dev if self.is_dev else self.password_min_length
+
+    @property
+    def effective_audit_chain_key(self) -> str:
+        """Use the explicit `audit_chain_key` when set; otherwise derive a stable key from
+        `secret_key` so chaining still works without operator config (with the caveat that a
+        rotation of `secret_key` invalidates historical verification)."""
+        if self.audit_chain_key:
+            return self.audit_chain_key
+        return f"audit-chain::{self.secret_key}"
 
     def validate_for_production(self) -> list[str]:
         """Return a list of fatal misconfigurations when running outside dev. The app raises on

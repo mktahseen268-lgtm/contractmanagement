@@ -70,10 +70,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "${{ env.PY_VERSION }}", cache: "pip", cache-dependency-path: apps/api/requirements.txt }
-      - run: pip install -r apps/api/requirements.txt
-      - run: pip install pytest pytest-cov httpx
-      # The test suite is currently the throwaway smoke scripts; ratchet to a real pytest run.
+      - run: pip install -r apps/api/requirements-dev.txt
+      # Import smoke: catches import-time errors that pytest collection might mask.
       - run: cd apps/api && python -c "from app.main import app; print('import ok')"
+      # Real test suite: lifecycle invariants, audit hash-chain, refresh-token reuse,
+      # signing-token hash storage, password policy. Runs against the live Postgres + Redis
+      # services declared above so RLS + JSONB + advisory-lock paths are exercised for real.
+      - run: cd apps/api && pytest -v --tb=short
+        env:
+          CM_TEST_DATABASE_URL: "postgresql+psycopg2://cm:cm@localhost:5432/cm"
+          RATE_LIMIT_STORE: "redis"
 
   # ---------------------------------------------------------------------- SAST + secrets
   sast:

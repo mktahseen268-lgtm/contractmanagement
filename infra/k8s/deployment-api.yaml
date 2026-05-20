@@ -96,10 +96,21 @@ metadata:
   labels: { app: cm-worker, component: worker }
 spec:
   replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
   selector: { matchLabels: { app: cm-worker } }
   template:
-    metadata: { labels: { app: cm-worker, component: worker } }
+    metadata:
+      labels: { app: cm-worker, component: worker }
+      annotations:
+        # The worker exits cleanly on SIGTERM (Celery default) — give it 60s to drain in-flight
+        # OCR + signing jobs before the kubelet sends SIGKILL.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9540"
     spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
       securityContext: { runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: worker
@@ -108,7 +119,36 @@ spec:
           args: ["-A", "app.celery_app", "worker", "--loglevel=info", "--concurrency=2", "-Q", "default,ocr"]
           envFrom: [{ configMapRef: { name: cm-config } }, { secretRef: { name: cm-secrets } }]
           resources: { requests: { cpu: 500m, memory: 512Mi }, limits: { cpu: "2", memory: 2Gi } }
+          # Liveness: `celery inspect ping` round-trips through the broker — if the worker is
+          # alive AND can talk to Redis, this succeeds. failureThreshold=3 means the worker
+          # gets ~3 minutes of broker outage before restart (avoids restart storms during
+          # Redis blips). startupProbe gives it 2 minutes to boot before the others run.
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "celery -A app.celery_app inspect ping -d celery@$HOSTNAME --timeout 10"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "celery -A app.celery_app inspect ping -d celery@$HOSTNAME --timeout 10"]
+            periodSeconds: 60
+            timeoutSeconds: 15
+            failureThreshold: 3
+          # Readiness: the worker is "ready" once it has registered with the broker. We use
+          # the same ping but a tighter cadence + lower threshold so a wedged worker stops
+          # taking new tasks within ~30s.
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "celery -A app.celery_app inspect ping -d celery@$HOSTNAME --timeout 5"]
+            periodSeconds: 15
+            timeoutSeconds: 8
+            failureThreshold: 2
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
 ---
 apiVersion: apps/v1
 kind: Deployment

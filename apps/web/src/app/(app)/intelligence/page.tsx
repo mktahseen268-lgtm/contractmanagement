@@ -2,11 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { FileText, FileUp, Loader2, Sparkles, Upload } from "lucide-react";
+import { Check, FileText, FileUp, ListChecks, Loader2, ScanLine, Sparkles, Upload } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Button, Card, CardBody, CardHeader, CardTitle, ConfidenceChip, ErrorBanner, Input } from "@/components/ui";
 import { PageHeader } from "@/components/shell";
-import { titleCase } from "@/lib/utils";
+import { cn, titleCase } from "@/lib/utils";
 import type { ContractDetail, OcrJob } from "@/lib/types";
 
 export default function IntelligencePage() {
@@ -26,7 +26,7 @@ export default function IntelligencePage() {
   function poll(id: string, tries = 0) {
     pollRef.current = setTimeout(async () => {
       try {
-        const j = await api.get<OcrJob>(`/ocr/jobs/${id}`);
+        const j = await api.get<OcrJob>(`/ocr/jobs/${id}`, { cache: false });
         setJob(j);
         if (j.status === "completed" || j.status === "failed") setScanning(false);
         else if (tries < 40) poll(id, tries + 1);
@@ -146,10 +146,28 @@ export default function IntelligencePage() {
         </Card>
 
         {processing && (
-          <Card>
-            <CardBody className="flex items-center gap-3 text-sm text-ink-2">
-              <Loader2 className="h-4 w-4 animate-spin text-ai" />
-              <span>{job?.status === "queued" ? "Queued for processing" : "Processing"} — {job?.file_name}{job?.progress ? ` (${job.progress}%)` : ""}…</span>
+          <Card className="overflow-hidden">
+            <CardBody>
+              <div className="mb-3 flex items-center gap-3">
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-ai-bg text-ai">
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-semibold text-ink">Analyzing {job?.file_name}</div>
+                  <div className="text-xs text-ink-3">
+                    {job?.status === "queued" ? "Queued for processing…" : "Reading the document and extracting terms…"}
+                  </div>
+                </div>
+                <div className="font-display text-lg font-bold tnum text-ai">{job?.progress ?? 0}%</div>
+              </div>
+              {/* gradient progress bar */}
+              <div className="h-2 overflow-hidden rounded-full bg-surface-3">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-accent to-ai transition-all duration-500 ease-out"
+                  style={{ width: `${Math.max(job?.progress ?? 0, 6)}%` }}
+                />
+              </div>
+              <ExtractionSteps progress={job?.progress ?? 0} />
             </CardBody>
           </Card>
         )}
@@ -217,6 +235,45 @@ export default function IntelligencePage() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+const EXTRACTION_STEPS = [
+  { label: "Uploaded", icon: Upload, at: 0 },
+  { label: "Reading text", icon: ScanLine, at: 20 },
+  { label: "Extracting fields", icon: Sparkles, at: 45 },
+  { label: "Detecting clauses", icon: ListChecks, at: 70 },
+  { label: "Summarizing", icon: FileText, at: 90 },
+];
+
+function ExtractionSteps({ progress }: { progress: number }) {
+  // derive the active stage from real job progress
+  const activeIdx = EXTRACTION_STEPS.reduce((acc, s, i) => (progress >= s.at ? i : acc), 0);
+  return (
+    <div className="mt-5 flex items-start justify-between gap-1">
+      {EXTRACTION_STEPS.map((s, i) => {
+        const done = i < activeIdx;
+        const active = i === activeIdx;
+        const Icon = s.icon;
+        return (
+          <div key={s.label} className="flex flex-1 flex-col items-center gap-1.5 text-center">
+            <span
+              className={cn(
+                "grid h-8 w-8 shrink-0 place-items-center rounded-full border transition-colors",
+                done
+                  ? "border-ai bg-ai text-white"
+                  : active
+                    ? "border-ai bg-ai-bg text-ai"
+                    : "border-line bg-surface-2 text-ink-3",
+              )}
+            >
+              {done ? <Check className="h-4 w-4" /> : active ? <Loader2 className="h-4 w-4 animate-spin" /> : <Icon className="h-4 w-4" />}
+            </span>
+            <span className={cn("text-[10.5px] leading-tight", done || active ? "font-medium text-ink-2" : "text-ink-3")}>{s.label}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -104,7 +104,15 @@ class S3Backend(StorageBackend):
                 log.warning("Could not create S3 bucket %r: %s (note: bucket names must be 3-63 chars, lowercase)", self.bucket, e)
 
     def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
-        self.client.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType=content_type)
+        # Defence-in-depth server-side encryption. Bucket-default SSE *should* also be
+        # configured at the operator level, but specifying it on every PUT closes the
+        # window where a bucket-default mistake silently leaves objects unencrypted.
+        extra: dict = {}
+        if settings.s3_sse:
+            extra["ServerSideEncryption"] = settings.s3_sse
+            if settings.s3_sse == "aws:kms" and settings.s3_sse_kms_key_id:
+                extra["SSEKMSKeyId"] = settings.s3_sse_kms_key_id
+        self.client.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType=content_type, **extra)
 
     def open_stream(self, key: str) -> BinaryIO:
         obj = self.client.get_object(Bucket=self.bucket, Key=key)

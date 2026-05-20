@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -8,12 +8,15 @@ import {
   BarChart3,
   Bell,
   BookOpen,
+  ChevronDown,
+  ChevronsLeft,
   Check,
   FileText,
   Inbox,
   LayoutDashboard,
   Loader2,
   LogOut,
+  Menu,
   Plus,
   Search,
   Settings,
@@ -27,13 +30,33 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { cn, timeAgo, titleCase } from "@/lib/utils";
 import { Avatar } from "@/components/ui";
+import { CommandPalette } from "@/components/command-palette";
+import { useToast } from "@/components/toast";
 import type { BackgroundJob, InboxSummary, Notification } from "@/lib/types";
 
-type RailItem = { href: string; label: string; icon: typeof FileText; match: (p: string) => boolean; badgeKey?: "inbox"; adminOnly?: boolean };
+const CONTRACT_VIEWS: { label: string; href: string }[] = [
+  { label: "All contracts", href: "/contracts" },
+  { label: "My open", href: "/contracts?mine=1" },
+  { label: "Drafts", href: "/contracts?status=draft" },
+  { label: "In review", href: "/contracts?status=in_review" },
+  { label: "Out for signature", href: "/contracts?status=out_for_signature" },
+  { label: "Active", href: "/contracts?status=active" },
+  { label: "Expiring", href: "/contracts?status=expiring" },
+];
+
+type RailItem = {
+  href: string;
+  label: string;
+  icon: typeof FileText;
+  match: (p: string) => boolean;
+  badgeKey?: "inbox";
+  adminOnly?: boolean;
+  views?: { label: string; href: string }[];
+};
 const RAIL: RailItem[] = [
   { href: "/dashboard", label: "Home", icon: LayoutDashboard, match: (p) => p.startsWith("/dashboard") },
   { href: "/inbox", label: "Inbox", icon: Inbox, match: (p) => p.startsWith("/inbox"), badgeKey: "inbox" },
-  { href: "/contracts", label: "Contracts", icon: FileText, match: (p) => p.startsWith("/contracts") },
+  { href: "/contracts", label: "Contracts", icon: FileText, match: (p) => p.startsWith("/contracts"), views: CONTRACT_VIEWS },
   { href: "/templates", label: "Templates", icon: BookOpen, match: (p) => p.startsWith("/templates") },
   { href: "/workflows", label: "Workflows", icon: Workflow, match: (p) => p.startsWith("/workflows") },
   { href: "/reports", label: "Reports", icon: BarChart3, match: (p) => p.startsWith("/reports") },
@@ -47,15 +70,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname() || "";
   const { me, logout } = useAuth();
   const router = useRouter();
+  const toast = useToast();
   const [notifs, setNotifs] = useState<Notification[]>([]);
   const [notifOpen, setNotifOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [trayOpen, setTrayOpen] = useState(false);
   const [inboxSummary, setInboxSummary] = useState<InboxSummary | null>(null);
   const [jobs, setJobs] = useState<BackgroundJob[]>([]);
+  // single-sidebar interaction state
+  const [collapsed, setCollapsed] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   function loadJobs() {
-    api.get<BackgroundJob[]>("/jobs?limit=15").then(setJobs).catch(() => {});
+    // bypass the GET micro-cache — the progress tray polls and must see live status
+    api.get<BackgroundJob[]>("/jobs?limit=15", { cache: false }).then(setJobs).catch(() => {});
   }
 
   useEffect(() => {
@@ -63,6 +91,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     api.get<InboxSummary>("/inbox/summary").then(setInboxSummary).catch(() => {});
     loadJobs();
   }, [pathname]);
+
+  // restore the collapsed preference once on mount (avoids SSR localStorage access)
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.localStorage.getItem("cm_sidebar_collapsed") === "1") {
+      setCollapsed(true);
+    }
+  }, []);
+  // close the mobile drawer whenever the route changes
+  useEffect(() => setMobileOpen(false), [pathname]);
+
+  function toggleCollapsed() {
+    setCollapsed((c) => {
+      const next = !c;
+      if (typeof window !== "undefined") window.localStorage.setItem("cm_sidebar_collapsed", next ? "1" : "0");
+      return next;
+    });
+  }
 
   // poll jobs when there's running work
   useEffect(() => {
@@ -79,71 +124,47 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const failedCount = jobs.filter((j) => j.status === "failed").length;
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-canvas text-ink">
-      {/* icon rail */}
-      <nav className="flex w-[60px] shrink-0 flex-col items-center gap-1 border-r border-line bg-white py-3">
-        <Link href="/dashboard" className="mb-3 grid h-9 w-9 place-items-center rounded-lg bg-accent text-accent-fg font-bold">
-          C
-        </Link>
-        {RAIL.filter((item) => !item.adminOnly || me?.user.role === "owner" || me?.user.role === "admin").map((item) => {
-          const active = item.match(pathname);
-          const Icon = item.icon;
-          const badge = item.badgeKey === "inbox" ? inboxCount : 0;
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              title={item.badgeKey === "inbox" && badge ? `${item.label} (${badge})` : item.label}
-              className={cn(
-                "group relative grid h-10 w-10 place-items-center rounded-lg transition-colors",
-                active ? "bg-accent-subtle text-accent" : "text-ink-3 hover:bg-surface-3 hover:text-ink",
-              )}
-            >
-              <Icon className="h-[18px] w-[18px]" />
-              {badge > 0 && (
-                <span
-                  className={cn(
-                    "absolute right-0.5 top-0.5 grid h-4 min-w-4 place-items-center rounded-full px-1 text-[10px] font-semibold leading-none",
-                    inboxHigh ? "bg-amber-500 text-white" : "bg-accent text-accent-fg",
-                  )}
-                >
-                  {badge > 9 ? "9+" : badge}
-                </span>
-              )}
-            </Link>
-          );
-        })}
-      </nav>
+    <div className="app-aurora flex h-screen w-screen overflow-hidden text-ink">
+      {/* ⌘K command palette (keyboard-first navigation + search) */}
+      <CommandPalette />
 
-      {/* contextual sidebar */}
-      <aside className="flex w-[240px] shrink-0 flex-col border-r border-line bg-surface-2">
-        <div className="px-4 pb-2 pt-4">
-          <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">{me?.tenant.name ?? "Workspace"}</div>
-        </div>
-        <div className="px-3">
-          <Link
-            href="/contracts/new"
-            className="flex h-9 items-center justify-center gap-1.5 rounded-md bg-accent text-sm font-medium text-accent-fg shadow-sm hover:bg-accent-hover"
-          >
-            <Plus className="h-4 w-4" /> New
-          </Link>
-        </div>
-        <Sidebar pathname={pathname} />
-        <div className="mt-auto border-t border-line p-3">
-          <div className="flex items-center gap-2">
-            <Avatar name={me?.user.name ?? "?"} color={me?.user.avatar_color} size={30} />
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[13px] font-medium text-ink">{me?.user.name}</div>
-              <div className="truncate text-[11px] text-ink-3">{titleCase(me?.user.role ?? "")}</div>
-            </div>
-          </div>
-        </div>
-      </aside>
+      {/* mobile scrim */}
+      {mobileOpen && (
+        <div className="fixed inset-0 z-40 bg-ink/40 backdrop-blur-[1px] md:hidden" onClick={() => setMobileOpen(false)} aria-hidden />
+      )}
+
+      {/* single, collapsible sidebar (icon rail + nav + workspace + user, merged) */}
+      <SideNav
+        items={RAIL}
+        pathname={pathname}
+        collapsed={collapsed}
+        mobileOpen={mobileOpen}
+        onToggleCollapsed={toggleCollapsed}
+        onCloseMobile={() => setMobileOpen(false)}
+        workspaceName={me?.tenant.name ?? "Workspace"}
+        isAdmin={me?.user.role === "owner" || me?.user.role === "admin"}
+        inboxCount={inboxCount}
+        inboxHigh={inboxHigh}
+        userName={me?.user.name ?? "?"}
+        userRole={me?.user.role ?? ""}
+        userColor={me?.user.avatar_color}
+        onSettings={() => router.push("/settings")}
+        onLogout={logout}
+      />
 
       {/* main column */}
       <div className="flex min-w-0 flex-1 flex-col">
         {/* top bar */}
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-white px-5">
+        <header className="glass flex h-14 shrink-0 items-center gap-3 border-b border-line px-4 md:px-5">
+          {/* mobile hamburger */}
+          <button
+            onClick={() => setMobileOpen(true)}
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-md text-ink-2 hover:bg-surface-3 md:hidden"
+            title="Open menu"
+            aria-label="Open menu"
+          >
+            <Menu className="h-[18px] w-[18px]" />
+          </button>
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -156,8 +177,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <input
               name="q"
               placeholder="Search contracts…"
-              className="h-9 w-full rounded-full border border-line bg-surface-2 pl-9 pr-3 text-sm placeholder:text-ink-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className="h-9 w-full rounded-full border border-line bg-surface-2 pl-9 pr-16 text-sm placeholder:text-ink-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
             />
+            <kbd
+              className="pointer-events-none absolute right-2.5 top-1/2 hidden -translate-y-1/2 select-none rounded border border-line bg-white px-1.5 py-0.5 text-[10px] font-medium text-ink-3 sm:block"
+              title="Open command palette"
+            >
+              Ctrl K
+            </kbd>
           </form>
           <div className="ml-auto flex items-center gap-1">
             <div className="relative">
@@ -210,8 +237,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                       <button
                         className="text-xs text-accent hover:underline"
                         onClick={async () => {
-                          await api.post("/notifications/read-all");
+                          // optimistic: clear unread immediately, confirm/rollback with a toast
+                          const prev = notifs;
                           setNotifs((ns) => ns.map((n) => ({ ...n, read_at: new Date().toISOString() })));
+                          try {
+                            await api.post("/notifications/read-all");
+                            toast.success("All notifications marked read");
+                          } catch {
+                            setNotifs(prev);
+                            toast.error("Couldn't mark all read", "Please try again.");
+                          }
                         }}
                       >
                         Mark all read
@@ -278,68 +313,246 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   );
 }
 
-const CONTRACT_VIEWS: { label: string; href: string }[] = [
-  { label: "All contracts", href: "/contracts" },
-  { label: "My open", href: "/contracts?mine=1" },
-  { label: "Drafts", href: "/contracts?status=draft" },
-  { label: "In review", href: "/contracts?status=in_review" },
-  { label: "Out for signature", href: "/contracts?status=out_for_signature" },
-  { label: "Active", href: "/contracts?status=active" },
-  { label: "Expiring", href: "/contracts?status=expiring" },
-];
+type SideNavProps = {
+  items: RailItem[];
+  pathname: string;
+  collapsed: boolean;
+  mobileOpen: boolean;
+  onToggleCollapsed: () => void;
+  onCloseMobile: () => void;
+  workspaceName: string;
+  isAdmin: boolean;
+  inboxCount: number;
+  inboxHigh: boolean;
+  userName: string;
+  userRole: string;
+  userColor?: string;
+  onSettings: () => void;
+  onLogout: () => void;
+};
 
-function Sidebar({ pathname }: { pathname: string }) {
-  if (pathname.startsWith("/contracts")) {
-    return (
-      <div className="mt-4 flex-1 overflow-y-auto px-2">
-        <div className="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-3">Views</div>
-        {CONTRACT_VIEWS.map((v) => (
-          <Link key={v.href} href={v.href} className="block rounded-md px-2 py-1.5 text-[13px] text-ink-2 hover:bg-surface-3 hover:text-ink">
-            {v.label}
-          </Link>
-        ))}
-      </div>
-    );
-  }
-  if (pathname.startsWith("/intelligence")) {
-    return (
-      <div className="mt-4 flex-1 px-3 text-[13px] text-ink-3">
-        <p>OCR &amp; AI workspace. Upload a scanned contract, review the extracted fields, then create a contract from it.</p>
-      </div>
-    );
-  }
-  if (pathname.startsWith("/reports")) {
-    return (
-      <div className="mt-4 flex-1 px-3 text-[13px] text-ink-3">
-        <p>Portfolio analytics — totals, distributions, cycle time, expiring &amp; renewal pipeline, approver throughput. Use the range picker at the top of the page and export the underlying contracts as CSV.</p>
-      </div>
-    );
-  }
-  if (pathname.startsWith("/inbox")) {
-    return (
-      <div className="mt-4 flex-1 px-3 text-[13px] text-ink-3">
-        <p>Everything waiting on <em>you</em>, across all contracts — approval steps you can decide, and signature requests it&rsquo;s your turn to sign. High-priority items (waiting ≥24h, or high-risk contracts) float to the top.</p>
-      </div>
-    );
-  }
-  if (pathname.startsWith("/team")) {
-    return (
-      <div className="mt-4 flex-1 px-3 text-[13px] text-ink-3">
-        <p>Invite employees, set their role, and deactivate access. Roles drive every permission in the app — see the table below for what each one can do.</p>
-      </div>
-    );
-  }
-  if (pathname.startsWith("/templates")) {
-    return (
-      <div className="mt-4 flex-1 px-3 text-[13px] text-ink-3">
-        <p>A library of reusable contracts. Each template carries a body (with <code>{"{{counterparty}}"}</code> / <code>{"{{value}}"}</code> merge variables) and metadata defaults; one click spawns a fresh draft contract.</p>
-      </div>
-    );
-  }
+function SideNav({
+  items, pathname, collapsed, mobileOpen, onToggleCollapsed, onCloseMobile,
+  workspaceName, isAdmin, inboxCount, inboxHigh, userName, userRole, userColor, onSettings, onLogout,
+}: SideNavProps) {
+  // On mobile the drawer is always full-width-expanded; collapse only applies on >=md.
+  const isCompact = collapsed && !mobileOpen;
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [expanded, setExpanded] = useState<string | null>(() =>
+    pathname.startsWith("/contracts") ? "/contracts" : null,
+  );
+  const userBoxRef = useRef<HTMLDivElement>(null);
+
+  // auto-open the accordion for the section you're in; close the user menu on route change
+  useEffect(() => {
+    const cur = items.find((i) => i.views && i.match(pathname));
+    setExpanded(cur ? cur.href : null);
+    setUserMenuOpen(false);
+  }, [pathname, items]);
+
+  // dismiss the user popover on outside click
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    function onDoc(e: MouseEvent) {
+      if (userBoxRef.current && !userBoxRef.current.contains(e.target as Node)) setUserMenuOpen(false);
+    }
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [userMenuOpen]);
+
+  const visible = items.filter((i) => !i.adminOnly || isAdmin);
+
   return (
-    <div className="mt-4 flex-1 px-3 text-[13px] text-ink-3">
-      <p>Welcome. Jump back to your contracts, scan a document, or review the audit log.</p>
-    </div>
+    <aside
+      className={cn(
+        "z-50 flex shrink-0 flex-col border-r border-line bg-white/80 backdrop-blur-xl",
+        "transition-[width,transform] duration-200 ease-out",
+        isCompact ? "w-[68px]" : "w-[248px]",
+        // mobile: off-canvas drawer
+        "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:w-[248px]",
+        mobileOpen ? "max-md:translate-x-0 max-md:shadow-pop" : "max-md:-translate-x-full",
+      )}
+    >
+      {/* brand + collapse toggle */}
+      <div className={cn("flex h-14 shrink-0 items-center border-b border-line", isCompact ? "justify-center px-0" : "gap-2.5 px-3")}>
+        <Link
+          href="/dashboard"
+          className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-accent to-ai font-bold text-accent-fg shadow-glow"
+          title={workspaceName}
+        >
+          {(workspaceName || "C").charAt(0).toUpperCase()}
+        </Link>
+        {!isCompact && (
+          <>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[13px] font-semibold leading-tight text-ink">{workspaceName}</div>
+              <div className="text-[11px] leading-tight text-ink-3">Workspace</div>
+            </div>
+            {/* collapse on desktop, close on mobile */}
+            <button
+              onClick={() => (mobileOpen ? onCloseMobile() : onToggleCollapsed())}
+              className="grid h-7 w-7 place-items-center rounded-md text-ink-3 hover:bg-surface-3 hover:text-ink"
+              title={mobileOpen ? "Close menu" : "Collapse sidebar"}
+              aria-label={mobileOpen ? "Close menu" : "Collapse sidebar"}
+            >
+              {mobileOpen ? <X className="h-4 w-4" /> : <ChevronsLeft className="h-4 w-4" />}
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* primary CTA */}
+      <div className={cn("pt-3", isCompact ? "px-3" : "px-3")}>
+        <Link
+          href="/contracts/new"
+          title="New contract"
+          className={cn(
+            "flex h-9 items-center rounded-lg bg-accent text-sm font-medium text-accent-fg shadow-sm transition-colors hover:bg-accent-hover",
+            isCompact ? "w-full justify-center" : "justify-center gap-1.5",
+          )}
+        >
+          <Plus className="h-4 w-4" />
+          {!isCompact && "New contract"}
+        </Link>
+      </div>
+
+      {/* nav list */}
+      <nav className="mt-2 flex-1 overflow-y-auto overflow-x-hidden px-2 py-1">
+        {visible.map((item) => {
+          const active = item.match(pathname);
+          const Icon = item.icon;
+          const badge = item.badgeKey === "inbox" ? inboxCount : 0;
+          const hasViews = !!item.views?.length;
+          const isOpen = expanded === item.href && !isCompact;
+          return (
+            <div key={item.href}>
+              <div className="group relative flex items-center">
+                <Link
+                  href={item.href}
+                  title={isCompact ? item.label : undefined}
+                  className={cn(
+                    "relative flex h-9 flex-1 items-center rounded-lg text-[13px] font-medium transition-all duration-150",
+                    isCompact ? "justify-center px-0" : "gap-2.5 px-2.5",
+                    active
+                      ? "bg-accent-subtle font-semibold text-accent shadow-sm"
+                      : "text-ink-2 hover:bg-surface-3 hover:text-ink",
+                  )}
+                >
+                  {/* active indicator bar */}
+                  {active && (
+                    <span className={cn("absolute left-0 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-accent", isCompact && "left-0")} aria-hidden />
+                  )}
+                  <span className="relative grid place-items-center">
+                    <Icon className="h-[18px] w-[18px] shrink-0" />
+                    {/* collapsed: show a dot instead of a number badge */}
+                    {isCompact && badge > 0 && (
+                      <span className={cn("absolute -right-1 -top-1 h-2 w-2 rounded-full", inboxHigh ? "bg-amber-500" : "bg-accent")} />
+                    )}
+                  </span>
+                  {!isCompact && <span className="truncate">{item.label}</span>}
+                  {!isCompact && badge > 0 && (
+                    <span
+                      className={cn(
+                        "ml-auto grid h-5 min-w-5 place-items-center rounded-full px-1.5 text-[11px] font-semibold leading-none",
+                        inboxHigh ? "bg-amber-500 text-white" : "bg-accent-subtle text-accent",
+                      )}
+                    >
+                      {badge > 99 ? "99+" : badge}
+                    </span>
+                  )}
+                </Link>
+                {/* accordion chevron (only when expanded sidebar + the item has sub-views) */}
+                {hasViews && !isCompact && (
+                  <button
+                    onClick={() => setExpanded((e) => (e === item.href ? null : item.href))}
+                    className="grid h-9 w-7 place-items-center rounded-md text-ink-3 hover:bg-surface-3 hover:text-ink"
+                    aria-label={isOpen ? `Collapse ${item.label}` : `Expand ${item.label}`}
+                    aria-expanded={isOpen}
+                  >
+                    <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", isOpen && "rotate-180")} />
+                  </button>
+                )}
+              </div>
+              {/* sub-views accordion */}
+              {hasViews && (
+                <div className={cn("overflow-hidden transition-all duration-200", isOpen ? "max-h-80" : "max-h-0")}>
+                  <div className="ml-[18px] mt-0.5 border-l border-line pl-2">
+                    {item.views!.map((v) => {
+                      const vActive = pathname + (typeof window !== "undefined" ? window.location.search : "") === v.href || pathname === v.href;
+                      return (
+                        <Link
+                          key={v.href}
+                          href={v.href}
+                          className={cn(
+                            "block rounded-md px-2.5 py-1.5 text-[12.5px] transition-colors",
+                            vActive ? "text-accent" : "text-ink-3 hover:bg-surface-3 hover:text-ink",
+                          )}
+                        >
+                          {v.label}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </nav>
+
+      {/* expand handle when collapsed */}
+      {isCompact && (
+        <button
+          onClick={onToggleCollapsed}
+          className="mx-2 mb-1 hidden h-8 place-items-center rounded-lg text-ink-3 hover:bg-surface-3 hover:text-ink md:grid"
+          title="Expand sidebar"
+          aria-label="Expand sidebar"
+        >
+          <ChevronsLeft className="h-4 w-4 rotate-180" />
+        </button>
+      )}
+
+      {/* user footer (interactive popover) */}
+      <div ref={userBoxRef} className="relative border-t border-line p-2">
+        <button
+          onClick={() => setUserMenuOpen((o) => !o)}
+          className={cn(
+            "flex w-full items-center rounded-lg p-1.5 text-left transition-colors hover:bg-surface-3",
+            isCompact ? "justify-center" : "gap-2.5",
+          )}
+          title={isCompact ? userName : undefined}
+          aria-haspopup="menu"
+          aria-expanded={userMenuOpen}
+        >
+          <Avatar name={userName} color={userColor} size={isCompact ? 32 : 30} />
+          {!isCompact && (
+            <>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[13px] font-medium text-ink">{userName}</div>
+                <div className="truncate text-[11px] text-ink-3">{titleCase(userRole)}</div>
+              </div>
+              <ChevronDown className={cn("h-4 w-4 shrink-0 text-ink-3 transition-transform", userMenuOpen && "rotate-180")} />
+            </>
+          )}
+        </button>
+        {userMenuOpen && (
+          <div className={cn("absolute bottom-[calc(100%+6px)] z-50 w-52 overflow-hidden rounded-lg border border-line bg-white shadow-pop", isCompact ? "left-2" : "left-2 right-2 w-auto")}>
+            <button
+              onClick={() => { setUserMenuOpen(false); onSettings(); }}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-ink-2 hover:bg-surface-3"
+            >
+              <Settings className="h-4 w-4" /> Settings
+            </button>
+            <button
+              onClick={() => { setUserMenuOpen(false); onLogout(); }}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-danger hover:bg-surface-3"
+            >
+              <LogOut className="h-4 w-4" /> Sign out
+            </button>
+          </div>
+        )}
+      </div>
+    </aside>
   );
 }
 
@@ -402,12 +615,13 @@ export function PageHeader({
   actions?: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line bg-white px-6 py-4">
+    // Sticky so the title + primary actions stay reachable while the page body scrolls.
+    <div className="sticky top-0 z-20 flex flex-wrap items-start justify-between gap-3 border-b border-line bg-white/95 px-6 py-4 backdrop-blur supports-[backdrop-filter]:bg-white/80">
       <div className="min-w-0">
         <h1 className="truncate text-xl font-semibold text-ink">{title}</h1>
         {subtitle && <div className="mt-0.5 text-sm text-ink-2">{subtitle}</div>}
       </div>
-      {actions && <div className="flex items-center gap-2">{actions}</div>}
+      {actions && <div className="flex flex-wrap items-center justify-end gap-2">{actions}</div>}
     </div>
   );
 }

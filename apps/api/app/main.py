@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import SessionLocal
-from .middleware import LoggingMiddleware, RateLimitMiddleware, SecurityHeadersMiddleware
+from .middleware import LoggingMiddleware, MetricsMiddleware, RateLimitMiddleware, SecurityHeadersMiddleware
 from .routers import api_keys, audit, auth, contracts, dashboard, files, inbox, misc, obligations, reports, signatures, templates, webhooks, workflows
 
 log = logging.getLogger("uvicorn.error")
@@ -40,6 +40,13 @@ def _enforce_production_safety() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _enforce_production_safety()
+    # Observability: /metrics is always on (mounted below); tracing is opt-in + graceful.
+    try:
+        from .tracing import init_tracing
+
+        init_tracing(app)
+    except Exception:  # noqa: BLE001
+        log.exception("tracing init failed (continuing)")
     if settings.run_migrations_on_startup:
         try:
             _run_migrations()
@@ -66,8 +73,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title=settings.app_name, version="0.3.0", lifespan=lifespan)
 
 # Middleware order matters: Starlette runs them in reverse-add order, so the LAST added is the
-# OUTERMOST. We want: Logging (outermost) → RateLimit → CORS → SecurityHeaders (innermost,
-# closest to response so it always tags).
+# OUTERMOST. We want: Metrics (outermost — times the whole request incl. rate-limit 429s) →
+# Logging → RateLimit → CORS → SecurityHeaders (innermost, closest to response so it always tags).
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -79,6 +86,7 @@ app.add_middleware(
 )
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(LoggingMiddleware)
+app.add_middleware(MetricsMiddleware)
 
 app.include_router(auth.router)
 app.include_router(contracts.router)
@@ -105,6 +113,18 @@ def root() -> dict:
 def health() -> dict:
     """Liveness probe — always 200 as long as the process is up."""
     return {"status": "ok"}
+
+
+@app.get("/metrics", tags=["meta"], include_in_schema=False)
+def metrics():
+    """Prometheus exposition endpoint (RFI T-1). Scraped per-pod; see K8s deployment
+    `prometheus.io/scrape` annotation. Not rate-limited (skip list) and not in the OpenAPI."""
+    from fastapi import Response
+
+    from .metrics import render
+
+    payload, content_type = render()
+    return Response(content=payload, media_type=content_type)
 
 
 @app.get("/healthz/ready", tags=["meta"])

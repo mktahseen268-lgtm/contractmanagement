@@ -52,14 +52,14 @@ export default function MfaPage() {
   if (!mfaToken) return null;
 
   return (
-    <Card className="w-full max-w-sm">
+    <Card className="glass w-full max-w-sm border-white/60 shadow-pop">
       <CardBody className="space-y-4">
         <div className="flex items-center gap-2">
           <span className="grid h-9 w-9 place-items-center rounded-lg bg-accent-subtle text-accent">
             <ShieldCheck className="h-5 w-5" />
           </span>
           <div>
-            <h1 className="text-lg font-semibold text-ink">Two-factor authentication</h1>
+            <h1 className="font-display text-lg font-bold tracking-tight text-ink">Two-factor authentication</h1>
             <p className="text-sm text-ink-2">Enter the 6-digit code from your authenticator app.</p>
           </div>
         </div>

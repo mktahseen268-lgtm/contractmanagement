@@ -32,10 +32,10 @@ export default function RegisterPage() {
   }
 
   return (
-    <Card className="w-full max-w-sm">
+    <Card className="glass w-full max-w-sm border-white/60 shadow-pop">
       <CardBody className="space-y-4">
         <div>
-          <h1 className="text-lg font-semibold text-ink">Create your workspace</h1>
+          <h1 className="font-display text-xl font-bold tracking-tight text-ink">Create your workspace</h1>
           <p className="text-sm text-ink-2">You'll be the owner. Invite your team afterwards.</p>
         </div>
         <ErrorBanner message={error} />

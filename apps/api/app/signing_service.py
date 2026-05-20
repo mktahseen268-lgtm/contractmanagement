@@ -1,16 +1,23 @@
 """E-signature engine. v1: no on-page field placement — recipients adopt a typed signature; the
 executed PDF appends a Signatures page + a Certificate of Completion. Sequential or parallel
 signing. The signing link (`/sign/{token}`) is unauthenticated. (DocViewer field placement,
-identity OTP, in-person/kiosk signing, etc. are planned — docs/13.)"""
+identity OTP, in-person/kiosk signing, etc. are planned — docs/13.)
+
+Token model (post 0013_hardening): the raw URL token is *never* persisted in plaintext.
+We store:
+  - `access_token_hash` (SHA-256 of raw)  — used for /sign/{token} lookup
+  - `access_token_secret` (EncryptedString) — Fernet/AES-256-GCM ciphertext of the raw, so
+    server-side reminders can decrypt to email the same link without a fresh URL
+  - `access_token_expires_at`              — hard expiry (default 14 days)
+"""
 
 import datetime as dt
 import hashlib
-import secrets
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import models
+from . import models, security
 from .config import settings
 from .email import send_email
 from .pdf import render_contract_pdf_bytes
@@ -27,8 +34,35 @@ def _now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
 
-def _new_token() -> str:
-    return secrets.token_urlsafe(40)
+def _token_ttl() -> dt.timedelta:
+    return dt.timedelta(days=max(1, settings.signing_token_ttl_days))
+
+
+def _mint_token_for(recipient: "models.SignatureRecipient") -> str:
+    """Generate a fresh raw token, persist the hash + encrypted copy + expiry on the recipient,
+    and return the raw value for embedding in the URL. The raw is *only* known transiently to
+    the caller; reading it back later requires `decrypt_token_for(recipient)`."""
+    raw, h = security.new_signing_token()
+    recipient.access_token_hash = h
+    recipient.access_token_secret = raw  # EncryptedString encrypts on flush
+    recipient.access_token_expires_at = _now() + _token_ttl()
+    return raw
+
+
+def decrypt_token_for(recipient: "models.SignatureRecipient") -> str | None:
+    """Return the raw signing token from the encrypted column (used for reminders). Returns None
+    if no token has been minted or it has expired/been revoked."""
+    if not recipient.access_token_secret:
+        return None
+    if recipient.access_token_expires_at and recipient.access_token_expires_at <= _now():
+        return None
+    return recipient.access_token_secret  # EncryptedString decrypts on load
+
+
+def _clear_token(recipient: "models.SignatureRecipient") -> None:
+    recipient.access_token_hash = None
+    recipient.access_token_secret = None
+    recipient.access_token_expires_at = None
 
 
 def _log(db: Session, env: models.SignatureEnvelope, event: str, *, recipient: models.SignatureRecipient | None = None, ip: str = "", ua: str = "", meta: dict | None = None) -> None:
@@ -37,6 +71,8 @@ def _log(db: Session, env: models.SignatureEnvelope, event: str, *, recipient: m
         recipient_id=(recipient.id if recipient else None), recipient_name=(recipient.name if recipient else ""),
         event=event, ip=ip, user_agent=ua[:400], meta=meta or {},
     ))
+    from . import metrics
+    metrics.record_signature(event)
 
 
 def _notify_owner(db: Session, contract: models.Contract, title: str, body: str) -> None:
@@ -44,8 +80,14 @@ def _notify_owner(db: Session, contract: models.Contract, title: str, body: str)
         db.add(models.Notification(tenant_id=contract.tenant_id, user_id=contract.owner_id, type="contract.signature_update", title=title, body=body, object_type="contract", object_id=contract.id))
 
 
-def _email_recipient(recipient: models.SignatureRecipient, contract: models.Contract, sender_name: str) -> None:
-    link = f"{settings.frontend_url.rstrip('/')}/sign/{recipient.access_token}"
+def _email_recipient(recipient: models.SignatureRecipient, contract: models.Contract, sender_name: str, *, raw_token: str | None = None) -> None:
+    """Email the signer their /sign/{token} URL. `raw_token` is the token returned by
+    `_mint_token_for` at the call site; if omitted we decrypt from the stored ciphertext
+    (used by reminders). Returns early without emailing if no live token exists."""
+    token = raw_token or decrypt_token_for(recipient)
+    if not token:
+        return
+    link = f"{settings.frontend_url.rstrip('/')}/sign/{token}"
     send_email(
         recipient.email,
         f"Please sign: {contract.title}",
@@ -71,9 +113,18 @@ def active_envelope(db: Session, contract_id: str) -> models.SignatureEnvelope |
 
 
 def recipient_by_token(db: Session, token: str) -> models.SignatureRecipient | None:
+    """Resolve `/sign/{token}` to a recipient by hashing the inbound URL token and matching
+    against `access_token_hash`. Expired tokens return None (look like 'not found' to the
+    public portal, which is correct behavior — don't leak whether a token *was* ever valid)."""
     if not token:
         return None
-    return db.scalar(select(models.SignatureRecipient).where(models.SignatureRecipient.access_token == token))
+    h = security.hash_token(token)
+    rec = db.scalar(select(models.SignatureRecipient).where(models.SignatureRecipient.access_token_hash == h))
+    if rec is None:
+        return None
+    if rec.access_token_expires_at is not None and rec.access_token_expires_at <= _now():
+        return None
+    return rec
 
 
 def recipients(db: Session, envelope_id: str) -> list[models.SignatureRecipient]:
@@ -147,17 +198,17 @@ def send_envelope(db: Session, *, envelope: models.SignatureEnvelope, contract: 
         kind="contract_pdf", parent_type="contract", parent_id=contract.id, created_by=by_user.id,
     ))
     envelope.document_file_id = fid
-    # tokens + statuses
+    # tokens + statuses. Each recipient gets a fresh hashed+encrypted token; the raw is held
+    # in memory only long enough to embed it in the email URL (no plaintext persisted).
     sender_name = by_user.name
     signers = _signers(rs)
-    for r in rs:
-        r.access_token = _new_token()
+    raw_tokens: dict[str, str] = {r.id: _mint_token_for(r) for r in rs}
     if envelope.signing_order == "parallel":
         for r in rs:
             r.status = "sent"
             _log(db, envelope, "sent", recipient=r)
             if r.kind == "signer":
-                _email_recipient(r, contract, sender_name)
+                _email_recipient(r, contract, sender_name, raw_token=raw_tokens[r.id])
     else:
         # only the first signer is "sent"; others become "sent" when their turn comes. CC recipients are "sent" immediately.
         first_signer_seq = min(r.sequence for r in signers)
@@ -166,7 +217,7 @@ def send_envelope(db: Session, *, envelope: models.SignatureEnvelope, contract: 
                 r.status = "sent"
                 _log(db, envelope, "sent", recipient=r)
                 if r.kind == "signer":
-                    _email_recipient(r, contract, sender_name)
+                    _email_recipient(r, contract, sender_name, raw_token=raw_tokens[r.id])
     envelope.status = "sent"
     envelope.sent_at = _now()
     if contract.status == "approved":
@@ -279,10 +330,16 @@ def sign(db: Session, *, envelope: models.SignatureEnvelope, recipient: models.S
             nxt = min(pending, key=lambda r: r.sequence)
             if nxt.status == "created":
                 nxt.status = "sent"
-                nxt.access_token = nxt.access_token or _new_token()
+                # Mint a token only if this recipient doesn't already have a live one (they
+                # were created with `status=created` and no token at envelope-creation time).
+                raw_next = decrypt_token_for(nxt) or _mint_token_for(nxt)
                 _log(db, envelope, "sent", recipient=nxt)
-                # we don't have the sender's name handy here; use the envelope context
-                send_email(nxt.email, f"Please sign: {contract.title}", f"Hi {nxt.name},\n\nIt's now your turn to sign \"{contract.title}\" ({contract.reference_no}).\n\nReview and sign here:\n{settings.frontend_url.rstrip('/')}/sign/{nxt.access_token}")
+                send_email(
+                    nxt.email,
+                    f"Please sign: {contract.title}",
+                    f"Hi {nxt.name},\n\nIt's now your turn to sign \"{contract.title}\" ({contract.reference_no}).\n\n"
+                    f"Review and sign here:\n{settings.frontend_url.rstrip('/')}/sign/{raw_next}",
+                )
         _notify_owner(db, contract, f"\"{contract.title}\" — {recipient.name} signed", f"{len([r for r in _signers(rs) if r.status=='signed'])} of {len(_signers(rs))} signers done.")
     return envelope
 
@@ -311,7 +368,7 @@ def void_envelope(db: Session, *, envelope: models.SignatureEnvelope, contract: 
         raise ValueError("This envelope can't be voided.")
     envelope.status = "voided"
     for r in recipients(db, envelope.id):
-        r.access_token = None  # invalidate the links
+        _clear_token(r)  # invalidate the links (hash + ciphertext + expiry all wiped)
     if contract.status == "out_for_signature":
         contract.status = "approved"
     _log(db, envelope, "voided", recipient=None, meta={"by": by_user.name})

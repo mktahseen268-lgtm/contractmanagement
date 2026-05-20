@@ -202,6 +202,49 @@ def delete_contract(contract_id: str, request: Request, db: Session = Depends(ge
     db.commit()
 
 
+# ---------- bulk operations ----------
+
+# States that represent a live / legally-meaningful agreement. Bulk-delete refuses these so a
+# misclick can't mass-delete signed or active contracts; the user must open each one and delete
+# it deliberately (single-delete has no such guard, by design). Safe-to-bulk-delete states are
+# everything else (draft, changes_requested, rejected, declined, voided, terminated, expired).
+_BULK_DELETE_PROTECTED = {"active", "signed", "out_for_signature", "expiring", "renewed"}
+
+
+@router.post("/bulk", response_model=schemas.ContractBulkResult)
+def bulk_contracts(data: schemas.ContractBulkIn, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.ContractBulkResult:
+    """Bulk delete with guardrails. Only owner/admin/manager may delete. Live agreements
+    (active/signed/out-for-signature/expiring/renewed) are skipped and reported, never deleted.
+    Each successful delete is audited individually (so the tamper-evident chain stays complete)."""
+    if user.role not in {"owner", "admin", "manager"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to delete contracts.")
+
+    ids = list(dict.fromkeys(data.ids))  # de-dupe, preserve order
+    deleted_ids: list[str] = []
+    skipped: list[schemas.ContractBulkSkip] = []
+
+    for cid in ids:
+        c = db.get(models.Contract, cid)
+        if c is None or c.tenant_id != user.tenant_id:
+            skipped.append(schemas.ContractBulkSkip(id=cid, reason="not found"))
+            continue
+        if c.status in _BULK_DELETE_PROTECTED:
+            skipped.append(schemas.ContractBulkSkip(id=cid, reason=f"protected ({c.status.replace('_', ' ')}) — delete it individually"))
+            continue
+        label = c.title
+        wf.delete_runs_for_contract(db, c.id)
+        sig.delete_envelopes_for_contract(db, c.id)
+        db.query(models.Obligation).filter(models.Obligation.contract_id == c.id).delete()
+        db.query(models.Comment).filter(models.Comment.contract_id == c.id).delete()
+        db.query(models.ContractVersion).filter(models.ContractVersion.contract_id == c.id).delete()
+        db.delete(c)
+        record(db, tenant_id=user.tenant_id, action="contract.deleted", actor=user, object_type="contract", object_id=cid, object_label=label, ip=client_ip(request), meta={"bulk": True})
+        deleted_ids.append(cid)
+
+    db.commit()
+    return schemas.ContractBulkResult(requested=len(ids), succeeded=len(deleted_ids), deleted_ids=deleted_ids, skipped=skipped)
+
+
 # ---------- lifecycle transition ----------
 
 

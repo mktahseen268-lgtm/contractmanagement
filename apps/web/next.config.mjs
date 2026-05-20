@@ -34,6 +34,11 @@ const securityHeaders = [
 const nextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  // Tree-shake barrel-file packages so importing 3 icons from lucide-react doesn't pull the
+  // whole icon set into the route bundle. Cuts per-route JS noticeably with zero code changes.
+  experimental: {
+    optimizePackageImports: ["lucide-react"],
+  },
   async headers() {
     return [{ source: "/(.*)", headers: securityHeaders }];
   },

@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import auth_service as svc
+from .. import metrics
 from .. import models, schemas, security
 from ..audit import record
 from ..config import settings
@@ -66,6 +67,9 @@ def register(data: schemas.RegisterIn, request: Request, response: Response, db:
     email = data.email.lower()
     if db.scalar(select(models.User).where(func.lower(models.User.email) == email)) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An account with this email already exists.")
+    pw_errors = security.validate_password_strength(data.password, email=email, name=data.name)
+    if pw_errors:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=" ".join(pw_errors))
     tenant_id = uuid.uuid4().hex
     set_request_tenant(tenant_id)
     tenant = models.Tenant(id=tenant_id, name=data.workspace_name, slug=_unique_slug(db, data.workspace_name))
@@ -93,6 +97,7 @@ def login(data: schemas.LoginIn, request: Request, response: Response, db: Sessi
         locked, until = svc.is_locked_out(db, user)
         if locked:
             record(db, tenant_id=user.tenant_id, action="auth.login.locked", actor=user, object_type="user", object_id=user.id, object_label=user.name, ip=client_ip(request))
+            metrics.record_login("locked")
             db.commit()
             retry_after = max(1, int((until - dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)).total_seconds()))
             raise HTTPException(
@@ -113,17 +118,20 @@ def login(data: schemas.LoginIn, request: Request, response: Response, db: Sessi
                 tenant_id="", user_id=None, email=email, success=False, reason=reason,
                 ip=client_ip(request), user_agent=(request.headers.get("user-agent", "") or "")[:400], at=dt.datetime.now(dt.timezone.utc).replace(tzinfo=None),
             ))
+        metrics.record_login("failed")
         db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password.")
 
     # 3) Successful primary auth
     if user.mfa_enabled:
         record(db, tenant_id=user.tenant_id, action="auth.mfa_challenge", actor=user, object_type="user", object_id=user.id, object_label=user.name, ip=client_ip(request))
+        metrics.record_login("mfa_challenge")
         db.commit()
         return schemas.MfaChallengeOut(mfa_token=security.create_mfa_token(user.id, user.tenant_id))
     svc.record_successful_login(db, user=user, request=request)
     tenant = db.get(models.Tenant, user.tenant_id)
     record(db, tenant_id=user.tenant_id, action="auth.login.success", actor=user, object_type="user", object_id=user.id, object_label=user.name, ip=client_ip(request))
+    metrics.record_login("success")
     out = _auth_response(db, response, user, tenant, request)
     db.commit()
     return out
@@ -226,6 +234,9 @@ def change_password(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Your current password is incorrect.")
     if security.verify_password(data.new_password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Choose a different password from your current one.")
+    pw_errors = security.validate_password_strength(data.new_password, email=user.email, name=user.name)
+    if pw_errors:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=" ".join(pw_errors))
     user.password_hash = security.hash_password(data.new_password)
     revoked = svc.revoke_all_user_sessions(db, user.id, "password_change", except_session_id=sid)
     record(db, tenant_id=user.tenant_id, action="auth.password_changed", actor=user, object_type="user", object_id=user.id, object_label=user.name, ip=client_ip(request), meta={"revoked_other_sessions": revoked})

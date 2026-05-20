@@ -77,6 +77,50 @@ async function request<T>(path: string, init: RequestInit = {}, allowRetry = tru
   return (await res.json()) as T;
 }
 
+// ---------- GET cache + in-flight de-duplication ----------
+//
+// Two cheap wins, no extra deps:
+//  1. In-flight de-dupe — concurrent GETs to the same URL share one network request. This
+//     alone kills the double-fetch from React 18 StrictMode (effects run twice in dev) and
+//     from multiple components asking for the same resource on one render.
+//  2. Micro-cache — a GET response is reused for `ttlMs` (default 8s). Makes back/forward
+//     navigation and re-mounts feel instant without showing a stale UI for long. Any mutation
+//     (POST/PATCH/DELETE/form) clears the whole cache so reads after a write are always fresh.
+//
+// Opt out per call with `api.get(path, { cache: false })` for things that must always be live.
+
+const GET_TTL_MS = 8000;
+const getCache = new Map<string, { ts: number; data: unknown }>();
+const getInflight = new Map<string, Promise<unknown>>();
+
+function invalidateCache(): void {
+  getCache.clear();
+  getInflight.clear();
+}
+
+async function cachedGet<T>(path: string, opts?: { cache?: boolean; ttlMs?: number }): Promise<T> {
+  const useCache = opts?.cache !== false;
+  if (!useCache) return request<T>(path);
+
+  const ttl = opts?.ttlMs ?? GET_TTL_MS;
+  const hit = getCache.get(path);
+  if (hit && Date.now() - hit.ts < ttl) return hit.data as T;
+
+  const flying = getInflight.get(path);
+  if (flying) return flying as Promise<T>;
+
+  const p = request<T>(path)
+    .then((data) => {
+      getCache.set(path, { ts: Date.now(), data });
+      return data;
+    })
+    .finally(() => {
+      getInflight.delete(path);
+    });
+  getInflight.set(path, p);
+  return p as Promise<T>;
+}
+
 async function requestForm<T>(path: string, form: FormData, allowRetry = true): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { method: "POST", body: form, credentials: "include", headers: authHeader() });
   if (res.status === 401 && allowRetry && (await tryRefresh())) return requestForm<T>(path, form, false);
@@ -93,14 +137,31 @@ async function requestBlob(path: string, allowRetry = true): Promise<Blob> {
 }
 
 export const api = {
-  get: <T>(path: string) => request<T>(path),
+  /** GET with 8s micro-cache + in-flight de-dupe. Pass {cache:false} to always hit the network. */
+  get: <T>(path: string, opts?: { cache?: boolean; ttlMs?: number }) => cachedGet<T>(path, opts),
   post: <T>(path: string, body?: unknown) =>
-    request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) }),
+    request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) }).then((r) => {
+      invalidateCache();
+      return r;
+    }),
   patch: <T>(path: string, body?: unknown) =>
-    request<T>(path, { method: "PATCH", body: JSON.stringify(body ?? {}) }),
-  del: (path: string) => request<void>(path, { method: "DELETE" }),
-  postForm: <T>(path: string, form: FormData) => requestForm<T>(path, form),
+    request<T>(path, { method: "PATCH", body: JSON.stringify(body ?? {}) }).then((r) => {
+      invalidateCache();
+      return r;
+    }),
+  del: (path: string) =>
+    request<void>(path, { method: "DELETE" }).then((r) => {
+      invalidateCache();
+      return r;
+    }),
+  postForm: <T>(path: string, form: FormData) =>
+    requestForm<T>(path, form).then((r) => {
+      invalidateCache();
+      return r;
+    }),
   blob: (path: string) => requestBlob(path),
+  /** Manually drop the GET cache (e.g. an explicit "refresh" button). */
+  invalidate: invalidateCache,
   /** boot-time: exchange the refresh cookie for an access token. Returns true if signed in. */
   bootstrapSession: () => tryRefresh(),
 };

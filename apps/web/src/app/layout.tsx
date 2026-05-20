@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { AuthProvider } from "@/lib/auth";
+import { ToastProvider } from "@/components/toast";
 
 export const metadata: Metadata = {
   title: "Contract Management",
@@ -19,7 +20,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body className="font-sans antialiased">
-        <AuthProvider>{children}</AuthProvider>
+        <ToastProvider>
+          <AuthProvider>{children}</AuthProvider>
+        </ToastProvider>
       </body>
     </html>
   );

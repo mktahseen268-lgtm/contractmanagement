@@ -99,11 +99,28 @@ export default function InboxPage() {
           </Card>
         )}
 
-        <div className="space-y-2">
-          {filtered.map((item) => (
-            <InboxRow key={item.id} item={item} />
-          ))}
-        </div>
+        {/* prioritized queue — high-priority items grouped at the top */}
+        {(() => {
+          const high = filtered.filter((i) => i.priority === "high");
+          const rest = filtered.filter((i) => i.priority !== "high");
+          if (filtered.length === 0) return null;
+          return (
+            <div className="space-y-5">
+              {high.length > 0 && (
+                <div className="space-y-2">
+                  <GroupHeader label="Needs attention now" count={high.length} tone="warn" />
+                  {high.map((item) => <InboxRow key={item.id} item={item} />)}
+                </div>
+              )}
+              {rest.length > 0 && (
+                <div className="space-y-2">
+                  {high.length > 0 && <GroupHeader label="Up next" count={rest.length} tone="default" />}
+                  {rest.map((item) => <InboxRow key={item.id} item={item} />)}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {items !== null && counts.total > 0 && (
           <p className="text-[11px] text-ink-3">
@@ -132,27 +149,43 @@ function FilterPill({ active, onClick, label, count }: { active: boolean; onClic
   );
 }
 
-function InboxRow({ item }: { item: InboxItem }) {
-  const Icon = item.kind === "approval" ? WorkflowIcon : item.kind === "obligation" ? ListTodo : PenLine;
-  const tint =
-    item.kind === "approval"
-      ? "bg-violet-100 text-violet-700"
-      : item.kind === "obligation"
-        ? "bg-amber-100 text-amber-800"
-        : "bg-emerald-100 text-emerald-700";
-  const isHigh = item.priority === "high";
+const KIND_META = {
+  approval: { Icon: WorkflowIcon, tint: "bg-violet-100 text-violet-700", stripe: "#7c3aed", action: "Review & decide", ActionIcon: Check },
+  obligation: { Icon: ListTodo, tint: "bg-amber-100 text-amber-800", stripe: "#d97706", action: "Open & complete", ActionIcon: ListTodo },
+  signature: { Icon: PenLine, tint: "bg-emerald-100 text-emerald-700", stripe: "#059669", action: "Open & sign", ActionIcon: PenLine },
+} as const;
+
+function GroupHeader({ label, count, tone }: { label: string; count: number; tone: "warn" | "default" }) {
   return (
-    <Link href={item.href} className="block">
-      <Card className={cn("p-4 transition-shadow hover:shadow-lift", isHigh && "ring-1 ring-amber-300")}>
+    <div className="flex items-center gap-2 px-0.5">
+      {tone === "warn" && <span className="pulse-dot h-2 w-2 rounded-full bg-amber-500" />}
+      <span className={cn("text-[11px] font-semibold uppercase tracking-wide", tone === "warn" ? "text-amber-700" : "text-ink-3")}>{label}</span>
+      <span className="rounded-full bg-surface-3 px-1.5 text-[10px] font-semibold text-ink-3">{count}</span>
+    </div>
+  );
+}
+
+function InboxRow({ item }: { item: InboxItem }) {
+  const meta = KIND_META[item.kind as keyof typeof KIND_META] ?? KIND_META.signature;
+  const { Icon, tint, action, ActionIcon } = meta;
+  const isHigh = item.priority === "high";
+  const stripe = isHigh ? "#f59e0b" : meta.stripe;
+  return (
+    <Link href={item.href} className="group block">
+      <Card className={cn("card-interactive relative overflow-hidden p-4 pl-5")}>
+        {/* left accent stripe — colored by kind, amber when high priority */}
+        <span className="absolute inset-y-0 left-0 w-1.5" style={{ background: stripe }} aria-hidden />
         <div className="flex items-center gap-3">
-          <span className={cn("grid h-10 w-10 shrink-0 place-items-center rounded-lg", tint)}>
+          <span className={cn("grid h-10 w-10 shrink-0 place-items-center rounded-xl", tint)}>
             <Icon className="h-5 w-5" />
           </span>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <span className="truncate text-sm font-semibold text-ink">{item.title}</span>
               {isHigh && (
-                <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800">High priority</span>
+                <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800">
+                  <span className="pulse-dot h-1.5 w-1.5 rounded-full bg-amber-500" /> High priority
+                </span>
               )}
               <RiskBadge level={item.risk_level} />
               <span className="rounded-full bg-surface-3 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-ink-3">
@@ -167,18 +200,18 @@ function InboxRow({ item }: { item: InboxItem }) {
             <div className="mt-0.5 text-[11px] text-ink-3">
               <FileText className="mr-1 inline-block h-3 w-3 align-[-2px]" />
               {item.contract_title}
-              {item.since ? <span className="ml-2">· waiting {timeAgo(item.since)}</span> : null}
             </div>
           </div>
-          <div className="hidden items-center gap-1 text-xs text-accent sm:flex">
-            {item.kind === "approval" ? (
-              <><Check className="h-3.5 w-3.5" /> Review &amp; decide</>
-            ) : item.kind === "obligation" ? (
-              <><ListTodo className="h-3.5 w-3.5" /> Open &amp; complete</>
-            ) : (
-              <><PenLine className="h-3.5 w-3.5" /> Open &amp; sign</>
+          <div className="flex shrink-0 flex-col items-end gap-1.5">
+            {item.since && (
+              <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-semibold tnum", isHigh ? "bg-amber-100 text-amber-800" : "bg-surface-3 text-ink-2")}>
+                {timeAgo(item.since).replace(" ago", "")}
+              </span>
             )}
-            <ChevronRight className="h-3.5 w-3.5" />
+            <span className="hidden items-center gap-1 rounded-md bg-accent-subtle px-2 py-1 text-xs font-medium text-accent transition-colors group-hover:bg-accent group-hover:text-accent-fg sm:inline-flex">
+              <ActionIcon className="h-3.5 w-3.5" /> {action}
+              <ChevronRight className="h-3.5 w-3.5" />
+            </span>
           </div>
         </div>
       </Card>

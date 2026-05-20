@@ -30,10 +30,10 @@ export default function LoginPage() {
   }
 
   return (
-    <Card className="w-full max-w-sm">
+    <Card className="glass w-full max-w-sm border-white/60 shadow-pop">
       <CardBody className="space-y-4">
         <div>
-          <h1 className="text-lg font-semibold text-ink">Welcome back</h1>
+          <h1 className="font-display text-xl font-bold tracking-tight text-ink">Welcome back</h1>
           <p className="text-sm text-ink-2">Sign in to your workspace.</p>
         </div>
         <ErrorBanner message={error} />

@@ -38,10 +38,17 @@ def _envelope_out(db: Session, envelope: models.SignatureEnvelope, *, include_li
     rs = sig.recipients(db, envelope.id)
     rec_out = []
     for r in rs:
+        # The raw signing URL is only available when we can decrypt the stored secret AND the
+        # token hasn't expired. include_links=False (audit views, list views) always omits.
+        link: str | None = None
+        if include_links and r.access_token_hash:
+            raw = sig.decrypt_token_for(r)
+            if raw:
+                link = f"/sign/{raw}"
         rec_out.append(schemas.RecipientOut(
             id=r.id, sequence=r.sequence, name=r.name, email=r.email, kind=r.kind, status=r.status,
             signed_name=r.signed_name, signed_at=r.signed_at, declined_reason=r.declined_reason, ip=r.ip,
-            signing_link=(f"/sign/{r.access_token}" if (include_links and r.access_token) else None),
+            signing_link=link,
         ))
     tabs = db.scalars(
         select(models.SignatureTab).where(models.SignatureTab.envelope_id == envelope.id).order_by(models.SignatureTab.page, models.SignatureTab.y, models.SignatureTab.x)
@@ -276,7 +283,7 @@ def delete_tab(envelope_id: str, tab_id: str, db: Session = Depends(get_db), use
 
 
 def _signing_info(db: Session, recipient: models.SignatureRecipient | None) -> schemas.SigningInfoOut:
-    if recipient is None or not recipient.access_token:
+    if recipient is None or not recipient.access_token_hash:
         return schemas.SigningInfoOut(valid=False, reason="not_found")
     set_request_tenant(recipient.tenant_id)  # scope subsequent queries
     env = db.get(models.SignatureEnvelope, recipient.envelope_id)
@@ -316,6 +323,11 @@ def _signing_info(db: Session, recipient: models.SignatureRecipient | None) -> s
             models.SignatureTab.recipient_id == recipient.id,
         ).order_by(models.SignatureTab.page, models.SignatureTab.y, models.SignatureTab.x)
     ).all())
+    # Reuse the same raw token the caller arrived with (the `_signing_info` callers carry it
+    # in `request.path_params['token']`). We decrypt our stored copy so the document URL is
+    # self-contained and matches the URL the recipient is currently visiting.
+    raw_token = sig.decrypt_token_for(recipient)
+    doc_path = f"/sign/{raw_token}/document" if raw_token else ""
     return schemas.SigningInfoOut(
         valid=True,
         org_name=(tenant.name if tenant else "") or "",
@@ -328,7 +340,7 @@ def _signing_info(db: Session, recipient: models.SignatureRecipient | None) -> s
         recipient_status=recipient.status,
         can_sign=can_sign,
         waiting_reason=waiting,
-        document_path=f"/sign/{recipient.access_token}/document",
+        document_path=doc_path,
         tabs=[schemas.SignatureTabOut.model_validate(t) for t in my_tabs],
         consent_text=sig.CONSENT_TEXT,
         envelope_status=env.status,

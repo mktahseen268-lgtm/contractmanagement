@@ -1,0 +1,9 @@
+# Optional OpenTelemetry extras (RFI T-1). Install only when exporting traces to a collector:
+#   pip install -r requirements-otel.txt
+# Then set OTEL_ENABLED=true and OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318
+# Prometheus /metrics works without any of these.
+-r requirements.txt
+opentelemetry-sdk==1.29.0
+opentelemetry-exporter-otlp-proto-http==1.29.0
+opentelemetry-instrumentation-fastapi==0.50b0
+opentelemetry-instrumentation-sqlalchemy==0.50b0

@@ -145,6 +145,12 @@ class AuditLog(Base):
     object_label: Mapped[str] = mapped_column(String(300), default="")
     meta: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
     ip: Mapped[str] = mapped_column(String(64), default="")
+    # Tamper-evidence chain: each row stores HMAC-SHA256(secret, prev_hash || canonical(row)) so a
+    # later auditor can recompute the chain and detect any deletion or in-place edit. The chain is
+    # per-tenant; the genesis row stores prev_hash="" (treated as 64 zero hex chars by the
+    # verifier). RFI §A.16 / docs/19.
+    prev_hash: Mapped[str] = mapped_column(String(64), default="")
+    row_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
 
 
 class Notification(Base):
@@ -290,9 +296,18 @@ class SignatureRecipient(Base):
     email: Mapped[str] = mapped_column(String(255))
     kind: Mapped[str] = mapped_column(String(20), default="signer")  # signer | cc
     status: Mapped[str] = mapped_column(String(20), default="created")  # created|sent|viewed|signed|declined
-    # the per-recipient signing-link token. Scaffold: stored as-is (the table is RLS-protected and
-    # the token is high-entropy); production should store only a hash (docs/19).
-    access_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # The per-recipient signing-link secret is *never* persisted in plaintext.
+    #  - `access_token_hash`     = SHA-256(raw token). Used to look the recipient up at /sign/{token}.
+    #    If the DB is exfiltrated, the hash is one-way and cannot be turned back into a working URL.
+    #  - `access_token_secret`   = the raw token, but stored via `EncryptedString` (Fernet/AES-256-GCM
+    #    chain in `secrets_box`). Decrypts server-side so reminders can reuse the same URL — at-rest
+    #    secrecy depends on `MFA_ENCRYPTION_KEYS`, which lives outside the DB.
+    #  - `access_token_expires_at` enforces a maximum lifetime (default 14 days) so leaked links
+    #    auto-revoke; void/decline also wipe all three fields.
+    # RFI §A.8 / docs/19. (Was a plaintext `access_token` column — replaced by 0013_hardening.)
+    access_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    access_token_secret: Mapped[str | None] = mapped_column(EncryptedString(512), nullable=True)
+    access_token_expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     signed_name: Mapped[str] = mapped_column(String(200), default="")  # the typed signature
     consent_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     signed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
@@ -398,7 +413,9 @@ class WebhookEndpoint(Base):
     tenant_id: Mapped[str] = mapped_column(index=True)
     url: Mapped[str] = mapped_column(String(800))
     description: Mapped[str] = mapped_column(String(300), default="")
-    secret: Mapped[str] = mapped_column(String(64))                # opaque random, used for HMAC
+    # HMAC signing secret — encrypted at rest (Fernet/AES-256-GCM chain via secrets_box).
+    # Was a plaintext VARCHAR(64); migrated by 0013_hardening. RFI §A.8.
+    secret: Mapped[str] = mapped_column(EncryptedString(512))
     events: Mapped[list] = mapped_column(JSON, default=list)        # ["*"] for all, or e.g. ["contract.signed"]
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_by: Mapped[str] = mapped_column(String(32))
