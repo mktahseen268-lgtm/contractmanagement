@@ -110,6 +110,24 @@ class Settings(BaseSettings):
     celery_result_backend: str = ""
     celery_task_always_eager: bool = True
 
+    # --- OCR / AI extraction (RFI T-5 / docs/09). `stub` = deterministic demo (no document
+    # read); `anthropic` = real extraction via Claude (needs ocr_api_key + the `anthropic`
+    # package from requirements-ai.txt). Falls back to stub when not fully configured. ---
+    ocr_provider: Literal["stub", "anthropic"] = "stub"
+    ocr_api_key: str = ""
+    ocr_model: str = "claude-haiku-4-5-20251001"
+    ocr_max_pages: int = 20
+
+    # --- Cryptographic document seal on the executed PDF (RFI T-4 / docs/19). `internal` =
+    # visual evidence only (default); `pades` = real PAdES signature via pyhanko + a PKCS#12
+    # cert (+ optional RFC-3161 TSA). Falls back to internal when not fully configured. ---
+    signing_provider: Literal["internal", "pades"] = "internal"
+    signing_cert_path: str = ""                     # path to a PKCS#12 (.p12/.pfx) cert
+    signing_cert_password: str = ""
+    signing_field_name: str = "Signature1"
+    signing_reason: str = "Executed via Contract Management"
+    signing_tsa_url: str = ""                        # RFC-3161 timestamp authority (optional)
+
     # --- Object storage (S3-compatible). Empty s3_bucket -> local-filesystem fallback. ---
     s3_bucket: str = ""
     s3_endpoint_url: str = ""

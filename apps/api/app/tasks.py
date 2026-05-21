@@ -1,10 +1,11 @@
-"""Background tasks. For the scaffold the OCR/AI pipeline is a realistic *stub* — in the full
-product this is where the real OCR engine + LLM provider run (see docs/09)."""
+"""Background tasks. The OCR/AI pipeline runs through a pluggable provider (`ocr_provider`):
+`stub` (deterministic demo) by default, or a real cloud extractor (Claude) when configured.
+See docs/09 + RFI T-5."""
 
 import datetime as dt
 import hashlib
 import json
-import random
+import logging
 import re
 import time
 import uuid
@@ -13,51 +14,41 @@ from sqlalchemy import select
 
 from .celery_app import celery
 from .config import settings
-from . import models
+from . import metrics, models
 from .database import SessionLocal, set_request_tenant
+from .ocr_provider import build_extraction, get_ocr_provider  # noqa: F401 (build_extraction re-exported for compat)
 from .pdf import is_draftish, render_certificate_bytes, render_contract_pdf_bytes, render_signed_pdf_bytes, stamp_tabs_on_pdf
 from .storage import get_storage, tenant_key
 
-_STUB_PARTIES = ["Acme Corporation", "Globex LLC", "Northstar Industries", "Initech FZE", "Stark Trading Co.", "Wayne Holdings"]
-_STUB_TYPES = ["msa", "nda", "lease", "vendor", "service"]
-_TITLE = {"msa": "Master Services Agreement", "nda": "Mutual Non-Disclosure Agreement", "lease": "Office Lease Agreement", "vendor": "Vendor Agreement", "service": "Service Agreement"}
+_log = logging.getLogger("uvicorn.error")
 
 
-def build_extraction(file_name: str) -> dict:
-    """A plausible OCR+AI extraction result, deterministic per file name."""
-    rng = random.Random(file_name)
-    party = rng.choice(_STUB_PARTIES)
-    ctype = rng.choice(_STUB_TYPES)
-    start = dt.date.today() - dt.timedelta(days=rng.randint(0, 120))
-    months = rng.choice([12, 24, 36])
-    end = start + dt.timedelta(days=months * 30)
-    value = rng.choice([24000, 48000, 96000, 120000, 250000])
-    risk = rng.choice(["low", "low", "medium", "high"])
-    title = f"{_TITLE[ctype]} — {party}"
-    return {
-        "fields": {
-            "title": {"value": title, "confidence": round(rng.uniform(0.88, 0.97), 2)},
-            "type": {"value": ctype, "confidence": round(rng.uniform(0.9, 0.98), 2)},
-            "counterparty": {"value": party, "confidence": round(rng.uniform(0.85, 0.96), 2)},
-            "effective_date": {"value": start.isoformat(), "confidence": round(rng.uniform(0.6, 0.95), 2)},
-            "end_date": {"value": end.isoformat(), "confidence": round(rng.uniform(0.45, 0.92), 2)},
-            "value": {"value": value, "confidence": round(rng.uniform(0.8, 0.95), 2)},
-            "currency": {"value": "USD", "confidence": 0.99},
-            "renewal_type": {"value": rng.choice(["none", "auto", "manual"]), "confidence": round(rng.uniform(0.6, 0.9), 2)},
-            "governing_law": {"value": rng.choice(["Oman", "UAE", "Saudi Arabia", "England & Wales"]), "confidence": round(rng.uniform(0.7, 0.93), 2)},
-        },
-        "risk_level": risk,
-        "summary": f"{months}-month {_TITLE[ctype].lower()} with {party}. Standard commercial terms; governing law as detected. (AI summary — verify before relying.)",
-        "detected_clauses": rng.sample(["Confidentiality", "Limitation of Liability", "Termination", "Indemnification", "Governing Law", "Force Majeure", "IP Ownership", "Data Protection", "Payment Terms"], k=rng.randint(5, 8)),
-        "tables_found": rng.randint(0, 2),
-        "languages": ["en"] + (["ar"] if rng.random() < 0.3 else []),
-        "pages": rng.randint(2, 14),
-    }
+def _load_source_bytes(db, job) -> tuple[bytes | None, str]:
+    """Fetch the uploaded file's bytes + content type from storage (for real providers)."""
+    src_id = (job.result or {}).get("source_file_id")
+    if not src_id:
+        return None, ""
+    fo = db.get(models.FileObject, src_id)
+    if fo is None:
+        return None, ""
+    try:
+        stream = get_storage().open_stream(fo.key)
+        try:
+            return stream.read(), (fo.content_type or "")
+        finally:
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        _log.exception("ocr: could not read source file %s", src_id)
+        return None, (fo.content_type or "")
 
 
 @celery.task(name="ocr.process_job")
 def process_ocr_job(job_id: str, tenant_id: str) -> str:
-    """Stub of the OCR → layout → AI extraction pipeline. Marks the job processing, then completed."""
+    """OCR → extraction via the configured provider. Marks the job processing, runs the provider,
+    then completed (or failed). Provider errors are caught so the UI gets a clean failed state."""
     set_request_tenant(tenant_id)  # scope DB access to the owning tenant (RLS)
     with SessionLocal() as db:
         job = db.get(models.OcrJob, job_id)
@@ -67,16 +58,31 @@ def process_ocr_job(job_id: str, tenant_id: str) -> str:
         job.progress = 25
         db.commit()
     if not settings.celery_task_always_eager:
-        time.sleep(2)  # simulate work when running on a real worker
+        time.sleep(2)  # let the UI render the processing timeline on a real worker
     with SessionLocal() as db:
         job = db.get(models.OcrJob, job_id)
         if job is None:
             return "not_found"
-        job.status = "completed"
-        job.progress = 100
-        job.result = {**(job.result or {}), **build_extraction(job.file_name)}  # keep source_file_id
-        db.commit()
-    return "completed"
+        provider = get_ocr_provider()
+        try:
+            file_bytes, content_type = (None, "")
+            if provider.name != "stub":
+                file_bytes, content_type = _load_source_bytes(db, job)
+            extraction = provider.extract(file_bytes=file_bytes, file_name=job.file_name, content_type=content_type)
+            job.status = "completed"
+            job.progress = 100
+            job.result = {**(job.result or {}), **extraction}  # keep source_file_id
+            db.commit()
+            metrics.record_ocr("completed")
+            return "completed"
+        except Exception as e:  # noqa: BLE001
+            _log.exception("ocr: provider %s failed for job %s", provider.name, job_id)
+            job.status = "failed"
+            job.progress = 100
+            job.result = {**(job.result or {}), "error": str(e)[:500], "provider": provider.name}
+            db.commit()
+            metrics.record_ocr("failed")
+            return "failed"
 
 
 @celery.task(name="contracts.render_pdf")
@@ -167,6 +173,17 @@ def seal_envelope(envelope_id: str, tenant_id: str) -> str:
                     for t in tab_rows
                 ]
                 signed_bytes = stamp_tabs_on_pdf(signed_bytes, tab_dicts)
+            # Cryptographic seal (PAdES) when configured — applied last, over the final executed
+            # PDF. Fall back to the visual-only PDF on error so sealing never hard-fails.
+            from .signing_provider import get_signing_provider
+
+            _sp = get_signing_provider()
+            if _sp.cryptographic:
+                try:
+                    signed_bytes = _sp.seal_pdf(signed_bytes, contract_ref=c.reference_no or "", reason=f"Executed: {c.title}")
+                except Exception as e:  # noqa: BLE001
+                    import logging as _lg
+                    _lg.getLogger("uvicorn.error").exception("seal_envelope: %s signing failed; storing visual-only PDF", _sp.name)
             cert_bytes = render_certificate_bytes(envelope=env, contract=c, org_name=org, recipients=recip_dicts, events=event_dicts)
 
             storage = get_storage()

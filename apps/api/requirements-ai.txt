@@ -1,0 +1,6 @@
+# Optional AI/OCR extras (RFI T-5). Install only when using a real extraction provider:
+#   pip install -r requirements-ai.txt
+# Then set OCR_PROVIDER=anthropic and OCR_API_KEY=sk-ant-...
+# The default OCR_PROVIDER=stub needs none of these.
+-r requirements.txt
+anthropic==0.40.0
