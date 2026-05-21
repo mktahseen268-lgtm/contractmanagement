@@ -118,13 +118,15 @@ Celery is configured in [apps/api/app/celery_app.py](apps/api/app/celery_app.py)
 
 The canonical compliance/gap document is [docs/RFI-COMPLIANCE.md](docs/RFI-COMPLIANCE.md) (single-page dossier indexing docs 19–26 and 28 architectural decisions). Read it once; treat what follows as the **code-level operational summary** for working sessions.
 
-### Maturity snapshot (as of 2026-05-19, post-hardening pass)
+### Maturity snapshot (as of 2026-05-21, post provider-seams pass)
 
-The codebase is a v1 **spine** at ~55–60% feature-completeness against enterprise/government RFI requirements. The 0013_hardening pass closed the three credibility-risk hotspots and most of the contained "other live risks" — the gap to v1 is now dominated by *features that need external infrastructure* (real OCR/AI providers, SSO IdP, NIFT signer, OTel collector), not by code-level shortcuts.
+The codebase is a v1 **spine** at ~65–70% feature-completeness against enterprise/government RFI requirements. The 0013_hardening pass closed the contained code-level risks; the provider-seams pass (T-1/T-3/T-4/T-5) added real pluggable architecture for the items that need external infra — each with a tested default + a real adapter that activates on config. The remaining gap is *configuration + procurement* (supply credentials/IdP/cert) plus a few engineering items (SAML, FTS, partitioning).
 
-- Security readiness: **76/100** (+18 from baseline) — added: signing-token hashing+expiry, webhook secret encryption-at-rest, password policy (length + classes + blocklist + identity-echo), audit-log HMAC chain, Redis-backed rate-limit, S3 SSE on every PUT, K8s worker probes, real pytest. Still capped by: no SSO, no SoD enforcement, no CAPTCHA, no AV-on-upload, OCR/AI stub.
-- Enterprise readiness: **52/100** (+10) — no SSO/SCIM, no clause library, no SLA engine, no parallel-approval groups, full-text search is `ILIKE` not `tsvector`, no real OCR/AI, no co-editing, mobile-responsive only.
-- Government readiness: **48/100** (+20) — added: tamper-evident audit chain (HMAC per-tenant), encrypted signing-token storage. Still missing: NIFT/PAdES signer, RFC 3161 timestamps, separation-of-duties enforcement, compliance-mode toggle.
+- Security readiness: **82/100** — adds (over the hardening pass) Prometheus `/metrics` + OTel hook, real OIDC SSO flow, SCIM 2.0 provisioning. Still capped by: SAML not wired, no SoD enforcement, no CAPTCHA, no AV-on-upload.
+- Enterprise readiness: **62/100** — adds SSO/SCIM seam + observability. Still: no clause library, no SLA engine, no parallel-approval groups, FTS is `ILIKE` not `tsvector`, OCR/AI on by config not default, mobile-responsive only.
+- Government readiness: **62/100** — adds the real PAdES signer (pyhanko + RFC-3161 TSA) behind the signing seam + SSO. Still: SAML, separation-of-duties enforcement, compliance-mode toggle, and PAdES needs a real cert + the operator to flip `SIGNING_PROVIDER=pades`.
+
+> Scores assume the cloud adapters are **configured**. Out-of-the-box (defaults) the app runs on the stub OCR + internal signer + password auth — honest, but not the regulated-deployment posture.
 
 ### What 0013_hardening closed (don't worry about these any more)
 
@@ -138,26 +140,32 @@ The codebase is a v1 **spine** at ~55–60% feature-completeness against enterpr
 8. ✅ **K8s worker liveness/readiness probes** — [infra/k8s/deployment-api.yaml](infra/k8s/deployment-api.yaml) uses `celery inspect ping` (round-trip through broker) for both probes + startupProbe + 60s graceful termination.
 9. ✅ **Real pytest suite** — [apps/api/tests/](apps/api/tests/) covers signing-token storage (no plaintext persisted, lookup by hash, expiry, decrypt round-trip, clear), audit-chain integrity (chain links, edit detection, deletion detection, per-tenant isolation), refresh-token reuse detection (whole chain burned on reuse), lifecycle state machine, password policy. CI ratcheted from import-smoke to `pytest -v` against the Postgres + Redis service containers.
 
+### Provider seams shipped (architecture done; cloud adapter needs credentials)
+
+Each of these is now a **real pluggable provider** with a tested zero-dependency default and a real cloud/crypto/IdP adapter that activates only when configured. Optional deps live in `requirements-{ai,sign,sso,otel}.txt` so the base install stays lean. The honest pattern: the default works in dev/CI; the production adapter is real code awaiting credentials.
+
+1. ✅ **T-1 Observability** — Prometheus `/metrics` is always on ([apps/api/app/metrics.py](apps/api/app/metrics.py) + [middleware/metrics.py](apps/api/app/middleware/metrics.py)): HTTP request/latency/in-flight + domain counters (`cm_auth_logins_total`, `cm_ocr_jobs_total`, `cm_signature_events_total`). OpenTelemetry tracing is env-gated ([apps/api/app/tracing.py](apps/api/app/tracing.py), `OTEL_ENABLED` + collector); no-op + graceful when off.
+2. ✅ **T-5 OCR/AI provider** — [apps/api/app/ocr_provider.py](apps/api/app/ocr_provider.py): `OcrProvider` ABC + `StubOcrProvider` (default, deterministic, **does not read the doc**) + `AnthropicOcrProvider` (real — Claude reads the actual PDF/image via vision). `OCR_PROVIDER=anthropic` + `OCR_API_KEY`. [tasks.py](apps/api/app/tasks.py) `process_ocr_job` runs the provider + loads real file bytes + records metrics.
+3. ✅ **T-4 Signing provider** — [apps/api/app/signing_provider.py](apps/api/app/signing_provider.py): `SigningProvider` ABC + `InternalSigningProvider` (default; visual Signatures page + Certificate of Completion are the evidence) + `PadesSigningProvider` (real PAdES via pyhanko + PKCS#12 cert + optional RFC-3161 TSA). `SIGNING_PROVIDER=pades` + `SIGNING_CERT_PATH`. Applied in [tasks.py](apps/api/app/tasks.py) `seal_envelope`, falls back to visual-only on error.
+4. ✅ **T-3 SSO/OIDC + SCIM** — OIDC authorization-code flow ([apps/api/app/sso.py](apps/api/app/sso.py) + `/auth/sso/{config,login,callback}` in [routers/auth.py](apps/api/app/routers/auth.py)); stdlib + PyJWT, JIT-provisions into `OIDC_DEFAULT_TENANT_ID`. SCIM 2.0 Users API ([routers/scim.py](apps/api/app/routers/scim.py), token-gated, `SCIM_ENABLED`/`SCIM_TOKEN`/`SCIM_TENANT_ID`). Web shows a "Sign in with SSO" button when `/auth/sso/config` reports enabled.
+
 ### Credibility-risk hotspots still open
 
-1. **OCR/AI is a deterministic stub presenting as real** — [apps/api/app/tasks.py](apps/api/app/tasks.py) `ocr.*` tasks return random-seeded fake extraction. UI shows confidence scores from the stub. Roadmap **T-5** swaps the implementation behind the existing interface to Textract/Document Intelligence/GPT-class. Until that lands, sales/RFI material must call out that AI features are scaffolded, not live.
-2. **MSSQL "portable" claim silently degrades to app-layer isolation** — the RLS migration in [apps/api/migrations/versions/0002_rls.py](apps/api/migrations/versions/0002_rls.py) is Postgres-only. On MSSQL, RLS is not created and only the repository-layer `tenant_id` filter holds the line. [docs/25-database-portability.md](docs/25-database-portability.md) documents this; the *only* honest deployment story right now is Postgres-first.
-3. **No SSO / SCIM / WebAuthn** — biggest single procurement blocker. Designed (docs/19) but not wired. Roadmap T-3.
-4. **No NIFT / PAdES / RFC 3161 signing provider** — biggest government-readiness gap. Pluggable signer slot exists (designed in docs/19). Roadmap T-4.
-5. **No CAPTCHA / no antivirus on upload** — both currently operator/gateway concerns, not app-implemented. Roadmap items T-9 (AV) and external (CAPTCHA at WAF/CDN).
-6. **`audit_log` is unpartitioned** — the hash chain is in, but at scale (>10M rows) the table needs PG declarative partitioning by month. Operator step.
+1. **MSSQL "portable" claim silently degrades to app-layer isolation** — the RLS migration in [apps/api/migrations/versions/0002_rls.py](apps/api/migrations/versions/0002_rls.py) is Postgres-only. On MSSQL, RLS is not created and only the repository-layer `tenant_id` filter holds the line. [docs/25-database-portability.md](docs/25-database-portability.md) documents this; the *only* honest deployment story right now is Postgres-first.
+2. **OCR/AI default is still the stub** — the *seam* is real (T-5), but unless `OCR_PROVIDER=anthropic` is configured, extraction is fabricated. Sales/RFI material must say AI extraction is configurable, not on-by-default.
+3. **No CAPTCHA / no antivirus on upload** — both currently operator/gateway concerns, not app-implemented. Roadmap items T-9 (AV) and external (CAPTCHA at WAF/CDN).
+4. **`audit_log` is unpartitioned** — the hash chain is in, but at scale (>10M rows) the table needs PG declarative partitioning by month. Operator step.
 
-### Roadmap — pick work from here, not from intuition
+### Roadmap — what's left
 
-P0 (operator must do before first production deploy) and P1–P3 (engineering quarters) are listed in [docs/RFI-COMPLIANCE.md §9](docs/RFI-COMPLIANCE.md). The remaining shortlist after 0013_hardening, ordered by risk-closed per unit of engineering effort:
+The big provider seams (T-1/T-3/T-4/T-5) are shipped (above). Remaining engineering items:
 
-1. **T-1 OpenTelemetry + `/metrics`** — wires the monitoring story the RFI dossier promises. Highest-leverage operability item.
-2. **T-3 SSO/OIDC + SAML + SCIM** — biggest single procurement unblocker; pluggable identity slot is already designed (see [docs/19-security-trust.md](docs/19-security-trust.md) and [docs/16-api-architecture.md](docs/16-api-architecture.md)).
-3. **T-4 Pluggable signing provider (NIFT / Adobe / DocuSign trust services / eIDAS PAdES-LT)** — single biggest government-readiness unlock.
-4. **T-5 Real OCR/AI provider behind the existing interface** — closes the lone remaining credibility risk.
-5. **T-11 `tsvector` full-text search on contract body** — upgrade from current `ILIKE`. Postgres-only first; MSSQL FTS is the parallel implementation in the same seam. JSONB+GIN groundwork is already in place from 0013.
-6. **`audit_log` declarative partitioning** — needed at scale; the hash chain in 0013_hardening is per-row so it survives partition splits.
-7. **Step-up auth on sensitive actions** — re-prompt for password/MFA on role-change, webhook secret reveal, signature voiding (T-8).
+1. **SAML 2.0** — OIDC is wired; SAML is the other half of T-3 for IdPs that don't speak OIDC.
+2. **T-11 `tsvector` full-text search on contract body** — upgrade from current `ILIKE`. Postgres-only first; MSSQL FTS is the parallel implementation in the same seam. JSONB+GIN groundwork is already in place from 0013.
+3. **`audit_log` declarative partitioning** — needed at scale; the hash chain in 0013_hardening is per-row so it survives partition splits.
+4. **Step-up auth on sensitive actions** — re-prompt for password/MFA on role-change, webhook secret reveal, signature voiding (T-8).
+5. **T-9 antivirus on upload** + **CAPTCHA** at the edge.
+6. **Worker-side metrics exporter** — `/metrics` covers the API process; the Celery worker needs its own exporter for OCR/seal job metrics.
 
 ### What this means for sessions
 

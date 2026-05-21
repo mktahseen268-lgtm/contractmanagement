@@ -1,14 +1,17 @@
 import datetime as dt
 import re
+import secrets
 import uuid
 
+import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import auth_service as svc
 from .. import metrics
-from .. import models, schemas, security
+from .. import models, schemas, security, sso
 from ..audit import record
 from ..config import settings
 from ..database import get_db, set_request_tenant
@@ -217,6 +220,93 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)) 
 def me(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)) -> schemas.MeOut:
     tenant = db.get(models.Tenant, user.tenant_id)
     return schemas.MeOut(user=schemas.UserOut.model_validate(user), tenant=schemas.TenantOut.model_validate(tenant))
+
+
+# ---------- SSO / OIDC (RFI T-3) ----------
+
+_SSO_COOKIE = "cm_sso_state"
+
+
+@router.get("/sso/config", response_model=dict)
+def sso_config() -> dict:
+    """Lets the web app decide whether to show a 'Sign in with SSO' button."""
+    return {"enabled": sso.is_enabled()}
+
+
+@router.get("/sso/login")
+def sso_login(request: Request) -> RedirectResponse:
+    if not sso.is_enabled():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SSO is not configured.")
+    state, nonce = sso.new_state(), sso.new_state()
+    # stash state+nonce in a short-lived signed cookie (survives the IdP round-trip)
+    stash = jwt.encode(
+        {"state": state, "nonce": nonce, "exp": int(dt.datetime.now(dt.timezone.utc).timestamp()) + 600},
+        settings.secret_key, algorithm=settings.algorithm,
+    )
+    resp = RedirectResponse(sso.build_authorize_url(state, nonce), status_code=status.HTTP_302_FOUND)
+    resp.set_cookie(_SSO_COOKIE, stash, max_age=600, httponly=True, secure=settings.cookie_secure, samesite="lax", path="/")
+    return resp
+
+
+def _jit_provision_sso_user(db: Session, claims: dict, request: Request) -> models.User:
+    """Match the SSO identity to an existing user by email, or JIT-provision into the configured
+    default workspace."""
+    email = str(claims["email"]).lower()
+    existing = db.scalar(select(models.User).where(func.lower(models.User.email) == email))
+    if existing is not None:
+        set_request_tenant(existing.tenant_id)
+        if not existing.is_active:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account is deactivated.")
+        return existing
+    tid = settings.oidc_default_tenant_id
+    if not tid:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No workspace is mapped for SSO sign-up. Contact your admin.")
+    set_request_tenant(tid)
+    tenant = db.get(models.Tenant, tid)
+    if tenant is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Configured SSO workspace not found.")
+    name = str(claims.get("name") or claims.get("preferred_username") or email.split("@")[0])[:200]
+    user = models.User(
+        tenant_id=tid, email=email, name=name,
+        password_hash=security.hash_password(secrets.token_urlsafe(32)),  # unusable — SSO only
+        role=settings.oidc_default_role,
+    )
+    db.add(user)
+    db.flush()
+    record(db, tenant_id=tid, action="user.provisioned_sso", actor=user, object_type="user", object_id=user.id, object_label=user.name, ip=client_ip(request))
+    return user
+
+
+@router.get("/sso/callback")
+def sso_callback(request: Request, code: str | None = None, state: str | None = None, db: Session = Depends(get_db)) -> RedirectResponse:
+    fe = settings.frontend_url.rstrip("/")
+    if not sso.is_enabled():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SSO is not configured.")
+    if not code or not state:
+        return RedirectResponse(f"{fe}/login?sso_error=missing_code", status_code=status.HTTP_302_FOUND)
+    stash = request.cookies.get(_SSO_COOKIE)
+    try:
+        payload = jwt.decode(stash or "", settings.secret_key, algorithms=[settings.algorithm])
+    except Exception:
+        return RedirectResponse(f"{fe}/login?sso_error=expired", status_code=status.HTTP_302_FOUND)
+    if payload.get("state") != state:
+        return RedirectResponse(f"{fe}/login?sso_error=state_mismatch", status_code=status.HTTP_302_FOUND)
+    try:
+        tokens = sso.exchange_code(code)
+        claims = sso.validate_id_token(tokens.get("id_token", ""), payload.get("nonce", ""))
+        user = _jit_provision_sso_user(db, claims, request)
+        raw, sid = svc.create_session(db, user, request)
+        record(db, tenant_id=user.tenant_id, action="auth.login.sso", actor=user, object_type="user", object_id=user.id, object_label=user.name, ip=client_ip(request))
+        metrics.record_login("sso")
+        db.commit()
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        return RedirectResponse(f"{fe}/login?sso_error={type(e).__name__}", status_code=status.HTTP_302_FOUND)
+    resp = RedirectResponse(f"{fe}/dashboard", status_code=status.HTTP_302_FOUND)
+    svc.set_refresh_cookie(resp, raw)
+    resp.delete_cookie(_SSO_COOKIE, path="/")
+    return resp
 
 
 # ---------- password ----------

@@ -71,6 +71,24 @@ class Settings(BaseSettings):
     log_format: Literal["json", "text"] = "json"   # text in dev for human readability, json in prod
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
+    # --- SSO / OIDC (RFI T-3 / docs/19). Off by default (password auth). When enabled, users
+    # can sign in via any OIDC IdP (Okta / Entra / Google / Keycloak). New SSO users are
+    # JIT-provisioned into `oidc_default_tenant_id` (or matched to an existing user by email). ---
+    oidc_enabled: bool = False
+    oidc_issuer: str = ""                          # e.g. https://accounts.google.com
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_redirect_url: str = ""                    # https://api.example.com/auth/sso/callback
+    oidc_scopes: str = "openid email profile"
+    oidc_default_tenant_id: str = ""               # workspace new SSO users land in
+    oidc_default_role: str = "author"
+
+    # --- SCIM 2.0 provisioning (RFI T-3). An IdP creates/deactivates users via /scim/v2/Users,
+    # authenticated with `scim_token`, provisioning into `scim_tenant_id`. ---
+    scim_enabled: bool = False
+    scim_token: str = ""
+    scim_tenant_id: str = ""
+
     # --- Observability (RFI T-1 / docs/26) ---
     # `/metrics` (Prometheus) is always on. OpenTelemetry tracing is opt-in: set otel_enabled
     # AND point otel_exporter_otlp_endpoint at a collector (OTLP/HTTP, e.g. http://otel:4318).
