@@ -29,8 +29,7 @@ def _csp_value() -> str:
         "base-uri 'self'; "
         "form-action 'self'; "
         "object-src 'none'; "
-        "worker-src 'self' blob:; "
-        "upgrade-insecure-requests"
+        "worker-src 'self' blob:"
     )
 
 
@@ -41,7 +40,6 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             return response
         # Idempotent — only set if upstream hasn't already.
         h = response.headers
-        h.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
         h.setdefault("X-Frame-Options", "DENY")
         h.setdefault("X-Content-Type-Options", "nosniff")
         h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
