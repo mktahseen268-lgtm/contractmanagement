@@ -308,7 +308,14 @@ class SignatureRecipient(Base):
     access_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     access_token_secret: Mapped[str | None] = mapped_column(EncryptedString(512), nullable=True)
     access_token_expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True, index=True)
-    signed_name: Mapped[str] = mapped_column(String(200), default="")  # the typed signature
+    signed_name: Mapped[str] = mapped_column(String(200), default="")  # the typed/legal name on record
+    # How the signer adopted their mark, and (for drawn/uploaded) the captured image.
+    #  - signature_kind: 'typed' (default — render '/s/ name' text) | 'drawn' | 'uploaded'.
+    #  - signature_image: a base64 PNG/JPEG *data URL* (e.g. 'data:image/png;base64,…'); NULL for
+    #    typed. Capped at ~1 MB decoded (validated in signing_service.sign). Stamped into the
+    #    executed PDF (Signatures page + signature tabs) when present.
+    signature_kind: Mapped[str] = mapped_column(String(20), default="typed")
+    signature_image: Mapped[str | None] = mapped_column(Text, nullable=True)
     consent_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     signed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     declined_reason: Mapped[str] = mapped_column(String(500), default="")

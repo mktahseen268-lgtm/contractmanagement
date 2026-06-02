@@ -34,6 +34,44 @@ def _now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
 
+# Max decoded size of an adopted-signature image (drawn canvas export / uploaded file).
+_MAX_SIGNATURE_IMAGE_BYTES = 1_000_000  # ~1 MB
+_ALLOWED_SIGNATURE_MIME = ("image/png", "image/jpeg")
+
+
+def validate_signature_image(data_url: str | None) -> str | None:
+    """Validate a base64 image *data URL* for a drawn/uploaded signature. Returns the data URL
+    unchanged when valid, or None when absent/invalid. Enforces PNG/JPEG, a real decodable
+    payload, and a ~1 MB decoded cap so a recipient can't store an arbitrarily large blob."""
+    import base64
+    import binascii
+
+    if not data_url or not isinstance(data_url, str):
+        return None
+    s = data_url.strip()
+    if not s.startswith("data:"):
+        return None
+    try:
+        header, b64 = s.split(",", 1)
+    except ValueError:
+        return None
+    mime = header[5:].split(";", 1)[0].strip().lower()
+    if mime not in _ALLOWED_SIGNATURE_MIME or "base64" not in header.lower():
+        return None
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if not raw or len(raw) > _MAX_SIGNATURE_IMAGE_BYTES:
+        return None
+    # Sanity-check magic bytes so a mislabeled payload can't slip through.
+    is_png = raw[:8] == b"\x89PNG\r\n\x1a\n"
+    is_jpeg = raw[:3] == b"\xff\xd8\xff"
+    if not (is_png or is_jpeg):
+        return None
+    return s
+
+
 def _token_ttl() -> dt.timedelta:
     return dt.timedelta(days=max(1, settings.signing_token_ttl_days))
 
@@ -289,7 +327,7 @@ def fill_tabs_for_recipient(db: Session, *, envelope: models.SignatureEnvelope, 
     return filled, missing
 
 
-def sign(db: Session, *, envelope: models.SignatureEnvelope, recipient: models.SignatureRecipient, contract: models.Contract, full_name: str, ip: str, ua: str, tab_fills: list | None = None) -> models.SignatureEnvelope:
+def sign(db: Session, *, envelope: models.SignatureEnvelope, recipient: models.SignatureRecipient, contract: models.Contract, full_name: str, ip: str, ua: str, tab_fills: list | None = None, signature_kind: str = "typed", signature_image: str | None = None) -> models.SignatureEnvelope:
     if envelope.status not in ("sent", "partially_signed"):
         raise ValueError("This envelope is no longer open for signing.")
     if recipient.kind != "signer":
@@ -299,12 +337,21 @@ def sign(db: Session, *, envelope: models.SignatureEnvelope, recipient: models.S
     rs = recipients(db, envelope.id)
     if not is_recipients_turn(envelope, recipient, rs):
         raise ValueError("It's not your turn to sign yet — an earlier signer hasn't signed.")
+    # Validate the adopted-signature image for drawn/uploaded modes. Typed mode keeps text-only.
+    kind = signature_kind if signature_kind in ("typed", "drawn", "uploaded") else "typed"
+    image: str | None = None
+    if kind in ("drawn", "uploaded"):
+        image = validate_signature_image(signature_image)
+        if image is None:
+            raise ValueError("A drawn or uploaded signature is required. Please add your signature, or switch to Type.")
     # fill any tabs assigned to this recipient (required tabs must end up non-empty)
     _, missing = fill_tabs_for_recipient(db, envelope=envelope, recipient=recipient, full_name=full_name, fills=tab_fills)
     if missing:
         raise ValueError(f"Please fill these required fields: {', '.join(missing)}")
     now = _now()
     recipient.signed_name = (full_name or recipient.name).strip()[:200]
+    recipient.signature_kind = kind
+    recipient.signature_image = image
     recipient.consent_at = now
     recipient.signed_at = now
     recipient.status = "signed"

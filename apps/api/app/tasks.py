@@ -155,7 +155,9 @@ def seal_envelope(envelope_id: str, tenant_id: str) -> str:
             recips = list(db.scalars(select(models.SignatureRecipient).where(models.SignatureRecipient.envelope_id == env.id).order_by(models.SignatureRecipient.sequence)).all())
             events = list(db.scalars(select(models.SignatureEvent).where(models.SignatureEvent.envelope_id == env.id).order_by(models.SignatureEvent.at)).all())
             decline_times = {e.recipient_id: e.at for e in events if e.event == "declined"}
-            signers = [{"name": r.name, "email": r.email, "signed_name": r.signed_name, "signed_at": r.signed_at, "ip": r.ip} for r in recips if r.status == "signed" and r.kind == "signer"]
+            signers = [{"name": r.name, "email": r.email, "signed_name": r.signed_name, "signed_at": r.signed_at, "ip": r.ip, "signature_kind": r.signature_kind, "signature_image": r.signature_image} for r in recips if r.status == "signed" and r.kind == "signer"]
+            # recipient_id -> adopted signature image (data URL), for stamping into signature tabs.
+            recip_sig_image = {r.id: r.signature_image for r in recips if r.signature_image}
             recip_dicts = [
                 {"name": r.name, "email": r.email, "kind": r.kind, "status": r.status, "signed_at": r.signed_at, "declined_at": decline_times.get(r.id), "declined_reason": r.declined_reason, "ip": r.ip}
                 for r in recips
@@ -169,7 +171,8 @@ def seal_envelope(envelope_id: str, tenant_id: str) -> str:
             ).all())
             if tab_rows:
                 tab_dicts = [
-                    {"page": t.page, "x": t.x, "y": t.y, "width": t.width, "height": t.height, "kind": t.kind, "value": t.value}
+                    {"page": t.page, "x": t.x, "y": t.y, "width": t.width, "height": t.height, "kind": t.kind, "value": t.value,
+                     "signature_image": recip_sig_image.get(t.recipient_id) if t.kind == "signature" else None}
                     for t in tab_rows
                 ]
                 signed_bytes = stamp_tabs_on_pdf(signed_bytes, tab_dicts)

@@ -377,7 +377,7 @@ def signing_sign(token: str, data: schemas.SignIn, request: Request, db: Session
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This signing link is no longer active.")
     c = db.get(models.Contract, env.contract_id)
     try:
-        sig.sign(db, envelope=env, recipient=r, contract=c, full_name=data.full_name, ip=client_ip(request), ua=request.headers.get("user-agent", ""), tab_fills=data.tab_fills)
+        sig.sign(db, envelope=env, recipient=r, contract=c, full_name=data.full_name, ip=client_ip(request), ua=request.headers.get("user-agent", ""), tab_fills=data.tab_fills, signature_kind=data.signature_kind, signature_image=data.signature_image)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     db.commit()

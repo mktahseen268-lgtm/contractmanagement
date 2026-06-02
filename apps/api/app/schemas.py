@@ -810,8 +810,12 @@ class PrepareSignatureIn(BaseModel):
 
 
 class SignIn(BaseModel):
-    full_name: str = Field(min_length=1, max_length=200)
+    full_name: str = Field(min_length=1, max_length=200)  # legal name on record + typed-mode fallback
     consent: bool = True
+    # How the signer adopted their mark. For drawn/uploaded, `signature_image` carries a base64
+    # PNG/JPEG data URL (validated + size-capped server-side in signing_service.sign).
+    signature_kind: Literal["typed", "drawn", "uploaded"] = "typed"
+    signature_image: str | None = None
     tab_fills: list[TabFillIn] = []  # values for text/checkbox tabs (signature/initials/date are auto-filled)
 
 

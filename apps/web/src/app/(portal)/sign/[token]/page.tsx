@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { CheckCircle2, FileText, Loader2, Lock, ShieldCheck } from "lucide-react";
+import { CheckCircle2, Eraser, FileText, Loader2, Lock, PenLine, ShieldCheck, Type as TypeIcon, Upload } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Button, Card, CardBody, ErrorBanner, Field, Input } from "@/components/ui";
 import type { SigningInfo } from "@/lib/types";
@@ -28,6 +28,69 @@ export default function SignPage() {
   const [declineMode, setDeclineMode] = useState(false);
   const [declineReason, setDeclineReason] = useState("");
   const [tabFills, setTabFills] = useState<Record<string, string>>({});
+  // How the signer adopts their mark. Backend values: typed | drawn | uploaded.
+  const [sigMode, setSigMode] = useState<"typed" | "drawn" | "uploaded">("typed");
+  const [sigImage, setSigImage] = useState("");        // base64 PNG/JPEG data URL for drawn/uploaded
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const drawingRef = useRef(false);
+  const lastPtRef = useRef<{ x: number; y: number } | null>(null);
+  const [hasDrawing, setHasDrawing] = useState(false);
+
+  function canvasPos(e: React.PointerEvent<HTMLCanvasElement>) {
+    const c = canvasRef.current!;
+    const r = c.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * (c.width / r.width), y: (e.clientY - r.top) * (c.height / r.height) };
+  }
+  function startDraw(e: React.PointerEvent<HTMLCanvasElement>) {
+    drawingRef.current = true;
+    lastPtRef.current = canvasPos(e);
+    try { (e.target as Element).setPointerCapture(e.pointerId); } catch { /* noop */ }
+  }
+  function moveDraw(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (!drawingRef.current) return;
+    const ctx = canvasRef.current?.getContext("2d");
+    if (!ctx || !lastPtRef.current) return;
+    const p = canvasPos(e);
+    ctx.strokeStyle = "#0F1729";
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(lastPtRef.current.x, lastPtRef.current.y);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+    lastPtRef.current = p;
+    setHasDrawing(true);
+  }
+  function endDraw() {
+    if (drawingRef.current && hasDrawing && canvasRef.current) {
+      setSigImage(canvasRef.current.toDataURL("image/png"));
+    }
+    drawingRef.current = false;
+    lastPtRef.current = null;
+  }
+  function clearCanvas() {
+    const c = canvasRef.current;
+    if (c) c.getContext("2d")?.clearRect(0, 0, c.width, c.height);
+    setHasDrawing(false);
+    setSigImage("");
+  }
+  function onUploadFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setError("");
+    if (!["image/png", "image/jpeg"].includes(f.type)) {
+      setError("Please upload a PNG or JPEG image.");
+      return;
+    }
+    if (f.size > 1_000_000) {
+      setError("Signature image must be under 1 MB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => setSigImage(typeof reader.result === "string" ? reader.result : "");
+    reader.readAsDataURL(f);
+  }
 
   useEffect(() => {
     api
@@ -41,13 +104,17 @@ export default function SignPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
+  const sigReady = sigMode === "typed" ? !!fullName.trim() : !!sigImage;
+
   async function sign() {
-    if (!consent || !fullName.trim()) return;
+    if (!consent || !fullName.trim() || !sigReady) return;
     setBusy(true);
     setError("");
     try {
       const fills = Object.entries(tabFills).map(([tab_id, value]) => ({ tab_id, value }));
-      setInfo(await api.post<SigningInfo>(`/sign/${token}/sign`, { full_name: fullName.trim(), consent: true, tab_fills: fills }));
+      const body: Record<string, unknown> = { full_name: fullName.trim(), consent: true, tab_fills: fills, signature_kind: sigMode };
+      if (sigMode !== "typed") body.signature_image = sigImage;
+      setInfo(await api.post<SigningInfo>(`/sign/${token}/sign`, body));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Couldn't record your signature.");
     } finally {
@@ -128,12 +195,79 @@ export default function SignPage() {
                     </span>
                   </label>
                   {showConsent && <p className="rounded-md bg-white px-3 py-2 text-xs text-ink-3">{info.consent_text}</p>}
-                  <Field label="Your full name — this is your signature">
+                  <Field label="Your full legal name">
                     <Input value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Jane Doe" />
                   </Field>
-                  <div className="rounded-md bg-white px-3 py-2">
-                    <span className="font-mono text-[10px] uppercase tracking-wide text-ink-3">Signature preview</span>
-                    <div className="mt-0.5 text-2xl font-bold italic text-ink">/s/&nbsp;{fullName.trim() || "—"}</div>
+
+                  {/* signature adoption: type / draw / upload */}
+                  <div>
+                    <div className="mb-2 inline-flex rounded-lg border border-line bg-white p-0.5 text-sm">
+                      {([
+                        { key: "typed", label: "Type", icon: TypeIcon },
+                        { key: "drawn", label: "Draw", icon: PenLine },
+                        { key: "uploaded", label: "Upload", icon: Upload },
+                      ] as const).map((m) => {
+                        const active = sigMode === m.key;
+                        const Icon = m.icon;
+                        return (
+                          <button
+                            key={m.key}
+                            type="button"
+                            onClick={() => setSigMode(m.key)}
+                            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition ${active ? "bg-accent text-white" : "text-ink-2 hover:text-ink"}`}
+                          >
+                            <Icon className="h-3.5 w-3.5" /> {m.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {sigMode === "typed" && (
+                      <div className="rounded-md bg-white px-3 py-2">
+                        <span className="font-mono text-[10px] uppercase tracking-wide text-ink-3">Signature preview</span>
+                        <div className="mt-0.5 text-2xl font-bold italic text-ink">/s/&nbsp;{fullName.trim() || "—"}</div>
+                      </div>
+                    )}
+
+                    {sigMode === "drawn" && (
+                      <div className="rounded-md bg-white p-3">
+                        <div className="mb-1 flex items-center justify-between">
+                          <span className="font-mono text-[10px] uppercase tracking-wide text-ink-3">Draw your signature</span>
+                          <button type="button" onClick={clearCanvas} className="inline-flex items-center gap-1 text-xs text-ink-3 hover:text-danger">
+                            <Eraser className="h-3 w-3" /> Clear
+                          </button>
+                        </div>
+                        <canvas
+                          ref={canvasRef}
+                          width={560}
+                          height={160}
+                          onPointerDown={startDraw}
+                          onPointerMove={moveDraw}
+                          onPointerUp={endDraw}
+                          onPointerLeave={endDraw}
+                          className="h-40 w-full touch-none rounded-md border border-dashed border-line bg-surface-2"
+                        />
+                        {!hasDrawing && <p className="mt-1 text-xs text-ink-3">Use your mouse or finger to sign above.</p>}
+                      </div>
+                    )}
+
+                    {sigMode === "uploaded" && (
+                      <div className="rounded-md bg-white p-3">
+                        <span className="font-mono text-[10px] uppercase tracking-wide text-ink-3">Upload a signature image</span>
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg"
+                          onChange={onUploadFile}
+                          className="mt-1 block w-full text-sm text-ink-2 file:mr-3 file:rounded-md file:border-0 file:bg-surface-2 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-ink-2 hover:file:bg-line"
+                        />
+                        {sigImage ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={sigImage} alt="Signature preview" className="mt-2 max-h-24 rounded border border-line bg-surface-2 p-1" />
+                        ) : (
+                          <p className="mt-1 text-xs text-ink-3">PNG or JPEG, under 1 MB. A transparent PNG looks best.</p>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {info.tabs.length > 0 && (
@@ -180,7 +314,7 @@ export default function SignPage() {
                     </div>
                   )}
                   <div className="flex flex-wrap items-center gap-2">
-                    <Button onClick={sign} loading={busy} disabled={!consent || !fullName.trim()}>
+                    <Button onClick={sign} loading={busy} disabled={!consent || !fullName.trim() || !sigReady}>
                       <CheckCircle2 className="h-4 w-4" /> I agree &amp; sign
                     </Button>
                     <button onClick={() => setDeclineMode(true)} className="text-sm text-ink-3 hover:text-danger hover:underline">

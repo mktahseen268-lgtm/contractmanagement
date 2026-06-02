@@ -20,6 +20,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import (
     HRFlowable,
+    Image,
     ListFlowable,
     ListItem,
     PageBreak,
@@ -232,6 +233,24 @@ def _fmt_dt(d) -> str:
     return str(d)
 
 
+def _sig_image_reader(data_url: str | None):
+    """Decode a base64 image *data URL* (PNG/JPEG) into a ReportLab ImageReader for embedding a
+    drawn/uploaded signature. Returns None on absence or any decode failure so callers fall back
+    to text rendering."""
+    if not data_url or not isinstance(data_url, str) or not data_url.startswith("data:"):
+        return None
+    try:
+        import base64
+
+        from reportlab.lib.utils import ImageReader
+
+        _, b64 = data_url.split(",", 1)
+        raw = base64.b64decode(b64)
+        return ImageReader(io.BytesIO(raw))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def stamp_tabs_on_pdf(pdf_bytes: bytes, tabs: list[dict]) -> bytes:
     """Overlay signature/initials/date/text/checkbox tabs onto an existing PDF, in place. Each
     tab carries normalized coords (page 1-based; x,y,width,height as 0..1 fractions of the page;
@@ -285,9 +304,29 @@ def stamp_tabs_on_pdf(pdf_bytes: bytes, tabs: list[dict]) -> bytes:
             cv.setLineWidth(0.6)
             cv.rect(x, y - h, w, h, stroke=1, fill=0)
             if kind == "signature":
-                cv.setFont("Helvetica-BoldOblique", max(10, min(int(h * 0.7), 24)))
-                cv.setFillColorRGB(0.06, 0.13, 0.26)
-                cv.drawString(x + 2, y - h * 0.7, ("/s/ " + value)[:200] if value else "/s/")
+                sig_img = _sig_image_reader(t.get("signature_image"))
+                drew_image = False
+                if sig_img is not None:
+                    try:
+                        iw, ih = sig_img.getSize()
+                        box_w = max(1.0, w - 4)
+                        box_h = max(1.0, h - 4)
+                        scale = min(box_w / iw, box_h / ih) if iw and ih else 1.0
+                        dw = iw * scale
+                        dh = ih * scale
+                        cv.drawImage(
+                            sig_img,
+                            x + 2 + (box_w - dw) / 2,
+                            (y - h) + 2 + (box_h - dh) / 2,
+                            width=dw, height=dh, mask="auto", preserveAspectRatio=True,
+                        )
+                        drew_image = True
+                    except Exception:  # noqa: BLE001
+                        drew_image = False
+                if not drew_image:
+                    cv.setFont("Helvetica-BoldOblique", max(10, min(int(h * 0.7), 24)))
+                    cv.setFillColorRGB(0.06, 0.13, 0.26)
+                    cv.drawString(x + 2, y - h * 0.7, ("/s/ " + value)[:200] if value else "/s/")
             elif kind == "initials":
                 cv.setFont("Helvetica-Bold", max(10, min(int(h * 0.7), 18)))
                 cv.setFillColorRGB(0.06, 0.13, 0.26)
@@ -331,7 +370,20 @@ def render_signed_pdf_bytes(*, contract, org_name: str, signers: list[dict]) -> 
         extra.append(Paragraph("<i>(No signatures recorded.)</i>", st["body"]))
     for s in signers:
         extra.append(Paragraph(f"<b>{_inline(s.get('name') or '')}</b>" + (f" &nbsp;<font size=8 color='#7A8694'>{_inline(s.get('email') or '')}</font>" if s.get("email") else ""), st["body"]))
-        extra.append(Paragraph("/s/  " + _inline(s.get("signed_name") or s.get("name") or ""), sig_style))
+        # Drawn/uploaded signatures embed the actual image; typed signatures print '/s/ name'.
+        sig_img = _sig_image_reader(s.get("signature_image"))
+        rendered_image = False
+        if sig_img is not None:
+            try:
+                iw, ih = sig_img.getSize()
+                max_w, max_h = 180.0, 60.0
+                scale = min(max_w / iw, max_h / ih) if iw and ih else 1.0
+                extra.append(Image(sig_img, width=iw * scale, height=ih * scale, hAlign="LEFT"))
+                rendered_image = True
+            except Exception:  # noqa: BLE001
+                rendered_image = False
+        if not rendered_image:
+            extra.append(Paragraph("/s/  " + _inline(s.get("signed_name") or s.get("name") or ""), sig_style))
         extra.append(Paragraph(f"Signed {_fmt_dt(s.get('signed_at'))}" + (f" · IP {s['ip']}" if s.get("ip") else ""), st["small"]))
         extra.append(HRFlowable(width="60%", color=_LINE, spaceBefore=8, spaceAfter=14))
     extra.append(Spacer(1, 4))
