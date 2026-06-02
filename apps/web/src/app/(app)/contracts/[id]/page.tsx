@@ -1388,7 +1388,9 @@ function TabsPanel({ env, onChanged }: { env: SignatureEnvelope; onChanged: () =
 
 function SignaturesTab({ contract, env, onChanged }: { contract: ContractDetail; env: SignatureEnvelope | null; onChanged: () => void }) {
   const toast = useToast();
-  const [recips, setRecips] = useState<DraftRecipient[]>([{ name: "", email: "", kind: "signer" }]);
+  // Pre-fill the first recipient with a demo address so testing the signature flow is one-click.
+  // Change/clear before sending real signature requests.
+  const [recips, setRecips] = useState<DraftRecipient[]>([{ name: "Shahzaib", email: "shahzaib@thiqatech.com", kind: "signer" }]);
   const [order, setOrder] = useState<"sequential" | "parallel">("sequential");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<string | null>(null);

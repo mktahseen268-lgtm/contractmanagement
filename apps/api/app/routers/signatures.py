@@ -355,7 +355,7 @@ def signing_info(token: str, db: Session = Depends(get_db)) -> schemas.SigningIn
 @router.post("/sign/{token}/view", response_model=schemas.SigningInfoOut)
 def signing_view(token: str, request: Request, db: Session = Depends(get_db)) -> schemas.SigningInfoOut:
     r = sig.recipient_by_token(db, token)
-    if r and r.access_token:
+    if r and r.access_token_hash:
         set_request_tenant(r.tenant_id)
         env = db.get(models.SignatureEnvelope, r.envelope_id)
         if env is not None and env.status != "voided":
@@ -367,7 +367,7 @@ def signing_view(token: str, request: Request, db: Session = Depends(get_db)) ->
 @router.post("/sign/{token}/sign", response_model=schemas.SigningInfoOut)
 def signing_sign(token: str, data: schemas.SignIn, request: Request, db: Session = Depends(get_db)) -> schemas.SigningInfoOut:
     r = sig.recipient_by_token(db, token)
-    if r is None or not r.access_token:
+    if r is None or not r.access_token_hash:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="This signing link is no longer active.")
     if not data.consent:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You must agree to use electronic records and signatures to sign.")
@@ -405,7 +405,7 @@ def signing_sign(token: str, data: schemas.SignIn, request: Request, db: Session
 @router.post("/sign/{token}/decline", response_model=schemas.SigningInfoOut)
 def signing_decline(token: str, data: schemas.DeclineIn, request: Request, db: Session = Depends(get_db)) -> schemas.SigningInfoOut:
     r = sig.recipient_by_token(db, token)
-    if r is None or not r.access_token:
+    if r is None or not r.access_token_hash:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="This signing link is no longer active.")
     set_request_tenant(r.tenant_id)
     env = db.get(models.SignatureEnvelope, r.envelope_id)
@@ -423,7 +423,7 @@ def signing_decline(token: str, data: schemas.DeclineIn, request: Request, db: S
 @router.get("/sign/{token}/document")
 def signing_document(token: str, db: Session = Depends(get_db)) -> StreamingResponse:
     r = sig.recipient_by_token(db, token)
-    if r is None or not r.access_token:
+    if r is None or not r.access_token_hash:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="This signing link is no longer active.")
     set_request_tenant(r.tenant_id)
     env = db.get(models.SignatureEnvelope, r.envelope_id)
