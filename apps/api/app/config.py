@@ -112,6 +112,9 @@ class Settings(BaseSettings):
     smtp_user: str = ""
     smtp_password: str = ""
     smtp_starttls: bool = True
+    # Implicit-SSL mode (SMTPS, typically port 465). When true, uses smtplib.SMTP_SSL and
+    # skips STARTTLS. Use this for hosts like Hostinger/cPanel mailservers that listen 465 only.
+    smtp_ssl: bool = False
 
     # --- CORS (frontend origins, comma-separated) ---
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"

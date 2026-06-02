@@ -34,6 +34,33 @@ import {
 } from "@/lib/utils";
 import type { ActivityItem, Comment, ContractDetail, ContractWorkflow, FileObject, Obligation, SignatureEnvelope, SignatureRecipient, User, Version, VersionDetail, WorkflowRunStep } from "@/lib/types";
 
+// Legacy clipboard fallback for non-secure contexts (plain HTTP behind an IP). Uses an off-
+// screen textarea + selection + document.execCommand("copy"). Returns true on success.
+function legacyCopy(text: string): boolean {
+  if (typeof document === "undefined") return false;
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.top = "0";
+  ta.style.left = "-9999px";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  const prevActive = document.activeElement as HTMLElement | null;
+  try {
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand("copy");
+    return !!ok;
+  } catch {
+    return false;
+  } finally {
+    document.body.removeChild(ta);
+    prevActive?.focus?.();
+  }
+}
+
 type Tab = "overview" | "approvals" | "signatures" | "obligations" | "document" | "activity" | "comments" | "files" | "versions";
 const EDITABLE_STATUSES = new Set(["draft", "changes_requested"]);
 const TABS: Tab[] = ["overview", "approvals", "signatures", "obligations", "document", "activity", "comments", "files", "versions"];
@@ -1416,13 +1443,22 @@ function SignaturesTab({ contract, env, onChanged }: { contract: ContractDetail;
   }
 
   function copyLink(link: string, rid: string) {
-    navigator.clipboard?.writeText(`${origin}${link}`).then(
-      () => {
-        setCopied(rid);
-        setTimeout(() => setCopied(null), 1500);
-      },
-      () => {},
-    );
+    const url = `${origin}${link}`;
+    const onOk = () => {
+      setCopied(rid);
+      setTimeout(() => setCopied(null), 1500);
+      toast.success("Link copied", "Paste it wherever you need.");
+    };
+    const onFail = () => toast.error("Couldn't copy", "Long-press the link to copy it manually.");
+
+    // The modern Clipboard API is only available in secure contexts (HTTPS or localhost). On
+    // plain HTTP behind an IP this is undefined, so we fall back to the legacy execCommand path
+    // (an off-screen textarea + select + copy) which works on HTTP too.
+    if (typeof navigator !== "undefined" && navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(url).then(onOk, () => legacyCopy(url) ? onOk() : onFail());
+    } else {
+      legacyCopy(url) ? onOk() : onFail();
+    }
   }
 
   // --- No envelope yet -------------------------------------------------------

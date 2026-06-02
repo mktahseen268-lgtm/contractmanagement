@@ -17,7 +17,8 @@ log = logging.getLogger("uvicorn.error")
 
 
 def _deliver(to: str, subject: str, body: str) -> None:
-    """The actual send. Raises on error so the caller can record the failure."""
+    """The actual send. Raises on error so the caller can record the failure. Supports both
+    STARTTLS (smtp_starttls=true, typically port 587) and implicit SSL (smtp_ssl=true, port 465)."""
     if settings.email_backend == "smtp":
         import smtplib
         from email.message import EmailMessage
@@ -27,8 +28,12 @@ def _deliver(to: str, subject: str, body: str) -> None:
         msg["To"] = to
         msg["Subject"] = subject
         msg.set_content(body)
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as s:
-            if settings.smtp_starttls and settings.smtp_user:
+        if settings.smtp_ssl:
+            client = smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=15)
+        else:
+            client = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15)
+        with client as s:
+            if not settings.smtp_ssl and settings.smtp_starttls and settings.smtp_user:
                 s.starttls()
             if settings.smtp_user:
                 s.login(settings.smtp_user, settings.smtp_password)

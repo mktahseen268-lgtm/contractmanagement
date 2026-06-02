@@ -154,8 +154,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       {/* main column */}
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* top bar */}
-        <header className="glass flex h-14 shrink-0 items-center gap-3 border-b border-line px-4 md:px-5">
+        {/* top bar — relative z-30 so its dropdowns (notifications, progress tray, avatar menu)
+            paint above the sticky PageHeader (z-20) on the page below. */}
+        <header className="glass relative z-30 flex h-14 shrink-0 items-center gap-3 border-b border-line px-4 md:px-5">
           {/* mobile hamburger */}
           <button
             onClick={() => setMobileOpen(true)}
