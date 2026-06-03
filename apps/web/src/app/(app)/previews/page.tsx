@@ -6,8 +6,8 @@
 
 import Link from "next/link";
 import {
-  ArrowRight, Fingerprint, FileText, Folder, Gavel, GitBranch, Globe, KeyRound, LayoutList,
-  Library, ListChecks, Mails, PenLine, PenTool, Plug, Search, ShieldAlert, ShieldCheck, Sparkles,
+  ArrowRight, Building2, Fingerprint, FileText, Folder, Gavel, GitBranch, Globe, KeyRound, LayoutList,
+  Library, Link2, ListChecks, Mails, PenLine, PenTool, Plug, Search, ShieldAlert, ShieldCheck, Sparkles, UserCog,
 } from "lucide-react";
 import { PageHeader } from "@/components/shell";
 import { Badge, Card, CardBody } from "@/components/ui";
@@ -23,6 +23,7 @@ const GROUPS: Group[] = [
       { href: "/bulk-send", title: "Bulk Send", desc: "One template to many signers, with scheduled reminders and expiry.", icon: Mails },
       { href: "/identity-check", title: "Identity Verification", desc: "SMS / email OTP, government-ID, or KBA before signing.", icon: Fingerprint },
       { href: "/client-portal", title: "Client Portal", desc: "External counterparty review, negotiation, and signing surface.", icon: Globe },
+      { href: "/temporary-access", title: "Temporary Access", desc: "Grant a vendor scoped, time-limited access to one contract.", icon: Link2 },
     ],
   },
   {
@@ -47,6 +48,13 @@ const GROUPS: Group[] = [
     items: [
       { href: "/workflow-builder", title: "Workflow Builder", desc: "Parallel approval groups, conditional routing, SLA escalation.", icon: GitBranch },
       { href: "/ai-analysis", title: "AI Risk Analysis", desc: "Risk score, flagged clauses, missing terms, extracted obligations.", icon: ShieldAlert },
+    ],
+  },
+  {
+    name: "People & access",
+    items: [
+      { href: "/roles", title: "Roles & Permissions", desc: "Editable permission matrix + custom roles.", icon: UserCog },
+      { href: "/departments", title: "Departments", desc: "Managed department directory with leads & rollups.", icon: Building2 },
     ],
   },
   {
