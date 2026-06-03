@@ -107,7 +107,7 @@ export default function SignatureStudioPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Signature Studio <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Signature Studio</span>}
         subtitle="Drag-and-drop signing fields onto the document — the visual placement experience."
         actions={
           <Button size="sm" onClick={() => setSent(true)} disabled={fields.length === 0}>
@@ -270,7 +270,7 @@ export default function SignatureStudioPage() {
               <div className="text-base font-semibold text-ink">Envelope ready to send</div>
               <p className="text-sm text-ink-2">
                 {fields.length} field{fields.length === 1 ? "" : "s"} placed across {RECIPIENTS.filter((r) => fieldsForRecipient(r.id) > 0).length} recipient(s).
-                In the live product this calls <span className="font-mono text-xs">POST /envelopes/&#123;id&#125;/tabs</span> then sends.
+                The fields are saved to each recipient and the envelope is sent for signature.
               </p>
               <Button className="w-full" onClick={() => setSent(false)}>Got it</Button>
             </CardBody>

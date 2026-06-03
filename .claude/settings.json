@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -c \"import pptx; print\\('python-pptx', pptx.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe -m pip install python-pptx --quiet)",
+      "Bash(.venv/Scripts/python.exe -c \"import pptx; print\\('OK', pptx.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe \"d:/tmp/gen_ppt.py\")",
+      "Bash(powershell.exe -NoProfile -Command 'Get-Item '\\\\''C:\\\\Users\\\\sanal\\\\Downloads\\\\Contract_Management_Platform.pptx'\\\\'' | Select-Object Name, @{N='\\\\''KB'\\\\'';E={[math]::Round\\($_.Length/1KB,1\\)}}, LastWriteTime | Format-List')",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3000)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8000/health)",
+      "Bash(npm i *)",
+      "Bash(npx playwright *)",
+      "Bash(node -e \"const{chromium}=require\\('playwright'\\);console.log\\('playwright OK'\\)\")",
+      "Bash(node \"d:/tmp/capture.js\")",
+      "Bash(NODE_PATH=\"d:/gitrepo/contract_management/contractmanagement/apps/web/node_modules\" node \"d:/tmp/capture.js\")",
+      "Bash(NODE_PATH=d:/gitrepo/contract_management/contractmanagement/apps/web/node_modules node -e ' *)",
+      "Bash(awk '{print $5, $9}')",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(powershell.exe -NoProfile -Command \"\\(Get-Item 'C:\\\\Users\\\\sanal\\\\Downloads\\\\Contract_Management_Platform.pptx'\\).Length/1KB\")",
+      "Bash(powershell.exe -NoProfile -Command 'Get-Item '\\\\''C:\\\\Users\\\\sanal\\\\Downloads\\\\Contract_Management_Platform.pptx'\\\\'' | Select-Object FullName, @{N='\\\\''MB'\\\\'';E={[math]::Round\\($_.Length/1MB,2\\)}}, LastWriteTime | Format-List')",
+      "Bash(powershell.exe -NoProfile -Command \"Start-Process 'C:\\\\Users\\\\sanal\\\\Downloads\\\\Contract_Management_Platform.pptx'\")",
+      "Bash(cd \"d:/gitrepo/contract_management/contractmanagement/apps/web/src/app/\\(app\\)\")",
+      "Bash(perl -0pi -e 's/ <Badge tone=\"accent\">Preview<\\\\/Badge>//g' __TRACKED_VAR__/page.tsx)",
+      "Bash(echo \"stripped\")",
+      "Bash(grep -rl '<Badge tone=\"accent\">Preview</Badge>' .)",
+      "Bash(grep -vE \"^\\\\s*[0-9]*:\\\\s*//\")",
+      "Bash(powershell.exe -NoProfile -Command \"Get-Process POWERPNT -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Milliseconds 800; Write-Output 'closed'\")",
+      "Bash(.venv/Scripts/python.exe \"d:/tmp/seed_obl.py\")",
+      "Bash(echo \"exit=$?\")"
+    ]
+  }
+}

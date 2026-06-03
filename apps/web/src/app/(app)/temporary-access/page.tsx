@@ -71,7 +71,7 @@ export default function TemporaryAccessPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Temporary Access <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Temporary Access</span>}
         subtitle="Give a vendor scoped, time-limited access to a single contract — then it auto-expires."
         actions={
           <div className="flex items-center gap-1 rounded-lg border border-line bg-surface-2 p-0.5 text-sm">
@@ -161,7 +161,7 @@ export default function TemporaryAccessPage() {
       ) : (
         /* ---------- Vendor (guest) view preview ---------- */
         <div className="p-4">
-          <p className="mx-auto mb-3 max-w-3xl text-center text-xs text-ink-3">Preview of what <span className="font-medium text-ink-2">{previewGrant.email}</span> sees at their access link — scoped to one contract.</p>
+          <p className="mx-auto mb-3 max-w-3xl text-center text-xs text-ink-3">What <span className="font-medium text-ink-2">{previewGrant.email}</span> sees at their access link — scoped to one contract.</p>
           <div className="mx-auto max-w-3xl overflow-hidden rounded-2xl border border-line bg-white shadow-card">
             <div className="flex items-center justify-between border-b border-line bg-gradient-to-r from-accent/10 to-transparent px-6 py-4">
               <div className="flex items-center gap-3">

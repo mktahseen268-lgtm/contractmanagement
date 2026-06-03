@@ -51,7 +51,7 @@ export default function AiAnalysisPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">AI Risk Analysis <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">AI Risk Analysis</span>}
         subtitle="LLM review of a contract — risk score, flagged clauses, missing terms, extracted obligations."
         actions={<Button size="sm" onClick={run} disabled={state === "running"}><Sparkles className="h-3.5 w-3.5" /> {state === "running" ? "Analyzing…" : "Re-analyze"}</Button>}
       />

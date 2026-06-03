@@ -41,7 +41,7 @@ export default function PasskeysPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Passkeys <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Passkeys</span>}
         subtitle="Passwordless, phishing-resistant sign-in with WebAuthn passkeys."
         actions={
           <Button size="sm" onClick={register} disabled={registering}>

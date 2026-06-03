@@ -35,7 +35,7 @@ export default function DocxStudioPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Word Import / Export <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Word Import / Export</span>}
         subtitle="Bring Word documents in as editable contracts, and export back to .docx or PDF."
       />
 

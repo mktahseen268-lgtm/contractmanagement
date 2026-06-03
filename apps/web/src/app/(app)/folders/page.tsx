@@ -67,7 +67,7 @@ export default function FoldersPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Folders <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Folders</span>}
         subtitle="Organise the repository into nested folders — beyond flat tags."
         actions={<Button size="sm" variant="secondary"><FolderPlus className="h-3.5 w-3.5" /> New folder</Button>}
       />

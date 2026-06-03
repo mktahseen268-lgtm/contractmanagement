@@ -36,7 +36,7 @@ export default function ClientPortalPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Client Portal <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Client Portal</span>}
         subtitle="What an external counterparty sees — review, negotiate, and sign a shared contract."
       />
 

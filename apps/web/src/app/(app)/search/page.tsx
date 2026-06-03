@@ -87,7 +87,7 @@ export default function SearchPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Search <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Search</span>}
         subtitle="Ranked full-text search across contract bodies and clauses — not just titles."
       />
 

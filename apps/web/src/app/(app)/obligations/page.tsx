@@ -52,7 +52,7 @@ export default function ObligationsDashboardPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Obligations <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Obligations</span>}
         subtitle="Every obligation across the portfolio — due dates, owners, and email reminders."
       />
 

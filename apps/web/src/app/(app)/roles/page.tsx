@@ -83,7 +83,7 @@ export default function RolesPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Roles &amp; Permissions <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Roles &amp; Permissions</span>}
         subtitle="Define what each role can do — and add custom roles beyond the built-in hierarchy."
         actions={
           <Button size="sm" onClick={() => { setSavedAt(true); setTimeout(() => setSavedAt(false), 1600); }}>

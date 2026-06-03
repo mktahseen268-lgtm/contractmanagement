@@ -53,7 +53,7 @@ export default function BulkSendPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Bulk Send <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Bulk Send</span>}
         subtitle="Send one template to many signers at once, with scheduled reminders and expiry."
         actions={
           <Button size="sm" onClick={() => setSent(true)} disabled={valid.length === 0}>
@@ -160,7 +160,7 @@ export default function BulkSendPage() {
               <div className="text-base font-semibold text-ink">{valid.length} envelopes queued</div>
               <p className="text-sm text-ink-2">
                 One envelope per recipient from <span className="font-medium text-ink">{TEMPLATES.find((t) => t.id === template)?.name}</span>,
-                with reminders every {everyDays}d (max {maxReminders}) and {expiryDays}-day expiry. In the live product each fans out through the signing engine.
+                with reminders every {everyDays}d (max {maxReminders}) and {expiryDays}-day expiry. Each recipient receives their own envelope through the signing engine.
               </p>
               <Button className="w-full" onClick={() => setSent(false)}>Done</Button>
             </CardBody>

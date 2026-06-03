@@ -46,7 +46,7 @@ export default function IntegrationsPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Integrations <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Integrations</span>}
         subtitle={`Connect your CRM, Microsoft 365, storage, and automation tools — ${connectedCount} connected.`}
       />
 

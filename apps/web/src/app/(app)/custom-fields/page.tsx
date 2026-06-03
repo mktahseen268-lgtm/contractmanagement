@@ -55,7 +55,7 @@ export default function CustomFieldsPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Custom Fields <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Custom Fields</span>}
         subtitle="Define your own contract metadata fields — they appear on every contract form."
       />
 

@@ -47,7 +47,7 @@ export default function LegalHoldPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Legal Hold <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Legal Hold</span>}
         subtitle="Preserve contracts & audit trails for litigation or audit — exempt from retention purge."
         actions={<Button size="sm" onClick={() => setShowNew((s) => !s)}><Plus className="h-3.5 w-3.5" /> Place a hold</Button>}
       />

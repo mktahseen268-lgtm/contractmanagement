@@ -30,6 +30,17 @@ _STATUSES = ["draft", "draft", "in_review", "in_review", "approved", "out_for_si
 _DEPTS = ["Procurement", "Legal", "HR", "Real Estate", "Operations", "Finance"]
 _LAWS = ["Oman", "UAE", "Saudi Arabia", "England & Wales", "Bahrain"]
 _RISKS = ["low", "low", "low", "medium", "medium", "high", "critical"]
+# (title, description, due-offset-in-days-from-today) — negative offsets become 'overdue'.
+_OBLIGATION_TEMPLATES = [
+    ("Send renewal notice", "Notify the counterparty of intent to renew before the deadline.", -5),
+    ("Quarterly compliance review", "Confirm covenant and policy compliance for the quarter.", 4),
+    ("Submit deliverables report", "Provide the agreed milestone deliverables.", 12),
+    ("Pay current invoice", "Settle the current period invoice (Net-30).", 1),
+    ("Insurance certificate renewal", "Refresh the certificate of insurance on file.", -2),
+    ("Security review sign-off", "Complete the annual vendor security attestation.", 25),
+    ("Onboarding checklist", "Complete counterparty onboarding steps.", -18),
+    ("Data-processing audit", "Verify DPA controls and data-residency commitments.", 40),
+]
 
 
 def seed_if_empty(db: Session) -> bool:
@@ -117,6 +128,21 @@ def seed_if_empty(db: Session) -> bool:
             cm = models.Comment(tenant_id=tenant.id, contract_id=c.id, author_id=rng.choice(users).id, author_name=rng.choice(users).name, body=rng.choice(["Please double-check the liability cap.", "Counterparty asked for net-45 payment terms.", "Approved pending the data-residency clause.", "Can we shorten the auto-renew notice to 30 days?"]))
             db.add(cm)
             record(db, tenant_id=tenant.id, action="contract.commented", actor=rng.choice(users), object_type="contract", object_id=c.id, object_label=c.title)
+        # obligations — a couple per non-draft contract, with a spread of due dates/statuses so the
+        # Obligations tab + reminders surface real data (overdue / due-soon / upcoming / done).
+        if st not in ("draft", "expired", "terminated", "voided"):
+            for (otitle, odesc, ooff) in rng.sample(_OBLIGATION_TEMPLATES, k=rng.randint(2, 3)):
+                due = today + dt.timedelta(days=ooff)
+                ostatus = "overdue" if ooff < 0 else ("done" if rng.random() < 0.2 else "pending")
+                ob = models.Obligation(
+                    tenant_id=tenant.id, contract_id=c.id, title=otitle, description=odesc,
+                    due_date=due, owner_id=ownr.id, status=ostatus, created_by=creator.id,
+                )
+                if ostatus == "done":
+                    ob.completed_at = dt.datetime.now() - dt.timedelta(days=rng.randint(1, 20))
+                    ob.completed_by_id = ownr.id
+                    ob.completed_by_name = ownr.name
+                db.add(ob)
 
     # a couple of notifications for the demo owner
     db.add(models.Notification(tenant_id=tenant.id, user_id=owner.id, type="contract.approval_requested", title="Mariam Khan asked for your approval", body="On \"Master Services Agreement — Globex LLC\"", object_type="contract"))

@@ -86,7 +86,7 @@ export default function RedlinePage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Redlining <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Redlining</span>}
         subtitle="Tracked changes with accept / reject and author attribution — collaborative redlines."
         actions={
           <div className="flex items-center gap-2">

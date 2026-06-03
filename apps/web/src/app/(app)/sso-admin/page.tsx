@@ -38,7 +38,7 @@ export default function SsoAdminPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">SAML SSO <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">SAML SSO</span>}
         subtitle="Connect your identity provider (Entra ID, Okta, Google) for single sign-on + SCIM provisioning."
         actions={
           <button

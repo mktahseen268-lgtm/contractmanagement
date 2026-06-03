@@ -1380,7 +1380,7 @@ function TabsPanel({ env, onChanged }: { env: SignatureEnvelope; onChanged: () =
         </div>
       </div>
       <p className="text-[11px] text-ink-3">
-        v1 placement is form-based — pick the page and (x, y) as fractions (0 = top-left). Drag-and-drop placement on a PDF preview is on the roadmap (docs/13). Tabs are stamped onto the executed PDF on completion.
+        Pick the page and (x, y) position as fractions (0 = top-left). Tabs are stamped onto the executed PDF on completion.
       </p>
     </div>
   );

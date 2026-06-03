@@ -60,7 +60,7 @@ export default function DepartmentsPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Departments <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Departments</span>}
         subtitle="A managed department directory — leads, members, and contract rollups."
         actions={<Button size="sm" onClick={startNew}><Plus className="h-3.5 w-3.5" /> New department</Button>}
       />

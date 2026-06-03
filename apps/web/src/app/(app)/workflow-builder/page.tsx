@@ -78,7 +78,7 @@ export default function WorkflowBuilderPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Workflow Builder <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Workflow Builder</span>}
         subtitle="Parallel approval groups, conditional routing, and SLA auto-escalation."
         actions={
           <div className="flex items-center gap-2">
@@ -173,7 +173,7 @@ export default function WorkflowBuilderPage() {
                 </Field>
 
                 <div className="rounded-lg border border-dashed border-line bg-surface-2 p-3 text-[11px] text-ink-2">
-                  <span className="font-semibold text-ink">Preview:</span> {summarize(sel)}
+                  <span className="font-semibold text-ink">Summary:</span> {summarize(sel)}
                 </div>
               </CardBody>
             </Card>
@@ -192,7 +192,7 @@ export default function WorkflowBuilderPage() {
               <p className="text-sm text-ink-2">
                 {stages.length} stages · {stages.filter((s) => s.mode === "all").length} parallel group(s) ·{" "}
                 {stages.filter((s) => s.condition && s.condition !== "Always").length} conditional route(s).
-                In the live product this versions the definition and applies it to new runs.
+                The workflow is versioned and applied to new approval runs.
               </p>
               <Button className="w-full" onClick={() => setActivated(false)}>Done</Button>
             </CardBody>

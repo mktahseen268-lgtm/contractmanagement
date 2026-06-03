@@ -46,7 +46,7 @@ export default function IdentityCheckPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Identity Verification <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Identity Verification</span>}
         subtitle="A higher-assurance identity step before signing — SMS / email OTP, ID check, or KBA."
       />
 

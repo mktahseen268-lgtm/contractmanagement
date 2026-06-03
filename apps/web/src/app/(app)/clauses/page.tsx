@@ -120,7 +120,7 @@ export default function ClauseLibraryPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Clause Library <Badge tone="accent">Preview</Badge></span>}
+        title={<span className="flex items-center gap-2">Clause Library</span>}
         subtitle="Reusable, approved language with playbook guidance — insert straight into the contract editor."
         actions={<Button size="sm"><Plus className="h-3.5 w-3.5" /> New clause</Button>}
       />
@@ -244,7 +244,7 @@ export default function ClauseLibraryPage() {
 
       {inserted && (
         <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-full bg-ink px-4 py-2 text-sm text-white shadow-lg">
-          Clause inserted into the contract editor (preview)
+          Clause inserted into the contract editor
         </div>
       )}
     </div>

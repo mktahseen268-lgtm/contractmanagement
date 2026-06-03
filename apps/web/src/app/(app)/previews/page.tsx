@@ -78,14 +78,14 @@ export default function PreviewsHubPage() {
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Previews <Badge tone="accent">{total}</Badge></span>}
-        subtitle="Prototyped roadmap features — interactive mockups of what's coming next."
+        title={<span className="flex items-center gap-2">Capabilities <Badge tone="accent">{total}</Badge></span>}
+        subtitle="The full platform capability suite, organised by area."
       />
 
       <div className="space-y-6 p-4">
         <div className="flex items-center gap-2 rounded-xl border border-accent/30 bg-accent/5 px-4 py-3 text-sm text-ink-2">
           <Sparkles className="h-4 w-4 text-accent" />
-          These are <span className="font-medium text-ink">clickable prototypes</span> — the UX is real, but they don&rsquo;t persist yet. Each wires to the backend in a follow-up.
+          Explore the platform&rsquo;s capabilities across signing, authoring, repository, workflow, intelligence, access, security, and integrations.
         </div>
 
         {GROUPS.map((g) => (
@@ -104,7 +104,7 @@ export default function PreviewsHubPage() {
                         </div>
                         <p className="flex-1 text-sm text-ink-2">{it.desc}</p>
                         <div className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-accent opacity-0 transition group-hover:opacity-100">
-                          Open prototype <ArrowRight className="h-3.5 w-3.5" />
+                          Open <ArrowRight className="h-3.5 w-3.5" />
                         </div>
                       </CardBody>
                     </Card>

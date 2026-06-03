@@ -75,7 +75,7 @@ const RAIL: RailItem[] = [
   { href: "/client-portal", label: "Client Portal", icon: Globe, match: (p) => p.startsWith("/client-portal") },
   { href: "/reports", label: "Reports", icon: BarChart3, match: (p) => p.startsWith("/reports") },
   { href: "/intelligence", label: "Intelligence", icon: Sparkles, match: (p) => p.startsWith("/intelligence") },
-  { href: "/previews", label: "Previews", icon: Rocket, match: (p) => p.startsWith("/previews") },
+  { href: "/previews", label: "Capabilities", icon: Rocket, match: (p) => p.startsWith("/previews") },
   { href: "/team", label: "Team", icon: UsersIcon, match: (p) => p.startsWith("/team"), adminOnly: true },
   { href: "/audit", label: "Audit log", icon: ShieldCheck, match: (p) => p.startsWith("/audit") },
   { href: "/settings", label: "Settings", icon: Settings, match: (p) => p.startsWith("/settings") },
@@ -157,6 +157,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         onToggleCollapsed={toggleCollapsed}
         onCloseMobile={() => setMobileOpen(false)}
         workspaceName={me?.tenant.name ?? "Workspace"}
+        groupName={me?.tenant.group_name ?? ""}
         isAdmin={me?.user.role === "owner" || me?.user.role === "admin"}
         inboxCount={inboxCount}
         inboxHigh={inboxHigh}
@@ -337,6 +338,7 @@ type SideNavProps = {
   onToggleCollapsed: () => void;
   onCloseMobile: () => void;
   workspaceName: string;
+  groupName: string;
   isAdmin: boolean;
   inboxCount: number;
   inboxHigh: boolean;
@@ -349,7 +351,7 @@ type SideNavProps = {
 
 function SideNav({
   items, pathname, collapsed, mobileOpen, onToggleCollapsed, onCloseMobile,
-  workspaceName, isAdmin, inboxCount, inboxHigh, userName, userRole, userColor, onSettings, onLogout,
+  workspaceName, groupName, isAdmin, inboxCount, inboxHigh, userName, userRole, userColor, onSettings, onLogout,
 }: SideNavProps) {
   // On mobile the drawer is always full-width-expanded; collapse only applies on >=md.
   const isCompact = collapsed && !mobileOpen;
@@ -402,7 +404,7 @@ function SideNav({
           <>
             <div className="min-w-0 flex-1">
               <div className="truncate text-[13px] font-semibold leading-tight text-ink">{workspaceName}</div>
-              <div className="text-[11px] leading-tight text-ink-3">Workspace</div>
+              <div className="truncate text-[11px] leading-tight text-ink-3">{groupName || "Workspace"}</div>
             </div>
             {/* collapse on desktop, close on mobile */}
             <button
