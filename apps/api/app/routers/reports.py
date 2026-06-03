@@ -11,7 +11,7 @@ from collections import defaultdict
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import desc, func, select
+from sqlalchemy import String, cast, desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
@@ -66,10 +66,79 @@ def _months_between(a: dt.date, b: dt.date) -> list[str]:
     return out
 
 
+def _contract_conds(
+    tid: str, *, ctype: str | None, status: str | None, risk: str | None,
+    department: str | None, owner: str | None, counterparty: str | None,
+    value_min: float | None, value_max: float | None,
+    q: str | None = None, renewal_type: str | None = None, currency: str | None = None,
+    tag: str | None = None,
+    effective_from: dt.date | None = None, effective_to: dt.date | None = None,
+    end_from: dt.date | None = None, end_to: dt.date | None = None,
+) -> list:
+    """Build the WHERE conditions for the report's contract filters (always tenant-scoped).
+    Every condition maps to a real `contracts` column so it composes with all aggregates."""
+    conds: list = [models.Contract.tenant_id == tid]
+    if ctype:
+        conds.append(models.Contract.type == ctype)
+    if status:
+        conds.append(models.Contract.status == status)
+    if risk:
+        conds.append(models.Contract.risk_level == risk)
+    if department:
+        conds.append(models.Contract.department == department)
+    if owner:
+        conds.append(models.Contract.owner_id == owner)
+    if counterparty:
+        conds.append(models.Contract.counterparty.ilike(f"%{counterparty.strip()}%"))
+    if value_min is not None:
+        conds.append(models.Contract.value >= value_min)
+    if value_max is not None:
+        conds.append(models.Contract.value <= value_max)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        conds.append(or_(models.Contract.title.ilike(like), models.Contract.reference_no.ilike(like)))
+    if renewal_type:
+        conds.append(models.Contract.renewal_type == renewal_type)
+    if currency:
+        conds.append(models.Contract.currency == currency.strip().upper())
+    if tag and tag.strip():
+        # tags is a JSON array; cast to text for a portable substring match (Postgres JSONB + SQLite).
+        conds.append(cast(models.Contract.tags, String).ilike(f'%{tag.strip()}%'))
+    if effective_from is not None:
+        conds.append(models.Contract.effective_date.is_not(None))
+        conds.append(models.Contract.effective_date >= effective_from)
+    if effective_to is not None:
+        conds.append(models.Contract.effective_date.is_not(None))
+        conds.append(models.Contract.effective_date <= effective_to)
+    if end_from is not None:
+        conds.append(models.Contract.end_date.is_not(None))
+        conds.append(models.Contract.end_date >= end_from)
+    if end_to is not None:
+        conds.append(models.Contract.end_date.is_not(None))
+        conds.append(models.Contract.end_date <= end_to)
+    return conds
+
+
 @router.get("/summary", response_model=schemas.ReportSummaryOut)
 def summary(
     date_from: dt.date | None = Query(None, alias="from"),
     date_to: dt.date | None = Query(None, alias="to"),
+    type: str | None = Query(None),
+    status: str | None = Query(None),
+    risk: str | None = Query(None),
+    department: str | None = Query(None),
+    owner: str | None = Query(None),
+    counterparty: str | None = Query(None),
+    value_min: float | None = Query(None),
+    value_max: float | None = Query(None),
+    q: str | None = Query(None),
+    renewal_type: str | None = Query(None),
+    currency: str | None = Query(None),
+    tag: str | None = Query(None),
+    effective_from: dt.date | None = Query(None),
+    effective_to: dt.date | None = Query(None),
+    end_from: dt.date | None = Query(None),
+    end_to: dt.date | None = Query(None),
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ) -> schemas.ReportSummaryOut:
@@ -78,51 +147,68 @@ def summary(
     tid = user.tenant_id
     today = dt.date.today()
 
+    # Contract-filter conditions, applied to every contract-based aggregate below. The activity
+    # sections (cycle time / throughput / approvers) are constrained to the matching contracts
+    # via a contract-id subquery so the whole report slices consistently.
+    conds = _contract_conds(
+        tid, ctype=type, status=status, risk=risk, department=department,
+        owner=owner, counterparty=counterparty, value_min=value_min, value_max=value_max,
+        q=q, renewal_type=renewal_type, currency=currency, tag=tag,
+        effective_from=effective_from, effective_to=effective_to, end_from=end_from, end_to=end_to,
+    )
+    any_filter = len(conds) > 1
+    cid_subq = select(models.Contract.id).where(*conds)
+
+    def _by_contract(col):
+        """Constrain an activity table (with a contract_id column) to the filtered contracts."""
+        return col.in_(cid_subq) if any_filter else (1 == 1)
+
     # --- KPI strip
-    total = db.scalar(select(func.count(models.Contract.id)).where(models.Contract.tenant_id == tid)) or 0
+    total = db.scalar(select(func.count(models.Contract.id)).where(*conds)) or 0
     created_in_range = db.scalar(select(func.count(models.Contract.id)).where(
-        models.Contract.tenant_id == tid, models.Contract.created_at >= dt_from, models.Contract.created_at < dt_to,
+        *conds, models.Contract.created_at >= dt_from, models.Contract.created_at < dt_to,
     )) or 0
     signed_in_range = db.scalar(select(func.count(models.SignatureEnvelope.id)).where(
         models.SignatureEnvelope.tenant_id == tid, models.SignatureEnvelope.status == "completed",
         models.SignatureEnvelope.completed_at >= dt_from, models.SignatureEnvelope.completed_at < dt_to,
+        _by_contract(models.SignatureEnvelope.contract_id),
     )) or 0
     active_count = db.scalar(select(func.count(models.Contract.id)).where(
-        models.Contract.tenant_id == tid, models.Contract.status.in_(_ACTIVE_STATUSES),
+        *conds, models.Contract.status.in_(_ACTIVE_STATUSES),
     )) or 0
     active_value = db.scalar(select(func.coalesce(func.sum(models.Contract.value), 0.0)).where(
-        models.Contract.tenant_id == tid, models.Contract.status.in_(_ACTIVE_STATUSES),
+        *conds, models.Contract.status.in_(_ACTIVE_STATUSES),
     )) or 0.0
     exp30 = today + dt.timedelta(days=30)
     exp90 = today + dt.timedelta(days=90)
     expiring_30d = db.scalar(select(func.count(models.Contract.id)).where(
-        models.Contract.tenant_id == tid, models.Contract.status.in_(_ACTIVE_STATUSES),
+        *conds, models.Contract.status.in_(_ACTIVE_STATUSES),
         models.Contract.end_date.is_not(None), models.Contract.end_date >= today, models.Contract.end_date <= exp30,
     )) or 0
     expiring_90d = db.scalar(select(func.count(models.Contract.id)).where(
-        models.Contract.tenant_id == tid, models.Contract.status.in_(_ACTIVE_STATUSES),
+        *conds, models.Contract.status.in_(_ACTIVE_STATUSES),
         models.Contract.end_date.is_not(None), models.Contract.end_date >= today, models.Contract.end_date <= exp90,
     )) or 0
 
     # --- distributions (current snapshot)
     by_status = [_bucket(r[0], r[1]) for r in db.execute(
-        select(models.Contract.status, func.count()).where(models.Contract.tenant_id == tid).group_by(models.Contract.status).order_by(desc(func.count()))
+        select(models.Contract.status, func.count()).where(*conds).group_by(models.Contract.status).order_by(desc(func.count()))
     ).all()]
     by_type = [_bucket(r[0], r[1], r[2] or 0.0) for r in db.execute(
         select(models.Contract.type, func.count(), func.coalesce(func.sum(models.Contract.value), 0.0))
-        .where(models.Contract.tenant_id == tid)
+        .where(*conds)
         .group_by(models.Contract.type).order_by(desc(func.count()))
     ).all()]
     by_risk = [_bucket(r[0], r[1]) for r in db.execute(
         select(models.Contract.risk_level, func.count()).where(
-            models.Contract.tenant_id == tid, models.Contract.status.notin_(_CLOSED_STATUSES),
+            *conds, models.Contract.status.notin_(_CLOSED_STATUSES),
         ).group_by(models.Contract.risk_level).order_by(desc(func.count()))
     ).all()]
     by_department = [
         _bucket((r[0] or "Unassigned"), r[1], r[2] or 0.0)
         for r in db.execute(
             select(models.Contract.department, func.count(), func.coalesce(func.sum(models.Contract.value), 0.0))
-            .where(models.Contract.tenant_id == tid, models.Contract.status.in_(_ACTIVE_STATUSES))
+            .where(*conds, models.Contract.status.in_(_ACTIVE_STATUSES))
             .group_by(models.Contract.department).order_by(desc(func.coalesce(func.sum(models.Contract.value), 0.0)))
         ).all()
     ]
@@ -130,7 +216,7 @@ def summary(
     # --- new per month (calendar months in the requested range)
     month_rows = db.execute(
         select(models.Contract.created_at, models.Contract.value).where(
-            models.Contract.tenant_id == tid, models.Contract.created_at >= dt_from, models.Contract.created_at < dt_to,
+            *conds, models.Contract.created_at >= dt_from, models.Contract.created_at < dt_to,
         )
     ).all()
     month_buckets: dict[str, dict[str, float]] = defaultdict(lambda: {"count": 0, "value": 0.0})
@@ -149,6 +235,7 @@ def summary(
             models.WorkflowRun.tenant_id == tid, models.WorkflowRun.status == "approved",
             models.WorkflowRun.completed_at.is_not(None),
             models.WorkflowRun.completed_at >= dt_from, models.WorkflowRun.completed_at < dt_to,
+            _by_contract(models.WorkflowRun.contract_id),
         )
     ).all()
     approval_days = [max((c - s).total_seconds() / 86400, 0.0) for s, c in approval_runs]
@@ -158,6 +245,7 @@ def summary(
             models.SignatureEnvelope.tenant_id == tid, models.SignatureEnvelope.status == "completed",
             models.SignatureEnvelope.sent_at.is_not(None), models.SignatureEnvelope.completed_at.is_not(None),
             models.SignatureEnvelope.completed_at >= dt_from, models.SignatureEnvelope.completed_at < dt_to,
+            _by_contract(models.SignatureEnvelope.contract_id),
         )
     ).all()
     signature_days = [max((c - s).total_seconds() / 86400, 0.0) for _, s, c in sig_completed]
@@ -179,7 +267,9 @@ def summary(
 
     # --- throughput counts in range
     def _wf_count(status: str | None, *, by_start: bool) -> int:
-        q = select(func.count(models.WorkflowRun.id)).where(models.WorkflowRun.tenant_id == tid)
+        q = select(func.count(models.WorkflowRun.id)).where(
+            models.WorkflowRun.tenant_id == tid, _by_contract(models.WorkflowRun.contract_id),
+        )
         if status:
             q = q.where(models.WorkflowRun.status == status)
         ts = models.WorkflowRun.started_at if by_start else models.WorkflowRun.completed_at
@@ -189,7 +279,10 @@ def summary(
         return db.scalar(q) or 0
 
     def _env_count(status: str | None, ts_col) -> int:
-        q = select(func.count(models.SignatureEnvelope.id)).where(models.SignatureEnvelope.tenant_id == tid, ts_col.is_not(None), ts_col >= dt_from, ts_col < dt_to)
+        q = select(func.count(models.SignatureEnvelope.id)).where(
+            models.SignatureEnvelope.tenant_id == tid, ts_col.is_not(None), ts_col >= dt_from, ts_col < dt_to,
+            _by_contract(models.SignatureEnvelope.contract_id),
+        )
         if status:
             q = q.where(models.SignatureEnvelope.status == status)
         return db.scalar(q) or 0
@@ -207,6 +300,7 @@ def summary(
                 models.SignatureEnvelope.tenant_id == tid, models.SignatureEnvelope.status == "voided",
                 # voided envelopes don't have a "voided_at" — approximate by created_at within range
                 models.SignatureEnvelope.created_at >= dt_from, models.SignatureEnvelope.created_at < dt_to,
+                _by_contract(models.SignatureEnvelope.contract_id),
             )
         ) or 0,
     )
@@ -216,13 +310,13 @@ def summary(
     expiring_buckets: list[schemas.ReportBucket] = []
     for lo, hi, label in horizons:
         n = db.scalar(select(func.count(models.Contract.id)).where(
-            models.Contract.tenant_id == tid, models.Contract.status.in_(_ACTIVE_STATUSES),
+            *conds, models.Contract.status.in_(_ACTIVE_STATUSES),
             models.Contract.end_date.is_not(None),
             models.Contract.end_date >= today + dt.timedelta(days=lo),
             models.Contract.end_date <= today + dt.timedelta(days=hi),
         )) or 0
         v = db.scalar(select(func.coalesce(func.sum(models.Contract.value), 0.0)).where(
-            models.Contract.tenant_id == tid, models.Contract.status.in_(_ACTIVE_STATUSES),
+            *conds, models.Contract.status.in_(_ACTIVE_STATUSES),
             models.Contract.end_date.is_not(None),
             models.Contract.end_date >= today + dt.timedelta(days=lo),
             models.Contract.end_date <= today + dt.timedelta(days=hi),
@@ -237,7 +331,7 @@ def summary(
         )
         for c in db.scalars(
             select(models.Contract).where(
-                models.Contract.tenant_id == tid, models.Contract.status.in_(_ACTIVE_STATUSES),
+                *conds, models.Contract.status.in_(_ACTIVE_STATUSES),
                 models.Contract.end_date.is_not(None),
                 models.Contract.end_date >= today, models.Contract.end_date <= today + dt.timedelta(days=180),
             ).order_by(models.Contract.end_date).limit(10)
@@ -252,6 +346,9 @@ def summary(
             models.WorkflowRunStep.tenant_id == tid, models.WorkflowRunStep.decided_by.is_not(None),
             models.WorkflowRunStep.decided_at.is_not(None),
             models.WorkflowRunStep.decided_at >= dt_from, models.WorkflowRunStep.decided_at < dt_to,
+            (models.WorkflowRunStep.run_id.in_(
+                select(models.WorkflowRun.id).where(models.WorkflowRun.contract_id.in_(cid_subq))
+            ) if any_filter else (1 == 1)),
         )
     ).all()
     by_user: dict[str, dict] = {}
@@ -366,25 +463,42 @@ def contracts_csv(
     date_to: dt.date | None = Query(None, alias="to"),
     status: str | None = None,
     type: str | None = None,
+    risk: str | None = None,
+    department: str | None = None,
+    owner: str | None = None,
+    counterparty: str | None = None,
+    value_min: float | None = None,
+    value_max: float | None = None,
+    q: str | None = None,
+    renewal_type: str | None = None,
+    currency: str | None = None,
+    tag: str | None = None,
+    effective_from: dt.date | None = None,
+    effective_to: dt.date | None = None,
+    end_from: dt.date | None = None,
+    end_to: dt.date | None = None,
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ) -> StreamingResponse:
-    """Stream a CSV export of contracts (filterable by created_at range, status, type).
+    """Stream a CSV export of contracts (filterable by created_at range + the same detail filters
+    as /reports/summary: status, type, risk, department, owner, counterparty, value range, search,
+    renewal type, currency, tag, effective/end date windows).
     Header: reference_no, title, type, status, owner, counterparty, department, value, currency,
     risk_level, effective_date, end_date, renewal_type, tags, created_at, updated_at."""
     rfrom, rto = _parse_range(date_from, date_to)
     dt_from, dt_to = _bounds_dt(rfrom, rto)
     tid = user.tenant_id
 
-    q = select(models.Contract).where(
-        models.Contract.tenant_id == tid,
-        models.Contract.created_at >= dt_from, models.Contract.created_at < dt_to,
+    conds = _contract_conds(
+        tid, ctype=type, status=status, risk=risk, department=department,
+        owner=owner, counterparty=counterparty, value_min=value_min, value_max=value_max,
+        q=q, renewal_type=renewal_type, currency=currency, tag=tag,
+        effective_from=effective_from, effective_to=effective_to, end_from=end_from, end_to=end_to,
     )
-    if status:
-        q = q.where(models.Contract.status == status)
-    if type:
-        q = q.where(models.Contract.type == type)
-    q = q.order_by(desc(models.Contract.created_at))
+    q = select(models.Contract).where(
+        *conds,
+        models.Contract.created_at >= dt_from, models.Contract.created_at < dt_to,
+    ).order_by(desc(models.Contract.created_at))
 
     owners = {r[0]: r[1] for r in db.execute(select(models.User.id, models.User.name).where(models.User.tenant_id == tid)).all()}
 

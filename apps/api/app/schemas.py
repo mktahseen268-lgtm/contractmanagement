@@ -84,12 +84,14 @@ class TenantOut(BaseModel):
     locale: str
     currency: str
     plan: str
+    group_name: str = ""
     accent_color: str = "#3E7BFA"
     timezone: str = "UTC"
 
 
 class TenantUpdateIn(BaseModel):
     name: str | None = Field(None, min_length=2, max_length=200)
+    group_name: str | None = None  # optional parent-org / group label (blank clears it)
     currency: str | None = None
     locale: str | None = None
     timezone: str | None = None

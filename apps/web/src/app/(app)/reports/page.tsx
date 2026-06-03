@@ -2,15 +2,38 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { CalendarClock, Calendar, FileCheck2, FilePlus2, FileText, FileSpreadsheet, Gauge, ListChecks, PenLine, TrendingUp, Wallet } from "lucide-react";
+import { CalendarClock, Calendar, FileCheck2, FilePlus2, FileText, FileSpreadsheet, Filter, Gauge, ListChecks, PenLine, TrendingUp, Wallet, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton } from "@/components/ui";
+import { Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Input, Select, Skeleton } from "@/components/ui";
 import { PageHeader } from "@/components/shell";
 import { AreaChart } from "@/components/charts";
 import { KpiCard } from "@/components/widgets";
-import { contractTypeLabel, downloadBlob, formatDate, formatMoney, statusMeta, titleCase } from "@/lib/utils";
-import type { ReportSummary, StuckItem } from "@/lib/types";
+import { CONTRACT_TYPES, RISK_META, STATUS_META, contractTypeLabel, downloadBlob, formatDate, formatMoney, statusMeta, titleCase } from "@/lib/utils";
+import type { ReportSummary, StuckItem, User } from "@/lib/types";
+
+type ReportFilters = {
+  type: string; status: string; risk: string; department: string;
+  owner: string; counterparty: string; value_min: string; value_max: string;
+  q: string; renewal_type: string; currency: string; tag: string;
+  effective_from: string; effective_to: string; end_from: string; end_to: string;
+};
+const EMPTY_FILTERS: ReportFilters = {
+  type: "", status: "", risk: "", department: "", owner: "", counterparty: "", value_min: "", value_max: "",
+  q: "", renewal_type: "", currency: "", tag: "", effective_from: "", effective_to: "", end_from: "", end_to: "",
+};
+function filterQuery(f: ReportFilters): string {
+  const p = new URLSearchParams();
+  (Object.keys(f) as (keyof ReportFilters)[]).forEach((k) => {
+    const v = f[k].trim();
+    if (v) p.set(k, v);
+  });
+  const s = p.toString();
+  return s ? `&${s}` : "";
+}
+function activeFilterCount(f: ReportFilters): number {
+  return (Object.keys(f) as (keyof ReportFilters)[]).filter((k) => f[k].trim()).length;
+}
 
 type Preset = { label: string; days: number };
 const PRESETS: Preset[] = [
@@ -40,17 +63,37 @@ export default function ReportsPage() {
   const [loading, setLoading] = useState(true);
   const [csvBusy, setCsvBusy] = useState(false);
   const [error, setError] = useState("");
+  // Detail filters. `filters` is the applied set the report reads; `draft` is what the bar edits
+  // until you hit Apply, so changing a dropdown doesn't refetch on every keystroke.
+  const [filters, setFilters] = useState<ReportFilters>(EMPTY_FILTERS);
+  const [draft, setDraft] = useState<ReportFilters>(EMPTY_FILTERS);
+  const [showFilters, setShowFilters] = useState(false);
+  const [owners, setOwners] = useState<User[]>([]);
+  const [deptOptions, setDeptOptions] = useState<string[]>([]);
+  const activeCount = activeFilterCount(filters);
+
+  // owner options for the filter dropdown (best-effort; non-admins may get 403 → ignore)
+  useEffect(() => {
+    api.get<User[]>("/users").then(setOwners).catch(() => setOwners([]));
+  }, []);
 
   const load = useCallback(() => {
     setLoading(true);
     setError("");
+    const fq = filterQuery(filters);
     api
-      .get<ReportSummary>(`/reports/summary?from=${range.from}&to=${range.to}`)
-      .then(setData)
+      .get<ReportSummary>(`/reports/summary?from=${range.from}&to=${range.to}${fq}`)
+      .then((d) => {
+        setData(d);
+        // capture department options from an unfiltered load so the dropdown stays complete
+        if (activeFilterCount(filters) === 0) {
+          setDeptOptions(d.by_department.map((b) => b.label).filter((x) => x && x !== "Unassigned"));
+        }
+      })
       .catch((e) => setError(e instanceof ApiError ? e.message : "Couldn't load the report."))
       .finally(() => setLoading(false));
     api.get<StuckItem[]>("/reports/stuck?limit=10").then(setStuck).catch(() => setStuck([]));
-  }, [range.from, range.to]);
+  }, [range.from, range.to, filters]);
   useEffect(load, [load]);
 
   function applyPreset(days: number) {
@@ -60,10 +103,18 @@ export default function ReportsPage() {
     setRange({ from: toIso(from), to: toIso(to) });
   }
 
+  function applyFilters() {
+    setFilters(draft);
+  }
+  function clearFilters() {
+    setDraft(EMPTY_FILTERS);
+    setFilters(EMPTY_FILTERS);
+  }
+
   async function exportCsv() {
     setCsvBusy(true);
     try {
-      const blob = await api.blob(`/reports/contracts.csv?from=${range.from}&to=${range.to}`);
+      const blob = await api.blob(`/reports/contracts.csv?from=${range.from}&to=${range.to}${filterQuery(filters)}`);
       downloadBlob(blob, `contracts_${range.from}_to_${range.to}.csv`);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Couldn't export the CSV.");
@@ -78,9 +129,14 @@ export default function ReportsPage() {
         title="Reports"
         subtitle="Portfolio analytics — distributions, cycle time, expiring & renewal pipeline, approver throughput."
         actions={
-          <Button variant="secondary" size="sm" onClick={exportCsv} loading={csvBusy}>
-            <FileSpreadsheet className="h-3.5 w-3.5" /> Export CSV
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant={showFilters || activeCount ? "primary" : "secondary"} size="sm" onClick={() => setShowFilters((s) => !s)}>
+              <Filter className="h-3.5 w-3.5" /> Filters{activeCount ? ` · ${activeCount}` : ""}
+            </Button>
+            <Button variant="secondary" size="sm" onClick={exportCsv} loading={csvBusy}>
+              <FileSpreadsheet className="h-3.5 w-3.5" /> Export CSV
+            </Button>
+          </div>
         }
       />
 
@@ -123,6 +179,103 @@ export default function ReportsPage() {
             </div>
           </CardBody>
         </Card>
+
+        {/* Detail filters */}
+        {showFilters && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-1.5">
+                <Filter className="h-4 w-4" /> Filter the report
+              </CardTitle>
+              {activeCount > 0 && (
+                <button onClick={clearFilters} className="inline-flex items-center gap-1 text-xs text-ink-3 hover:text-danger">
+                  <X className="h-3 w-3" /> Clear all
+                </button>
+              )}
+            </CardHeader>
+            <CardBody className="space-y-3">
+              <FilterField label="Search (title or reference)">
+                <Input value={draft.q} onChange={(e) => setDraft((d) => ({ ...d, q: e.target.value }))} placeholder="e.g. Northwind or C-2026-0012" />
+              </FilterField>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <FilterField label="Type">
+                  <Select value={draft.type} onChange={(e) => setDraft((d) => ({ ...d, type: e.target.value }))}>
+                    <option value="">Any type</option>
+                    {CONTRACT_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                  </Select>
+                </FilterField>
+                <FilterField label="Status">
+                  <Select value={draft.status} onChange={(e) => setDraft((d) => ({ ...d, status: e.target.value }))}>
+                    <option value="">Any status</option>
+                    {Object.keys(STATUS_META).map((s) => <option key={s} value={s}>{statusMeta(s).label}</option>)}
+                  </Select>
+                </FilterField>
+                <FilterField label="Risk">
+                  <Select value={draft.risk} onChange={(e) => setDraft((d) => ({ ...d, risk: e.target.value }))}>
+                    <option value="">Any risk</option>
+                    {Object.keys(RISK_META).map((r) => <option key={r} value={r}>{titleCase(r)}</option>)}
+                  </Select>
+                </FilterField>
+                <FilterField label="Department">
+                  <Select value={draft.department} onChange={(e) => setDraft((d) => ({ ...d, department: e.target.value }))}>
+                    <option value="">Any department</option>
+                    {deptOptions.map((dp) => <option key={dp} value={dp}>{dp}</option>)}
+                  </Select>
+                </FilterField>
+                <FilterField label="Owner">
+                  <Select value={draft.owner} onChange={(e) => setDraft((d) => ({ ...d, owner: e.target.value }))}>
+                    <option value="">Any owner</option>
+                    {owners.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                  </Select>
+                </FilterField>
+                <FilterField label="Counterparty">
+                  <Input value={draft.counterparty} onChange={(e) => setDraft((d) => ({ ...d, counterparty: e.target.value }))} placeholder="contains…" />
+                </FilterField>
+                <FilterField label="Min value">
+                  <Input type="number" inputMode="decimal" value={draft.value_min} onChange={(e) => setDraft((d) => ({ ...d, value_min: e.target.value }))} placeholder="0" />
+                </FilterField>
+                <FilterField label="Max value">
+                  <Input type="number" inputMode="decimal" value={draft.value_max} onChange={(e) => setDraft((d) => ({ ...d, value_max: e.target.value }))} placeholder="—" />
+                </FilterField>
+                <FilterField label="Renewal type">
+                  <Select value={draft.renewal_type} onChange={(e) => setDraft((d) => ({ ...d, renewal_type: e.target.value }))}>
+                    <option value="">Any renewal</option>
+                    <option value="none">None</option>
+                    <option value="auto">Auto-renew</option>
+                    <option value="manual">Manual</option>
+                  </Select>
+                </FilterField>
+                <FilterField label="Currency">
+                  <Input value={draft.currency} onChange={(e) => setDraft((d) => ({ ...d, currency: e.target.value.toUpperCase() }))} maxLength={3} placeholder="Any (e.g. USD)" />
+                </FilterField>
+                <FilterField label="Tag">
+                  <Input value={draft.tag} onChange={(e) => setDraft((d) => ({ ...d, tag: e.target.value }))} placeholder="contains…" />
+                </FilterField>
+              </div>
+
+              {/* date windows */}
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <FilterField label="Effective from">
+                  <Input type="date" value={draft.effective_from} onChange={(e) => setDraft((d) => ({ ...d, effective_from: e.target.value }))} />
+                </FilterField>
+                <FilterField label="Effective to">
+                  <Input type="date" value={draft.effective_to} onChange={(e) => setDraft((d) => ({ ...d, effective_to: e.target.value }))} />
+                </FilterField>
+                <FilterField label="Expiry (end) from">
+                  <Input type="date" value={draft.end_from} onChange={(e) => setDraft((d) => ({ ...d, end_from: e.target.value }))} />
+                </FilterField>
+                <FilterField label="Expiry (end) to">
+                  <Input type="date" value={draft.end_to} onChange={(e) => setDraft((d) => ({ ...d, end_to: e.target.value }))} />
+                </FilterField>
+              </div>
+              <div className="flex items-center justify-end gap-2">
+                <Button size="sm" variant="ghost" onClick={() => setDraft(filters)}>Reset</Button>
+                <Button size="sm" onClick={applyFilters}>Apply filters</Button>
+              </div>
+              <p className="text-[11px] text-ink-3">Filters apply across the whole report — KPIs, distributions, pipeline, cycle time, throughput, approvers, and the CSV export.</p>
+            </CardBody>
+          </Card>
+        )}
 
         {error && <ErrorBanner message={error} />}
 
@@ -395,6 +548,15 @@ export default function ReportsPage() {
           </CardBody>
         </Card>
       </div>
+    </div>
+  );
+}
+
+function FilterField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-3">{label}</label>
+      {children}
     </div>
   );
 }

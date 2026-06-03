@@ -172,6 +172,7 @@ export default function SettingsPage() {
 
 function WorkspaceCard({ isAdmin, onSaved }: { isAdmin: boolean; onSaved: () => void }) {
   const [t, setT] = useState<Tenant | null>(null);
+  const [groupName, setGroupName] = useState("");
   const [name, setName] = useState("");
   const [currency, setCurrency] = useState("");
   const [locale, setLocale] = useState("");
@@ -182,14 +183,14 @@ function WorkspaceCard({ isAdmin, onSaved }: { isAdmin: boolean; onSaved: () => 
 
   useEffect(() => {
     api.get<Tenant>("/tenant").then((tt) => {
-      setT(tt); setName(tt.name); setCurrency(tt.currency); setLocale(tt.locale); setTz(tt.timezone);
+      setT(tt); setGroupName(tt.group_name || ""); setName(tt.name); setCurrency(tt.currency); setLocale(tt.locale); setTz(tt.timezone);
     }).catch(() => {});
   }, []);
 
   async function save() {
     setBusy(true); setErr("");
     try {
-      const tt = await api.patch<Tenant>("/tenant", { name: name || null, currency: currency || null, locale: locale || null, timezone: tz || null });
+      const tt = await api.patch<Tenant>("/tenant", { group_name: groupName, name: name || null, currency: currency || null, locale: locale || null, timezone: tz || null });
       setT(tt); setSavedAt(Date.now());
       onSaved();
     } catch (e) {
@@ -205,8 +206,11 @@ function WorkspaceCard({ isAdmin, onSaved }: { isAdmin: boolean; onSaved: () => 
       <CardHeader><CardTitle>Workspace</CardTitle></CardHeader>
       <CardBody className="space-y-3">
         {err && <ErrorBanner message={err} />}
+        <Field label="Group name" hint="Optional — parent organisation or group this workspace belongs to (e.g. a holding company)">
+          <Input value={groupName} onChange={(e) => setGroupName(e.target.value)} disabled={!isAdmin} placeholder="e.g. Acme Group" />
+        </Field>
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Name">
+          <Field label="Workspace name">
             <Input value={name} onChange={(e) => setName(e.target.value)} disabled={!isAdmin} />
           </Field>
           <Field label="Subdomain" hint="Read-only">

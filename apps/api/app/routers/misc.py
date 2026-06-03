@@ -42,6 +42,10 @@ def update_tenant(data: schemas.TenantUpdateIn, request: Request, db: Session = 
     if "name" in payload and payload["name"]:
         t.name = payload["name"].strip()[:200]
         changes["name"] = t.name
+    if "group_name" in payload and payload["group_name"] is not None:
+        # Optional parent-org/group label; empty string clears it. Stored in settings JSON.
+        settings_dict["group_name"] = str(payload["group_name"]).strip()[:200]
+        changes["group_name"] = settings_dict["group_name"]
     if "currency" in payload and payload["currency"]:
         t.currency = payload["currency"].strip().upper()[:3]
         changes["currency"] = t.currency

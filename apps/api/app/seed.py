@@ -122,5 +122,103 @@ def seed_if_empty(db: Session) -> bool:
     db.add(models.Notification(tenant_id=tenant.id, user_id=owner.id, type="contract.approval_requested", title="Mariam Khan asked for your approval", body="On \"Master Services Agreement — Globex LLC\"", object_type="contract"))
     db.add(models.Notification(tenant_id=tenant.id, user_id=owner.id, type="contract.expiring", title="3 contracts expire within 30 days", body="Review renewals on the dashboard.", object_type="contract"))
 
+    # reusable contract templates (spawn a pre-filled draft in one click; {{merge}} vars resolve on use)
+    for tpl in _DEMO_TEMPLATES:
+        db.add(models.ContractTemplate(tenant_id=tenant.id, created_by=owner.id, **tpl))
+
     db.commit()
     return True
+
+
+# Demo templates seeded into a fresh workspace so the Templates page isn't empty on first run.
+_DEMO_TEMPLATES: list[dict] = [
+    dict(
+        name="Mutual Non-Disclosure Agreement", contract_type="nda",
+        description="Standard mutual NDA for early-stage discussions. 2-year confidentiality term.",
+        default_term_months=24, default_renewal_type="none", default_risk_level="low",
+        default_currency="USD", default_governing_law="DIFC", default_tags=["nda", "mutual", "standard"],
+        body=(
+            "# Mutual Non-Disclosure Agreement\n\n"
+            "This Mutual Non-Disclosure Agreement (the \"Agreement\") is entered into between "
+            "**{{counterparty}}** and the Company, effective **{{effective_date}}**.\n\n"
+            "## 1. Confidential Information\nEach party may disclose confidential business, technical, and financial information to the other.\n\n"
+            "## 2. Obligations\nThe receiving party shall hold all Confidential Information in strict confidence and use it solely to evaluate the potential relationship.\n\n"
+            "## 3. Term\nThe confidentiality obligations survive for two (2) years from the date of disclosure.\n\n"
+            "## 4. Governing Law\nThis Agreement is governed by the laws of the DIFC."
+        ),
+    ),
+    dict(
+        name="Master Services Agreement", contract_type="msa",
+        description="Enterprise MSA with SOW framework, 12-month term, auto-renewal.",
+        default_term_months=12, default_renewal_type="auto", default_risk_level="medium",
+        default_currency="USD", default_governing_law="State of Delaware", default_tags=["msa", "enterprise", "services"],
+        body=(
+            "# Master Services Agreement\n\n"
+            "This Master Services Agreement is made between **{{counterparty}}** (\"Customer\") and the Company "
+            "(\"Provider\"), effective **{{effective_date}}**, with a total value of **{{value}}**.\n\n"
+            "## 1. Scope of Services\nProvider will deliver the services described in each Statement of Work (\"SOW\") executed under this Agreement.\n\n"
+            "## 2. Fees and Payment\nCustomer shall pay all undisputed invoices within thirty (30) days.\n\n"
+            "## 3. Term and Termination\nThis Agreement begins on the Effective Date and continues until **{{end_date}}**, renewing automatically for successive terms unless either party gives 60 days notice.\n\n"
+            "## 4. Limitation of Liability\nEach party's total aggregate liability shall not exceed the fees paid in the preceding twelve (12) months.\n\n"
+            "## 5. Confidentiality\nEach party shall protect the other's Confidential Information."
+        ),
+    ),
+    dict(
+        name="Vendor / Supplier Agreement", contract_type="vendor",
+        description="Procurement template for goods & services suppliers. Net-30 terms.",
+        default_term_months=12, default_renewal_type="manual", default_risk_level="medium",
+        default_currency="USD", default_governing_law="State of New York", default_tags=["vendor", "procurement", "supplier"],
+        body=(
+            "# Vendor Agreement\n\n"
+            "This Vendor Agreement is between **{{counterparty}}** (\"Vendor\") and the Company, effective **{{effective_date}}**.\n\n"
+            "## 1. Supply of Goods/Services\nVendor shall supply the goods and/or services set out in the applicable purchase order.\n\n"
+            "## 2. Pricing and Payment\nAll prices are firm for the term. Payment terms are Net-30 from invoice date.\n\n"
+            "## 3. Quality and Warranties\nVendor warrants that all deliverables conform to specifications and are free from defects.\n\n"
+            "## 4. Term\nThis Agreement remains in effect until **{{end_date}}**."
+        ),
+    ),
+    dict(
+        name="Employment Offer Letter", contract_type="employment",
+        description="Standard full-time employment offer with at-will terms.",
+        default_term_months=12, default_renewal_type="none", default_risk_level="low",
+        default_currency="USD", default_governing_law="State of California", default_tags=["employment", "offer", "hr"],
+        body=(
+            "# Employment Offer Letter\n\n"
+            "Dear **{{counterparty}}**,\n\nWe are pleased to offer you employment with the Company, starting **{{effective_date}}**.\n\n"
+            "## Position\nYou will be employed in a full-time capacity reporting to your manager.\n\n"
+            "## Compensation\nYour annual compensation will be **{{value}}**, paid in accordance with the Company's standard payroll schedule.\n\n"
+            "## At-Will Employment\nYour employment is at-will and may be terminated by either party at any time.\n\n"
+            "## Confidentiality\nYou agree to protect the Company's confidential and proprietary information."
+        ),
+    ),
+    dict(
+        name="SaaS Subscription Agreement", contract_type="service",
+        description="Cloud software subscription with annual term and auto-renewal.",
+        default_term_months=12, default_renewal_type="auto", default_risk_level="medium",
+        default_currency="USD", default_governing_law="DIFC", default_tags=["saas", "subscription", "service"],
+        body=(
+            "# SaaS Subscription Agreement\n\n"
+            "This Subscription Agreement is between **{{counterparty}}** (\"Subscriber\") and the Company, effective **{{effective_date}}**.\n\n"
+            "## 1. Subscription\nSubscriber receives access to the Company's software-as-a-service platform for the subscription term.\n\n"
+            "## 2. Fees\nThe annual subscription fee is **{{value}}**, billed in advance.\n\n"
+            "## 3. Data Protection\nThe Company processes Subscriber data in accordance with its Data Processing Addendum and applicable law.\n\n"
+            "## 4. Term\nThe subscription runs until **{{end_date}}** and renews automatically for successive annual terms.\n\n"
+            "## 5. Service Levels\nThe Company targets 99.9% monthly uptime."
+        ),
+    ),
+    dict(
+        name="Commercial Lease Agreement", contract_type="lease",
+        description="Office space lease, 36-month term with manual renewal.",
+        default_term_months=36, default_renewal_type="manual", default_risk_level="high",
+        default_currency="USD", default_governing_law="State of Texas", default_tags=["lease", "property", "office"],
+        body=(
+            "# Commercial Lease Agreement\n\n"
+            "This Lease is between **{{counterparty}}** (\"Tenant\") and the Company (\"Landlord\"), effective **{{effective_date}}**.\n\n"
+            "## 1. Premises\nLandlord leases the described commercial premises to Tenant.\n\n"
+            "## 2. Rent\nTenant shall pay rent totaling **{{value}}** over the term, payable monthly in advance.\n\n"
+            "## 3. Term\nThe lease term runs from the Effective Date through **{{end_date}}**.\n\n"
+            "## 4. Maintenance\nTenant shall keep the premises in good repair, ordinary wear and tear excepted.\n\n"
+            "## 5. Governing Law\nThis Lease is governed by the laws of the State of Texas."
+        ),
+    ),
+]

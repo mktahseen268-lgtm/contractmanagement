@@ -25,6 +25,7 @@ export interface Tenant {
   locale: string;
   currency: string;
   plan: string;
+  group_name: string;
   accent_color: string;
   timezone: string;
 }
