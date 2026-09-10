@@ -34,6 +34,19 @@ class StorageBackend(ABC):
     def ensure_ready(self) -> None:  # create bucket / base dir if needed
         return None
 
+    def move(self, src_key: str, dst_key: str, *, storage_class: str = "") -> None:
+        """Relocate an object within the same backend (used by the archive sweep to move
+        contracts to the cold tier). `storage_class` is an S3-only hint and ignored elsewhere.
+
+        The default is a read-write-delete, which is correct on every backend; S3 overrides it
+        with a server-side copy so the bytes never transit the app.
+        """
+        if src_key == dst_key:
+            return
+        with self.open_stream(src_key) as fh:
+            self.put(dst_key, fh.read())
+        self.delete(src_key)
+
 
 class LocalFsBackend(StorageBackend):
     name = "local"
@@ -129,6 +142,25 @@ class S3Backend(StorageBackend):
             return True
         except ClientError:
             return False
+
+    def move(self, src_key: str, dst_key: str, *, storage_class: str = "") -> None:
+        # Server-side copy: the object never round-trips through this process. Re-assert SSE
+        # on the copy — a CopyObject does not inherit the source's encryption headers.
+        if src_key == dst_key:
+            return
+        extra: dict = {}
+        if settings.s3_sse:
+            extra["ServerSideEncryption"] = settings.s3_sse
+            if settings.s3_sse == "aws:kms" and settings.s3_sse_kms_key_id:
+                extra["SSEKMSKeyId"] = settings.s3_sse_kms_key_id
+        if storage_class:
+            extra["StorageClass"] = storage_class
+        self.client.copy_object(
+            Bucket=self.bucket, Key=dst_key,
+            CopySource={"Bucket": self.bucket, "Key": src_key},
+            **extra,
+        )
+        self.client.delete_object(Bucket=self.bucket, Key=src_key)
 
 
 _backend: StorageBackend | None = None

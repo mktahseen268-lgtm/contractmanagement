@@ -1,6 +1,8 @@
-"""Password strength policy — rejects weak, accepts strong, blocks user-data echoes."""
+"""Password strength policy — rejects weak, accepts strong, blocks user-data echoes.
 
-import pytest
+Requirements: SEC-18.
+"""
+
 
 from app import security
 from app.config import settings
@@ -35,18 +37,21 @@ class TestPasswordStrength:
         assert any("email" in e.lower() for e in errors)
 
     def test_rejects_when_contains_name(self):
+        """A password built from the account holder's own name is the first thing anybody
+        trying to get in would guess."""
         errors = security.validate_password_strength(
-            "MarkSpencer!Aa9X",
-            name="Mark Spencer",
-        )
-        # Name is "mark spencer" lowercased and contained as substring is checked against
-        # the full lower name; here we lower-case-match "markspencer" -> not contained, so
-        # use a single token name that *is* substring:
-        errors2 = security.validate_password_strength("MarkAaaa1234!@", name="Mark")
-        # First check: not necessarily an error (the full name isn't a substring)
-        # Second check: "mark" is < 4 chars so the rule does *not* engage — adjust
-        errors3 = security.validate_password_strength("AaaMartin1234!@", name="Martin")
-        assert any("name" in e.lower() for e in errors3)
+            "MarkSpencerAa9!", name="Mark Spencer")
+        assert any("name" in e.lower() for e in errors), errors
+
+        # Each part counts, not only the whole name — "Spencer99!" is no better than
+        # "MarkSpencer99!".
+        assert any("name" in e.lower() for e in
+                   security.validate_password_strength("Spencer99!Xy", name="Mark Spencer"))
+
+        # And a password that merely shares a few letters is fine. A rule that rejected those
+        # would send people to a sticky note.
+        assert security.validate_password_strength(
+            "Zx9$mQ7!tRv2", name="Mark Spencer") == []
 
     def test_accepts_strong_password(self):
         errors = security.validate_password_strength(
@@ -56,11 +61,22 @@ class TestPasswordStrength:
         )
         assert errors == []
 
-    def test_respects_effective_min_length(self):
-        # In env=test we use the dev override (password_min_length_dev=8)
-        assert settings.effective_password_min_length == settings.password_min_length_dev
-        # Boundary: exactly the minimum + 3 classes should pass
-        pw = "Ax9!Ax9!"  # 8 chars, has lower+upper+digit+symbol
-        errors = security.validate_password_strength(pw)
-        # Either passes outright, OR fails only on the trivial-sequence rule (not policy)
-        assert all("at least" not in e for e in errors)
+    def test_only_dev_gets_the_shorter_minimum(self):
+        """`is_dev` is `env == "dev"` alone — `test` gets the full 12 characters.
+
+        That looks like an oversight and is not. `ENV=test` relaxes the production *boot*
+        tripwire so the suite can run, but there is no reason to relax the password rule with
+        it: the test suite generates its own passwords, and a policy that behaves differently
+        under test is a policy the tests are not exercising.
+        """
+        assert settings.env == "test"
+        assert settings.is_dev is False
+        assert settings.effective_password_min_length == settings.password_min_length
+        assert settings.password_min_length_dev < settings.password_min_length
+
+    def test_the_minimum_is_enforced_at_the_boundary(self):
+        eleven = "Ax9!Bz7!Cy5"          # 11 chars, all four classes
+        twelve = "Ax9!Bz7!Cy5$"         # one more
+
+        assert any("at least" in e for e in security.validate_password_strength(eleven))
+        assert security.validate_password_strength(twelve) == []

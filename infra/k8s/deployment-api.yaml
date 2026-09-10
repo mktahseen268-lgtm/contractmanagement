@@ -107,7 +107,11 @@ spec:
         # The worker exits cleanly on SIGTERM (Celery default) — give it 60s to drain in-flight
         # OCR + signing jobs before the kubelet sends SIGKILL.
         prometheus.io/scrape: "true"
-        prometheus.io/port: "9540"
+        # 9101 is what `app/worker_metrics.py` binds. This previously said 9540, which nothing
+        # listened on — the pod advertised a scrape target that silently returned nothing, so
+        # the worker looked monitored and was not.
+        prometheus.io/port: "9101"
+        prometheus.io/path: "/"
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 60
@@ -117,7 +121,16 @@ spec:
           image: ghcr.io/your-org/cm-api:0.3.0
           command: ["celery"]
           args: ["-A", "app.celery_app", "worker", "--loglevel=info", "--concurrency=2", "-Q", "default,ocr"]
+          ports: [{ containerPort: 9101, name: metrics }]
           envFrom: [{ configMapRef: { name: cm-config } }, { secretRef: { name: cm-secrets } }]
+          env:
+            - { name: WORKER_METRICS_PORT, value: "9101" }
+            # `--concurrency=2` uses the prefork pool, so tasks run in child processes. A
+            # counter incremented in a child is invisible to the parent's registry, and the
+            # exporter would report roughly nothing while the worker was busy. This directory
+            # is where children write their samples for the parent to aggregate — it must be
+            # writable and emptied on start, which is what the emptyDir gives us.
+            - { name: PROMETHEUS_MULTIPROC_DIR, value: "/tmp/prom" }
           resources: { requests: { cpu: 500m, memory: 512Mi }, limits: { cpu: "2", memory: 2Gi } }
           # Liveness: `celery inspect ping` round-trips through the broker — if the worker is
           # alive AND can talk to Redis, this succeeds. failureThreshold=3 means the worker

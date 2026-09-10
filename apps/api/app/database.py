@@ -1,15 +1,20 @@
-"""Database engine, session, Base — and the multi-tenant Row-Level-Security plumbing.
+"""Database engine, session, Base — and the Row-Level-Security plumbing.
 
-How tenant isolation works (PostgreSQL):
+How tenant isolation works (PostgreSQL, MSSQL and Oracle — see `db_dialect.py`):
  - every tenant-scoped row carries `tenant_id`;
- - migration `0002_rls` enables (FORCE) RLS on those tables with a `tenant_isolation` policy
-   keyed off the session GUC `app.cm_tenant`;
+ - migration `0002_rls` enables row security on those tables: a `tenant_isolation` policy on
+   Postgres, a Security Policy with an inline table-valued predicate on MSSQL, a VPD policy
+   via `DBMS_RLS.ADD_POLICY` on Oracle — all keyed off a per-session tenant value;
  - this module keeps the active tenant in a `ContextVar` and an engine `begin` event listener
-   re-applies it (`SET LOCAL`) on every transaction — so even post-commit queries stay scoped;
+   re-applies it on every transaction — so even post-commit queries stay scoped;
  - `get_current_user` sets the ContextVar from the JWT *before* its first query;
- - the policies are "permissive when the GUC is unset" so unauthenticated auth endpoints
+ - the policies are "permissive when the tenant is unset" so unauthenticated auth endpoints
    (login/refresh) still work; the repository layer *also* filters by `tenant_id` (defence in depth).
-On SQLite the listener is a no-op and the RLS migration is skipped.
+On SQLite the listener is a no-op and the RLS migration is skipped — dev only.
+
+In `DEPLOYMENT_MODE=single_tenant` the policies are optional (`ENFORCE_DB_ISOLATION`): with one
+tenant the predicate is a tautology. The ContextVar and the repository filters stay in place
+regardless, so the code path never forks.
 """
 
 import contextvars
@@ -18,6 +23,7 @@ from collections.abc import Iterator
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
+from . import db_dialect
 from .config import settings
 
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
@@ -44,14 +50,16 @@ def get_request_tenant() -> str | None:
     return _current_tenant.get()
 
 
-if settings.is_postgres:
+_DIALECT = settings.db_dialect
+
+if _DIALECT in (db_dialect.PG, db_dialect.MSSQL, db_dialect.ORACLE):
 
     @event.listens_for(engine, "begin")
-    def _apply_tenant_guc(conn) -> None:  # type: ignore[no-untyped-def]
-        tid = _current_tenant.get()
-        if tid:
-            # set_config(name, value, is_local=true) — transaction-scoped, never leaks across pooled conns
-            conn.exec_driver_sql("SELECT set_config('app.cm_tenant', %s, true)", (tid,))
+    def _apply_tenant_context(conn) -> None:  # type: ignore[no-untyped-def]
+        # Written on EVERY transaction, including when the tenant is unset: MSSQL/Oracle hold
+        # this on the connection, so a pooled connection would otherwise inherit the previous
+        # request's tenant. See db_dialect.set_tenant_context.
+        db_dialect.set_tenant_context(conn, _DIALECT, _current_tenant.get())
 
 
 # ---------- session dependency ----------

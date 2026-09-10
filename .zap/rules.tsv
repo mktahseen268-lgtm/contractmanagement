@@ -1,0 +1,14 @@
+# ZAP baseline rule tuning.
+#
+# One line per rule that is deliberately not treated as a failure, each with the reason. The
+# point of the file is that every suppression is a decision somebody made and wrote down —
+# a scan tuned by silently lowering the threshold is a scan nobody reads.
+#
+# Columns: <rule id>	<WARN|IGNORE|FAIL>	<comment>
+# Anything NOT listed here fails the build. New findings go red until they are triaged.
+
+10015	IGNORE	Re-examine Cache-control — the API sets no-store on authenticated responses; ZAP also flags the OpenAPI schema and /health, which are public by design.
+10027	IGNORE	Information disclosure (suspicious comments) — fires on the word "TODO" inside the bundled Swagger UI asset, which is upstream code we do not ship changes to.
+10063	IGNORE	Permissions-Policy header — set at the edge (see infra/kong/kong.yaml), not by the app. The baseline scan hits the API container directly, so it cannot see it.
+10098	IGNORE	Cross-domain misconfiguration — the CORS allowlist is environment-specific and empty in CI, so this fires on a configuration the deployment does not use.
+90005	IGNORE	Sec-Fetch headers — ZAP reports these as missing on its own crafted requests; they are a client-side property, not something a server can emit.

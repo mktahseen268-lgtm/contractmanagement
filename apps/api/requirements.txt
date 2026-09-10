@@ -15,5 +15,11 @@ redis==5.2.1
 boto3==1.35.71
 reportlab==4.2.5
 pypdf==5.1.0
+# Repository and report exports. XLSX rather than CSV because these go to auditors:
+# CSV loses every date type and turns reference numbers into scientific notation.
+openpyxl==3.1.5
+# Word round-trip (Phase 3). A base dependency, not an extra: exporting and importing
+# .docx is core to how counterparties actually negotiate, not an optional integration.
+python-docx==1.1.2
 cryptography==43.0.1
 prometheus-client==0.21.1

@@ -6,7 +6,7 @@
 
 import Link from "next/link";
 import {
-  ArrowRight, Building2, Fingerprint, FileText, Folder, Gavel, GitBranch, Globe, KeyRound, LayoutList,
+  ArrowRight, Building2, FileText, Folder, Gavel, GitBranch, Globe, LayoutList,
   Library, Link2, ListChecks, Mails, PenLine, PenTool, Plug, Search, ShieldAlert, ShieldCheck, Sparkles, UserCog,
 } from "lucide-react";
 import { PageHeader } from "@/components/shell";
@@ -19,9 +19,7 @@ const GROUPS: Group[] = [
   {
     name: "Signing & sending",
     items: [
-      { href: "/signature-studio", title: "Signature Studio", desc: "Drag-and-drop signature, initials, date & text fields onto the document.", icon: PenTool },
       { href: "/bulk-send", title: "Bulk Send", desc: "One template to many signers, with scheduled reminders and expiry.", icon: Mails },
-      { href: "/identity-check", title: "Identity Verification", desc: "SMS / email OTP, government-ID, or KBA before signing.", icon: Fingerprint },
       { href: "/client-portal", title: "Client Portal", desc: "External counterparty review, negotiation, and signing surface.", icon: Globe },
       { href: "/temporary-access", title: "Temporary Access", desc: "Grant a vendor scoped, time-limited access to one contract.", icon: Link2 },
     ],
@@ -61,7 +59,6 @@ const GROUPS: Group[] = [
     name: "Security & admin",
     items: [
       { href: "/sso-admin", title: "SAML SSO", desc: "Enterprise IdP config + SCIM provisioning.", icon: ShieldCheck },
-      { href: "/passkeys", title: "Passkeys", desc: "Passwordless, phishing-resistant WebAuthn sign-in.", icon: KeyRound },
       { href: "/legal-hold", title: "Legal Hold", desc: "Preserve contracts & audit trails for litigation / audit.", icon: Gavel },
     ],
   },

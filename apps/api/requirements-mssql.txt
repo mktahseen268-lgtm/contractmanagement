@@ -1,0 +1,5 @@
+# MSSQL driver for DEPLOYMENT_MODE=single_tenant on SQL Server 2019+.
+#   pip install -r requirements-mssql.txt
+# Requires the Microsoft ODBC Driver 18 for SQL Server on the host/image.
+# DATABASE_URL=mssql+pyodbc://user:pass@host:1433/cm?driver=ODBC+Driver+18+for+SQL+Server
+pyodbc==5.2.0

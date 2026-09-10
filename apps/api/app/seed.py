@@ -58,9 +58,13 @@ def seed_if_empty(db: Session) -> bool:
     manager = models.User(tenant_id=tenant.id, email="manager@acme.io", name="Mariam Khan", password_hash=security.hash_password(DEMO_PASSWORD), role="manager", avatar_color=colors[1])
     approver = models.User(tenant_id=tenant.id, email="approver@acme.io", name="John Doe", password_hash=security.hash_password(DEMO_PASSWORD), role="approver", avatar_color=colors[2])
     author = models.User(tenant_id=tenant.id, email="author@acme.io", name="Aisha Smith", password_hash=security.hash_password(DEMO_PASSWORD), role="author", avatar_color=colors[3])
-    db.add_all([owner, manager, approver, author])
+    # A second Registration Authority officer. The RA refuses to let an officer approve their
+    # own certificate request — separation of duties — so a workspace with one officer can
+    # never issue that officer a certificate, including the demo login's.
+    admin = models.User(tenant_id=tenant.id, email="admin@acme.io", name="Bilal Farooq", password_hash=security.hash_password(DEMO_PASSWORD), role="admin", avatar_color=colors[4])
+    db.add_all([owner, manager, approver, author, admin])
     db.flush()
-    users = [owner, manager, approver, author]
+    users = [owner, manager, approver, author, admin]
 
     # default approval workflows
     db.add_all([
@@ -148,16 +152,140 @@ def seed_if_empty(db: Session) -> bool:
     db.add(models.Notification(tenant_id=tenant.id, user_id=owner.id, type="contract.approval_requested", title="Mariam Khan asked for your approval", body="On \"Master Services Agreement — Globex LLC\"", object_type="contract"))
     db.add(models.Notification(tenant_id=tenant.id, user_id=owner.id, type="contract.expiring", title="3 contracts expire within 30 days", body="Review renewals on the dashboard.", object_type="contract"))
 
+    # --- clause library + policy -------------------------------------------------------
+    # Seeded pre-approved so the library is usable on first run; a demo workspace where every
+    # clause sits in `draft` would demonstrate the approval gate and nothing else. Templates
+    # below reference these by key, so they have to exist first.
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    for spec in _DEMO_CLAUSES:
+        alternatives = spec.pop("alternatives", [])
+        clause = models.Clause(
+            tenant_id=tenant.id, created_by=owner.id, status="active", version_no=1,
+            approved_by=owner.id, approved_at=now, **spec,
+        )
+        db.add(clause)
+        db.flush()
+        db.add(models.ClauseVersion(
+            tenant_id=tenant.id, clause_id=clause.id, version_no=1, title=clause.title,
+            body=clause.body, position=clause.position, risk_level=clause.risk_level,
+            status="active", change_summary="Seeded", approved_by=owner.id, approved_at=now,
+            created_by=owner.id,
+        ))
+        for rank, alt in enumerate(alternatives, start=1):
+            fallback = models.Clause(
+                tenant_id=tenant.id, created_by=owner.id, status="active", version_no=1,
+                approved_by=owner.id, approved_at=now, parent_id=clause.id,
+                fallback_rank=rank, category=clause.category, **alt,
+            )
+            db.add(fallback)
+            db.flush()
+            db.add(models.ClauseVersion(
+                tenant_id=tenant.id, clause_id=fallback.id, version_no=1,
+                title=fallback.title, body=fallback.body, position=fallback.position,
+                risk_level=fallback.risk_level, status="active", change_summary="Seeded",
+                approved_by=owner.id, approved_at=now, created_by=owner.id,
+            ))
+
+    for book in _DEMO_PLAYBOOKS:
+        db.add(models.Playbook(tenant_id=tenant.id, created_by=owner.id, **book))
+
     # reusable contract templates (spawn a pre-filled draft in one click; {{merge}} vars resolve on use)
+    # Seeded pre-approved at v1: a demo workspace where every template sits unusable in `draft`
+    # would show the approval gate working and the product not.
     for tpl in _DEMO_TEMPLATES:
-        db.add(models.ContractTemplate(tenant_id=tenant.id, created_by=owner.id, **tpl))
+        t = models.ContractTemplate(
+            tenant_id=tenant.id, created_by=owner.id, status="active", is_active=True,
+            version_no=1, approved_by=owner.id, approved_at=now,
+            effective_from=now.date(), **tpl,
+        )
+        db.add(t)
+        db.flush()
+        db.add(models.ContractTemplateVersion(
+            tenant_id=tenant.id, template_id=t.id, version_no=1, name=t.name,
+            body=t.body or "", fields=list(t.fields or []), status="active",
+            change_summary="Seeded", approved_by=owner.id, approved_at=now,
+            created_by=owner.id,
+        ))
+
+    # Adoption content: help copy, the knowledge base and the training courses (Phase 9).
+    # Gap-fill, so this is also safe on an existing workspace — nothing edited is overwritten.
+    from . import content_service
+
+    content_service.seed_all(db, tenant.id, tenant.locale or "en")
 
     db.commit()
+
+    # Everything configured *around* the contract spine — departments, folders, the approval
+    # matrix, parties, holds, PKI, envelopes. Kept in its own module and run last because it
+    # reads the records created above, and because it is gap-fill: safe to re-run on a
+    # workspace somebody is already using.
+    from . import demo_seed
+
+    demo_seed.seed_extras(db, tenant.id)
     return True
 
 
 # Demo templates seeded into a fresh workspace so the Templates page isn't empty on first run.
+#
+# The first one carries a real intake form so the merge-field journey is demonstrable the
+# moment the stack comes up: pick the agreement type, fill the drop-downs, and the draft
+# generates itself. The rest are body-only templates, which is still a valid shape.
 _DEMO_TEMPLATES: list[dict] = [
+    dict(
+        name="Merchant Acquiring Agreement", contract_type="vendor",
+        description="Onboarding a merchant onto the acquiring estate. Fill the form and the draft generates itself.",
+        default_term_months=12, default_renewal_type="auto", default_risk_level="medium",
+        default_currency="PKR", default_governing_law="Islamic Republic of Pakistan",
+        default_tags=["merchant", "acquiring", "standard"],
+        fields=[
+            dict(key="merchant_name", label="Merchant legal name", type="text", required=True,
+                 group="Merchant", help="Exactly as registered."),
+            dict(key="merchant_ntn", label="NTN", type="text", required=True, group="Merchant"),
+            dict(key="region", label="Region", type="select", required=True, group="Merchant",
+                 options=["Sindh", "Punjab", "Khyber Pakhtunkhwa", "Balochistan",
+                          "Islamabad Capital Territory", "Gilgit-Baltistan", "Azad Jammu & Kashmir"]),
+            dict(key="channels", label="Channels", type="multiselect", group="Commercials",
+                 options=["POS", "QR", "E-commerce", "ATM"]),
+            dict(key="mdr_percent", label="Merchant discount rate (%)", type="number",
+                 required=True, group="Commercials", minimum=0, maximum=10),
+            dict(key="settlement_days", label="Settlement cycle (days)", type="number",
+                 required=True, default=2, group="Commercials", minimum=0, maximum=30),
+            dict(key="security_deposit", label="Security deposit", type="money",
+                 group="Commercials", minimum=0),
+            dict(key="start_date", label="Go-live date", type="date", required=True,
+                 group="Commercials"),
+        ],
+        # The wording that is *policy* comes from the clause library by reference, so improving
+        # a clause improves this template and every other one that uses it. Only the wording
+        # specific to this agreement type is written inline.
+        body=(
+            "# Merchant Acquiring Agreement\n\n"
+            "This Agreement is made on {{today}} between **{{our_entity}}** (the \"Bank\") and "
+            "**{{merchant_name}}**, NTN {{merchant_ntn}}, of {{region}} (the \"Merchant\").\n\n"
+            "## 1. Services\n\n"
+            "The Bank shall provide acquiring services over the following channels: {{channels}}.\n\n"
+            "## 2. Commercials\n\n"
+            "1. The Merchant shall pay a merchant discount rate of {{mdr_percent}}% of the value "
+            "of each transaction.\n"
+            "2. The Bank shall settle net proceeds within {{settlement_days}} working days of "
+            "the transaction date.\n"
+            "3. The Merchant shall maintain a security deposit of {{security_deposit}} for the "
+            "duration of this Agreement.\n\n"
+            "## 3. Term\n\n"
+            "This Agreement takes effect on {{start_date}} and continues for the term stated "
+            "overleaf unless terminated in accordance with clause 4.\n\n"
+            "## 4. Termination\n\n"
+            "[[clause:termination_for_convenience]]\n\n"
+            "## 5. Confidentiality\n\n"
+            "[[clause:confidentiality]]\n\n"
+            "## 6. Data protection\n\n"
+            "[[clause:data_protection]]\n\n"
+            "## 7. Limitation of liability\n\n"
+            "[[clause:limitation_of_liability]]\n\n"
+            "## 8. Governing law\n\n"
+            "[[clause:governing_law_pk]]"
+        ),
+    ),
     dict(
         name="Mutual Non-Disclosure Agreement", contract_type="nda",
         description="Standard mutual NDA for early-stage discussions. 2-year confidentiality term.",
@@ -246,5 +374,111 @@ _DEMO_TEMPLATES: list[dict] = [
             "## 4. Maintenance\nTenant shall keep the premises in good repair, ordinary wear and tear excepted.\n\n"
             "## 5. Governing Law\nThis Lease is governed by the laws of the State of Texas."
         ),
+    ),
+]
+
+
+# The clause library a fresh workspace starts with. Deliberately small: enough to show
+# composition, alternatives and a policy check, not a pretend legal department.
+_DEMO_CLAUSES: list[dict] = [
+    dict(
+        key="confidentiality", title="Confidentiality", category="Confidentiality",
+        position="preferred", risk_level="low",
+        guidance="The standard mutual position. Use unless the counterparty is a regulator.",
+        body=("Each party shall hold the other's Confidential Information in strict confidence "
+              "and shall not disclose it to any third party without prior written consent. "
+              "This obligation survives termination of this Agreement for a period of three "
+              "(3) years."),
+    ),
+    dict(
+        key="limitation_of_liability", title="Limitation of liability",
+        category="Liability & Indemnity", position="preferred", risk_level="high",
+        guidance="Our standard cap. Anything above 1x fees needs Legal and the CFO.",
+        body=("The total aggregate liability of either party arising out of or in connection "
+              "with this Agreement shall not exceed the total fees paid or payable in the "
+              "twelve (12) months immediately preceding the event giving rise to the claim."),
+        alternatives=[
+            dict(key="limitation_of_liability_2x", title="Liability capped at 2x fees",
+                 position="acceptable", risk_level="high",
+                 guidance="Acceptable where the contract value is under PKR 5m and the "
+                          "counterparty holds no customer data.",
+                 body=("The total aggregate liability of either party arising out of or in "
+                       "connection with this Agreement shall not exceed two times (2x) the "
+                       "total fees paid or payable in the twelve (12) months immediately "
+                       "preceding the event giving rise to the claim.")),
+            dict(key="limitation_of_liability_carveout",
+                 title="Liability cap with data-breach carve-out",
+                 position="fallback", risk_level="critical",
+                 guidance="Last resort. Requires CFO sign-off — the carve-out is uncapped.",
+                 body=("The total aggregate liability of either party under this Agreement "
+                       "shall not exceed the total fees paid in the preceding twelve (12) "
+                       "months, save that no limitation shall apply to liability arising from "
+                       "a breach of applicable data protection law.")),
+        ],
+    ),
+    dict(
+        key="data_protection", title="Data protection", category="Data Protection",
+        position="preferred", risk_level="high",
+        guidance="Mandatory wherever the counterparty processes customer data. Reflects SBP "
+                 "expectations on outsourcing.",
+        body=("The Supplier shall process personal data only on the documented instructions of "
+              "the Bank, shall implement appropriate technical and organisational measures to "
+              "protect it, and shall not transfer it outside the Islamic Republic of Pakistan "
+              "without the Bank's prior written consent."),
+    ),
+    dict(
+        key="termination_for_convenience", title="Termination for convenience",
+        category="Termination", position="preferred", risk_level="medium",
+        guidance="Keeps the Bank's exit open. Push hard to retain this.",
+        body=("Either party may terminate this Agreement at any time by giving not less than "
+              "sixty (60) days' prior written notice to the other party, without liability "
+              "other than for amounts accrued up to the date of termination."),
+    ),
+    dict(
+        key="governing_law_pk", title="Governing law — Pakistan", category="Governing Law",
+        position="preferred", risk_level="low",
+        guidance="Non-negotiable for regulated agreements.",
+        body=("This Agreement shall be governed by and construed in accordance with the laws "
+              "of the Islamic Republic of Pakistan, and the courts at Karachi shall have "
+              "exclusive jurisdiction."),
+    ),
+    dict(
+        key="unlimited_liability", title="Unlimited liability (prohibited)",
+        category="Liability & Indemnity", position="fallback", risk_level="critical",
+        guidance="Recorded so the playbook can detect it. Never agree to this wording.",
+        body=("Each party accepts unlimited liability for any and all losses, damages and "
+              "expenses arising under this Agreement, without cap, exclusion or limitation of "
+              "any kind."),
+    ),
+]
+
+
+# Policy. The house rules apply to everything; the vendor rules bite on supplier paper.
+_DEMO_PLAYBOOKS: list[dict] = [
+    dict(
+        name="House rules", description="Applies to every agreement, whatever the type.",
+        contract_type="", applies_when={}, status="active",
+        rules=[
+            dict(clause_key="governing_law_pk", kind="required", severity="blocker",
+                 guidance="Regulated agreements must be governed by Pakistani law."),
+            dict(clause_key="unlimited_liability", kind="prohibited", severity="blocker",
+                 guidance="Uncapped liability is never acceptable."),
+        ],
+    ),
+    dict(
+        name="Vendor and outsourcing policy",
+        description="Supplier agreements, including anything touching customer data.",
+        contract_type="vendor", applies_when={}, status="active",
+        rules=[
+            dict(clause_key="confidentiality", kind="required", severity="blocker"),
+            dict(clause_key="limitation_of_liability", kind="required", severity="blocker",
+                 guidance="A changed cap needs Legal and the CFO. Fallback wordings are in "
+                          "the library."),
+            dict(clause_key="data_protection", kind="required", severity="blocker",
+                 guidance="SBP outsourcing expectations."),
+            dict(clause_key="termination_for_convenience", kind="required",
+                 severity="warning",
+                 guidance="Preferred, not mandatory. Losing it is worth a conversation."),
+        ],
     ),
 ]

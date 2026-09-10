@@ -24,10 +24,29 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [ssoEnabled, setSsoEnabled] = useState(false);
+  // Single-tenant on-prem deployments have no self-service signup and no demo workspace.
+  // Default to `true` so the link doesn't flicker out on the SaaS build while config loads.
+  const [registrationEnabled, setRegistrationEnabled] = useState(true);
+  const [singleTenant, setSingleTenant] = useState(false);
 
-  // is SSO configured? + surface any sso_error the callback redirected with
+  // is SSO configured? which deployment profile? + surface any sso_error the callback redirected with
   useEffect(() => {
-    api.get<{ enabled: boolean }>("/auth/sso/config").then((c) => setSsoEnabled(!!c.enabled)).catch(() => {});
+    api
+      .get<{ enabled: boolean; registration_enabled?: boolean; deployment_mode?: string }>("/auth/sso/config")
+      .then((c) => {
+        setSsoEnabled(!!c.enabled);
+        setRegistrationEnabled(c.registration_enabled !== false);
+        const single = c.deployment_mode === "single_tenant";
+        setSingleTenant(single);
+        // The demo credentials below are a convenience for the seeded SaaS demo. On a
+        // single-tenant install there is no demo workspace, and prefilling someone else's
+        // login on a bank's sign-in screen is not a good look.
+        if (single) {
+          setEmail("");
+          setPassword("");
+        }
+      })
+      .catch(() => {});
     if (typeof window !== "undefined") {
       const err = new URLSearchParams(window.location.search).get("sso_error");
       if (err) setError(SSO_ERRORS[err] || "Single sign-on failed — please try again or use your password.");
@@ -81,15 +100,23 @@ export default function LoginPage() {
             </Button>
           </>
         )}
-        <div className="rounded-md bg-surface-2 px-3 py-2 text-xs text-ink-3">
-          Demo workspace seeded automatically — <span className="font-medium text-ink-2">demo@acme.io</span> / <span className="font-medium text-ink-2">demo1234</span>
-        </div>
-        <p className="text-center text-sm text-ink-2">
-          No account?{" "}
-          <Link href="/register" className="font-medium text-accent hover:underline">
-            Create a workspace
-          </Link>
-        </p>
+        {!singleTenant && (
+          <div className="rounded-md bg-surface-2 px-3 py-2 text-xs text-ink-3">
+            Demo workspace seeded automatically — <span className="font-medium text-ink-2">demo@acme.io</span> / <span className="font-medium text-ink-2">demo1234</span>
+          </div>
+        )}
+        {registrationEnabled ? (
+          <p className="text-center text-sm text-ink-2">
+            No account?{" "}
+            <Link href="/register" className="font-medium text-accent hover:underline">
+              Create a workspace
+            </Link>
+          </p>
+        ) : (
+          <p className="text-center text-sm text-ink-3">
+            Accounts are provisioned by your administrator.
+          </p>
+        )}
       </CardBody>
     </Card>
   );

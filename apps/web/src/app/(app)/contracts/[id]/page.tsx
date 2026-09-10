@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { Check, CheckSquare, Copy, Download, Eye, FileCheck2, FileDown, FileText, History, ListTodo, Pencil, PenLine, Plus, Repeat, RotateCcw, Send, Sparkles, Trash2, Workflow as WorkflowIcon, X } from "lucide-react";
+import { AlertTriangle, BadgeCheck, Check, CheckSquare, Copy, Download, Eye, FileCheck2, FileDown, FileText, History, ListTodo, Pencil, PenLine, Plus, Repeat, RotateCcw, Send, Shield, Sparkles, Trash2, Workflow as WorkflowIcon, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton, Textarea } from "@/components/ui";
 
@@ -16,6 +16,7 @@ import { PageHeader } from "@/components/shell";
 import { useToast } from "@/components/toast";
 import { ActivityFeed } from "@/components/widgets";
 import { LifecycleBar, RiskBadge, StatusPill } from "@/components/lifecycle";
+import { ContractGuidance } from "@/components/guidance";
 import {
   actorColor,
   cn,
@@ -32,7 +33,7 @@ import {
   TRANSITION_LABELS,
   titleCase,
 } from "@/lib/utils";
-import type { ActivityItem, Comment, ContractDetail, ContractWorkflow, FileObject, Obligation, SignatureEnvelope, SignatureRecipient, User, Version, VersionDetail, WorkflowRunStep } from "@/lib/types";
+import type { ActivityItem, Comment, ContractDetail, Readiness, ReadinessDecision, ContractWorkflow, FileObject, Obligation, PolicyFinding, PolicyReview, SignatureEnvelope, SignatureRecipient, User, Version, VersionDetail, WorkflowRunStep } from "@/lib/types";
 
 // Legacy clipboard fallback for non-secure contexts (plain HTTP behind an IP). Uses an off-
 // screen textarea + selection + document.execCommand("copy"). Returns true on success.
@@ -61,9 +62,9 @@ function legacyCopy(text: string): boolean {
   }
 }
 
-type Tab = "overview" | "approvals" | "signatures" | "obligations" | "document" | "activity" | "comments" | "files" | "versions";
+type Tab = "overview" | "approvals" | "policy" | "readiness" | "signatures" | "obligations" | "document" | "activity" | "comments" | "files" | "versions";
 const EDITABLE_STATUSES = new Set(["draft", "changes_requested"]);
-const TABS: Tab[] = ["overview", "approvals", "signatures", "obligations", "document", "activity", "comments", "files", "versions"];
+const TABS: Tab[] = ["overview", "approvals", "policy", "readiness", "signatures", "obligations", "document", "activity", "comments", "files", "versions"];
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export default function ContractDetailPage() {
@@ -371,8 +372,19 @@ export default function ContractDetailPage() {
           ))}
         </div>
 
-        {tab === "overview" && <OverviewTab contract={contract} />}
+        {tab === "overview" && (
+          <>
+            {/* Above the detail: what stage it is at, and what to do next. Derived server-side
+                every time, so it cannot contradict the buttons beside it. */}
+            <div className="mb-4">
+              <ContractGuidance contractId={contract.id} />
+            </div>
+            <OverviewTab contract={contract} />
+          </>
+        )}
         {tab === "approvals" && <ApprovalsTab contract={contract} wf={wfState} onChanged={load} />}
+        {tab === "policy" && <PolicyTab contract={contract} onChanged={load} />}
+        {tab === "readiness" && <ReadinessTab contract={contract} />}
         {tab === "signatures" && <SignaturesTab contract={contract} env={sigState} onChanged={load} />}
         {tab === "obligations" && <ObligationsTab contract={contract} />}
         {tab === "document" && <DocumentTab key={contract.id} contract={contract} />}
@@ -1026,15 +1038,36 @@ function ApprovalsTab({ contract, wf, onChanged }: { contract: ContractDetail; w
               placeholder="Optional note (shown on the step; recommended when rejecting or requesting changes)"
               className="mb-2"
             />
-            <div className="flex flex-wrap gap-2">
-              <Button onClick={() => decide("approve")} loading={decideBusy === "approve"} disabled={!!decideBusy}>
-                <Check className="h-3.5 w-3.5" /> Approve
+            {/* Phase 9, item 8. Stacked and full-width on a phone, side by side from `sm` up.
+                Wrapped buttons on a narrow screen end up half-width and adjacent, which is how
+                somebody taps Reject meaning Approve — and an approval decision is not a thing
+                to make easy to mis-tap. Each is at least 44px tall (WCAG 2.5.5). */}
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+              <Button
+                onClick={() => decide("approve")}
+                loading={decideBusy === "approve"}
+                disabled={!!decideBusy}
+                className="h-11 w-full justify-center sm:h-9 sm:w-auto"
+              >
+                <Check className="h-3.5 w-3.5" aria-hidden="true" /> Approve
               </Button>
-              <Button variant="outline" onClick={() => decide("changes_requested")} loading={decideBusy === "changes_requested"} disabled={!!decideBusy}>
+              <Button
+                variant="outline"
+                onClick={() => decide("changes_requested")}
+                loading={decideBusy === "changes_requested"}
+                disabled={!!decideBusy}
+                className="h-11 w-full justify-center sm:h-9 sm:w-auto"
+              >
                 Request changes
               </Button>
-              <Button variant="outline" onClick={() => decide("reject")} loading={decideBusy === "reject"} disabled={!!decideBusy}>
-                <X className="h-3.5 w-3.5" /> Reject
+              <Button
+                variant="outline"
+                onClick={() => decide("reject")}
+                loading={decideBusy === "reject"}
+                disabled={!!decideBusy}
+                className="h-11 w-full justify-center sm:h-9 sm:w-auto"
+              >
+                <X className="h-3.5 w-3.5" aria-hidden="true" /> Reject
               </Button>
             </div>
           </div>
@@ -1676,5 +1709,327 @@ function SignaturesTab({ contract, env, onChanged }: { contract: ContractDetail;
         )}
       </CardBody>
     </Card>
+  );
+}
+
+
+/* ------------------------------------------------------------------- policy ---------- */
+
+const FINDING_TONE: Record<PolicyFinding["status"], string> = {
+  missing: "border-red-300/60",
+  prohibited: "border-red-300/60",
+  altered: "border-amber-300/60",
+  present: "border-line",
+};
+
+const FINDING_LABEL: Record<PolicyFinding["status"], string> = {
+  missing: "Missing",
+  prohibited: "Prohibited language present",
+  altered: "Wording changed",
+  present: "As approved",
+};
+
+/**
+ * Playbook compliance. `missing` and `altered` are shown as different problems on purpose:
+ * an altered clause is still under its heading, so a reviewer skimming the document sees
+ * nothing wrong — that is exactly the case worth surfacing.
+ *
+ * "Re-check" is a POST because acting on the result has a consequence: a blocking deviation
+ * classifies the agreement non-standard, which changes who has to approve it.
+ */
+function PolicyTab({ contract, onChanged }: { contract: ContractDetail; onChanged: () => void }) {
+  const [review, setReview] = useState<PolicyReview | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(() => {
+    api
+      .get<PolicyReview>(`/contracts/${contract.id}/policy-review`)
+      .catch(() => null)
+      .then((r) => setReview(r));
+  }, [contract.id]);
+  useEffect(load, [load]);
+
+  async function recheck() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.post<PolicyReview>(`/contracts/${contract.id}/policy-review`, {});
+      setReview(result);
+      if (result.classified_non_standard) onChanged();
+    } catch (e: unknown) {
+      setError(e instanceof ApiError ? e.message : "The review could not run.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!review) return <Skeleton className="h-32" />;
+
+  return (
+    <div className="space-y-4 py-4">
+      {error && <ErrorBanner message={error} />}
+
+      {review.playbooks.length === 0 ? (
+        <Card>
+          <CardBody className="py-8 text-center text-sm text-ink-2">
+            <Shield className="mx-auto mb-3 h-9 w-9 text-ink-3" />
+            <div className="text-base font-semibold text-ink">No policy covers this agreement</div>
+            <p className="mt-1">
+              Playbooks are defined in the clause library. Until one applies, nothing here is
+              checked.
+            </p>
+          </CardBody>
+        </Card>
+      ) : (
+        <>
+          <Card>
+            <CardBody className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-sm">
+                {review.ok ? (
+                  <>
+                    <BadgeCheck className="h-5 w-5 text-emerald-600" />
+                    <span className="text-ink">
+                      Within policy — {review.checked} clause{review.checked === 1 ? "" : "s"}{" "}
+                      checked against {review.playbooks.map((p: { name: string }) => p.name).join(", ")}.
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <AlertTriangle className="h-5 w-5 text-amber-600" />
+                    <span className="text-ink">
+                      {review.deviation_count} deviation
+                      {review.deviation_count === 1 ? "" : "s"}
+                      {review.blocker_count > 0 && (
+                        <>
+                          {" "}
+                          — <strong>{review.blocker_count} blocking</strong>, which sends this down
+                          the non-standard approval route
+                        </>
+                      )}
+                      .
+                    </span>
+                  </>
+                )}
+              </div>
+              <Button size="sm" variant="ghost" loading={busy} onClick={recheck}>
+                Re-check
+              </Button>
+            </CardBody>
+          </Card>
+
+          <div className="space-y-2">
+            {review.findings.map((f: PolicyFinding) => (
+              <Card key={`${f.playbook}-${f.clause_key}-${f.kind}`} className={FINDING_TONE[f.status]}>
+                <CardBody className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {f.status === "present" ? (
+                      <BadgeCheck className="h-4 w-4 text-emerald-600" />
+                    ) : (
+                      <AlertTriangle
+                        className={cn(
+                          "h-4 w-4",
+                          f.severity === "blocker" ? "text-red-600" : "text-amber-600",
+                        )}
+                      />
+                    )}
+                    <span className="text-sm font-semibold text-ink">{f.title}</span>
+                    <span className="rounded-full bg-surface-3 px-2 py-0.5 text-[10px] text-ink-3">
+                      {FINDING_LABEL[f.status]}
+                    </span>
+                    {f.status !== "present" && (
+                      <span className="rounded-full bg-surface-3 px-2 py-0.5 text-[10px] uppercase text-ink-3">
+                        {f.severity}
+                      </span>
+                    )}
+                    <code className="rounded bg-surface-3 px-1.5 py-0.5 text-[10px] text-ink-3">
+                      {f.clause_key}
+                    </code>
+                  </div>
+
+                  {f.status === "altered" && f.diff.length > 0 && (
+                    <pre className="overflow-x-auto rounded-md bg-surface-2 p-2 font-mono text-[11px] leading-relaxed">
+                      {f.diff.map((line, i) => (
+                        <div
+                          key={i}
+                          className={
+                            line.startsWith("-")
+                              ? "text-red-600"
+                              : line.startsWith("+")
+                                ? "text-emerald-700"
+                                : "text-ink-3"
+                          }
+                        >
+                          {line}
+                        </div>
+                      ))}
+                    </pre>
+                  )}
+
+                  {f.status === "missing" && (
+                    <p className="text-sm text-ink-2">
+                      The approved wording for this clause does not appear in the document.
+                    </p>
+                  )}
+
+                  {f.guidance && <p className="text-xs text-ink-3">{f.guidance}</p>}
+
+                  <div className="text-[11px] text-ink-3">
+                    {f.playbook} · {Math.round(f.ratio * 100)}% match to the approved wording
+                  </div>
+                </CardBody>
+              </Card>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+/* ---------------------------------------------------------------- readiness ---------- */
+
+/**
+ * The sign-off readiness pack. Blockers lead, because the failure this prevents is a
+ * signatory executing an agreement whose deviations nobody resolved — the information already
+ * existed, it just was not in front of them.
+ */
+function ReadinessTab({ contract }: { contract: ContractDetail }) {
+  const [pack, setPack] = useState<Readiness | null>(null);
+
+  useEffect(() => {
+    api
+      .get<Readiness>(`/contracts/${contract.id}/readiness`)
+      .catch(() => null)
+      .then(setPack);
+  }, [contract.id]);
+
+  if (!pack) return <Skeleton className="h-32" />;
+
+  return (
+    <div className="space-y-4 py-4">
+      <Card className={pack.ready ? "border-emerald-300/60" : "border-red-300/60"}>
+        <CardBody className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            {pack.ready ? (
+              <BadgeCheck className="h-5 w-5 text-emerald-600" />
+            ) : (
+              <AlertTriangle className="h-5 w-5 text-red-600" />
+            )}
+            <span className="text-sm font-semibold text-ink">
+              {pack.ready
+                ? "Ready for signature"
+                : `Not ready — ${pack.blockers.length} blocker${pack.blockers.length === 1 ? "" : "s"}`}
+            </span>
+          </div>
+          <a
+            href={`${API_BASE}/contracts/${contract.id}/readiness.pdf`}
+            className="inline-flex h-8 items-center gap-2 rounded-md border border-line px-3 text-sm text-ink-2 transition hover:text-ink"
+          >
+            <FileDown className="h-4 w-4" /> Download pack
+          </a>
+        </CardBody>
+      </Card>
+
+      {pack.blockers.length > 0 && (
+        <Card>
+          <CardBody className="space-y-1">
+            <div className="text-sm font-semibold text-ink">Blockers</div>
+            {pack.blockers.map((b) => (
+              <div key={b} className="flex items-start gap-2 text-sm text-ink-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
+                <span>{b}</span>
+              </div>
+            ))}
+          </CardBody>
+        </Card>
+      )}
+
+      {pack.notes.length > 0 && (
+        <Card>
+          <CardBody className="space-y-1">
+            <div className="text-sm font-semibold text-ink">Worth knowing</div>
+            {pack.notes.map((n) => (
+              <p key={n} className="text-sm text-ink-2">
+                {n}
+              </p>
+            ))}
+          </CardBody>
+        </Card>
+      )}
+
+      <Card>
+        <CardBody className="space-y-2">
+          <div className="text-sm font-semibold text-ink">Approvals</div>
+          {pack.decisions.length === 0 ? (
+            <p className="text-sm text-ink-3">No approval decisions recorded.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-ink-3">
+                    <th className="py-1 pr-3">Stage</th>
+                    <th className="py-1 pr-3">Step</th>
+                    <th className="py-1 pr-3">Decided by</th>
+                    <th className="py-1 pr-3">Decision</th>
+                    <th className="py-1 pr-3">When</th>
+                    <th className="py-1">SLA</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pack.decisions.map((d: ReadinessDecision, i: number) => (
+                    <tr key={i} className="border-t border-line">
+                      <td className="py-1.5 pr-3 text-ink-3">{d.stage}</td>
+                      <td className="py-1.5 pr-3 text-ink">{d.name}</td>
+                      <td className="py-1.5 pr-3 text-ink-2">{d.who}</td>
+                      <td className="py-1.5 pr-3 text-ink-2">{d.decision}</td>
+                      <td className="py-1.5 pr-3 text-ink-3">{d.at}</td>
+                      <td className="py-1.5 text-ink-3">
+                        {d.on_time === null ? "—" : d.on_time ? "on time" : "late"}
+                        {d.escalated && " (escalated)"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardBody className="space-y-2 text-sm">
+          <div className="font-semibold text-ink">Where this wording came from</div>
+          <div className="grid gap-1 text-ink-2 sm:grid-cols-2">
+            <div>Source: {pack.provenance.source ?? "—"}</div>
+            <div>Template: {pack.provenance.template ?? "—"}</div>
+            <div>Revision: {pack.provenance.template_version ?? "—"}</div>
+            {pack.provenance.edited_since_generation !== null &&
+              pack.provenance.edited_since_generation !== undefined && (
+                <div>
+                  Edited after generation:{" "}
+                  {pack.provenance.edited_since_generation ? "Yes" : "No"}
+                </div>
+              )}
+          </div>
+          {(pack.provenance.clauses ?? []).length > 0 && (
+            <div className="space-y-1 pt-1">
+              {(pack.provenance.clauses ?? []).map((c) => (
+                <div key={c.key} className="flex flex-wrap items-center gap-2 text-xs">
+                  <code className="rounded bg-surface-3 px-1.5 py-0.5">{c.key}</code>
+                  <span className="text-ink-2">used v{c.used ?? "—"}</span>
+                  {c.stale && (
+                    <span className="text-amber-700">
+                      revised since — current v{c.current}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </CardBody>
+      </Card>
+    </div>
   );
 }

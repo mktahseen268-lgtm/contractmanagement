@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .database import SessionLocal
 from .middleware import LoggingMiddleware, MetricsMiddleware, RateLimitMiddleware, SecurityHeadersMiddleware
-from .routers import api_keys, audit, auth, contracts, dashboard, files, inbox, misc, obligations, reports, scim, signatures, templates, webhooks, workflows
+from .routers import adoption, analytics, api_keys, audit, auth, authority, bulk_send, changes, clauses, contracts, dashboard, esign, files, inbox, misc, obligations, pki, reports, repository, scim, security_admin, signatures, soap_api, templates, webhooks, workflow_admin, workflows
 
 log = logging.getLogger("uvicorn.error")
 
@@ -67,6 +67,21 @@ async def lifespan(app: FastAPI):
         with SessionLocal() as db:
             if seed_if_empty(db):
                 log.info("Seeded demo workspace. Login: demo@acme.io / Password: demo1234")
+
+    # Single-tenant profile: resolve (or provision) the one tenant this install serves. Runs
+    # after migrations + seed so it can adopt an existing workspace.
+    tenant_for_audit = ""
+    if settings.is_single_tenant:
+        from .tenancy import provision
+
+        tenant_for_audit = provision()
+
+    # Data residency (Phase 0). Raises when an endpoint egresses outside the deployment and
+    # DATA_RESIDENCY_ENFORCED is on; always records the check as audit evidence.
+    from . import residency
+
+    findings = residency.enforce()
+    residency.record_boot_check(findings, tenant_for_audit)
     yield
 
 
@@ -99,9 +114,21 @@ app.include_router(reports.router)
 app.include_router(inbox.router)
 app.include_router(obligations.router)
 app.include_router(templates.router)
+app.include_router(bulk_send.router)
+app.include_router(clauses.router)
+app.include_router(repository.router)
+app.include_router(changes.router)
+app.include_router(analytics.router)
+app.include_router(soap_api.router)
+app.include_router(security_admin.router)
+app.include_router(adoption.router)
 app.include_router(webhooks.router)
 app.include_router(api_keys.router)
 app.include_router(scim.router)
+app.include_router(pki.router)
+app.include_router(authority.router)
+app.include_router(esign.router)
+app.include_router(workflow_admin.router)
 app.include_router(misc.router)
 
 

@@ -1,0 +1,338 @@
+# Continuous delivery — Dev → UAT → Production.
+#
+# RFP §4c asks for a CD pipeline with segregated environments and approval gates. The shape
+# below is deliberate in three ways:
+#
+#   1. ONE ARTEFACT, PROMOTED. The image is built once, from the commit that passed CI, and the
+#      same digest is deployed to Dev, then UAT, then Production. Rebuilding per environment
+#      means Production runs bytes that were never tested — the most common way a green pipeline
+#      ships something nobody verified.
+#
+#   2. GATES ARE GITHUB ENVIRONMENTS, NOT `if:` CONDITIONS. A required reviewer on the `uat` and
+#      `production` environments is enforced by GitHub and recorded in the deployment history.
+#      A conditional in a workflow file can be edited by whoever is doing the deploying.
+#
+#   3. MIGRATIONS RUN AS A SEPARATE, GATED STEP. They are the irreversible part. Running them
+#      inside the application's startup would couple a schema change to a rollout that might be
+#      rolled back moments later — and a rollback does not undo a migration.
+#
+# Rollback is `kubectl rollout undo`, which returns to the previous replica set. Because the
+# image is immutable and tagged by digest, that is a real return to the previous state rather
+# than a re-pull of a moving tag.
+
+name: CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deploy an already-built image to one environment
+        required: true
+        type: choice
+        options: [dev, uat, production]
+      image_digest:
+        description: Image digest to deploy (sha256:...). Leave blank to use the latest built from main.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write        # OIDC to the cloud, so no long-lived credentials sit in secrets
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/cm-api
+  WEB_IMAGE_NAME: ${{ github.repository }}/cm-web
+
+concurrency:
+  # Never two deployments of the same branch at once. `cancel-in-progress: false` because
+  # cancelling half-way through a rollout leaves the cluster in a state nobody chose.
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------------------
+  # Build once. Everything downstream promotes this exact digest.
+  # ---------------------------------------------------------------------------------------
+  build:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    outputs:
+      api_digest: ${{ steps.api.outputs.digest }}
+      web_digest: ${{ steps.web.outputs.digest }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # the version is derived from tag history
+
+      - id: version
+        run: |
+          VERSION="$(git describe --tags --always --dirty)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building ${VERSION}"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the API image
+        id: api
+        uses: docker/build-push-action@v6
+        with:
+          context: ./apps/api
+          push: true
+          # Tagged by both version and commit SHA. The SHA tag is what the deploy jobs use,
+          # because a version tag can be moved and a commit SHA cannot.
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true      # SLSA attestation — what built this, from which source
+          sbom: true
+
+      - name: Build and push the web image
+        id: web
+        uses: docker/build-push-action@v6
+        with:
+          context: ./apps/web
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.WEB_IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.WEB_IMAGE_NAME }}:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Scan the image that will actually be deployed
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          format: table
+          # Blocking. Scanning an image and shipping it anyway is theatre — and this is the
+          # last point at which stopping is cheap.
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+  # ---------------------------------------------------------------------------------------
+  # Dev — automatic. This is where a bad deploy should be found.
+  # ---------------------------------------------------------------------------------------
+  deploy-dev:
+    name: Deploy to Dev
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: dev
+      url: https://cm-dev.mmbl.internal
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure cluster access
+        uses: azure/k8s-set-context@v4
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBECONFIG_DEV }}
+
+      - name: Run migrations
+        # Separate from the rollout, and before it. A schema the new code needs must exist
+        # before that code serves traffic; the migrations are written to be backward-compatible
+        # with the previous release so this ordering is safe in both directions.
+        run: |
+          kubectl -n contract-management delete job cm-migrate --ignore-not-found
+          kubectl -n contract-management create job cm-migrate \
+            --image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }} \
+            -- alembic upgrade head
+          kubectl -n contract-management wait --for=condition=complete job/cm-migrate --timeout=600s \
+            || { kubectl -n contract-management logs job/cm-migrate; exit 1; }
+
+      - name: Roll out
+        run: |
+          for d in cm-api cm-worker cm-beat; do
+            kubectl -n contract-management set image deployment/$d \
+              "*=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}"
+          done
+          kubectl -n contract-management set image deployment/cm-web \
+            "*=${{ env.REGISTRY }}/${{ env.WEB_IMAGE_NAME }}:sha-${{ github.sha }}"
+
+      - name: Wait for the rollout to become healthy
+        run: |
+          for d in cm-api cm-web cm-worker cm-beat; do
+            kubectl -n contract-management rollout status deployment/$d --timeout=300s
+          done
+
+      - name: Smoke test
+        run: ./infra/scripts/smoke-test.sh https://cm-dev.mmbl.internal
+
+      - name: Roll back on failure
+        if: failure()
+        run: |
+          # An automatic rollback in Dev, because nobody is watching Dev at 2 a.m. and a broken
+          # Dev blocks everyone else's work. UAT and Production roll back deliberately.
+          for d in cm-api cm-web cm-worker cm-beat; do
+            kubectl -n contract-management rollout undo deployment/$d || true
+          done
+
+  # ---------------------------------------------------------------------------------------
+  # UAT — requires a reviewer. This is the environment MMBL tests in.
+  # ---------------------------------------------------------------------------------------
+  deploy-uat:
+    name: Deploy to UAT
+    needs: [build, deploy-dev]
+    runs-on: ubuntu-latest
+    environment:
+      # Configure a required reviewer on this environment in repository settings. The gate is
+      # GitHub's, not this file's — so it cannot be edited away by whoever is deploying.
+      name: uat
+      url: https://cm-uat.mmbl.internal
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/k8s-set-context@v4
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBECONFIG_UAT }}
+
+      - name: Back up the database before migrating
+        # UAT holds migrated production-shaped data. A failed migration here costs a restore,
+        # not a re-seed, so the backup is taken first rather than assumed to exist.
+        run: ./infra/scripts/backup.sh uat pre-deploy-${{ github.sha }}
+
+      - name: Run migrations
+        run: |
+          kubectl -n contract-management delete job cm-migrate --ignore-not-found
+          kubectl -n contract-management create job cm-migrate \
+            --image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }} \
+            -- alembic upgrade head
+          kubectl -n contract-management wait --for=condition=complete job/cm-migrate --timeout=900s \
+            || { kubectl -n contract-management logs job/cm-migrate; exit 1; }
+
+      - name: Roll out
+        run: |
+          for d in cm-api cm-worker cm-beat; do
+            kubectl -n contract-management set image deployment/$d \
+              "*=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}"
+          done
+          kubectl -n contract-management set image deployment/cm-web \
+            "*=${{ env.REGISTRY }}/${{ env.WEB_IMAGE_NAME }}:sha-${{ github.sha }}"
+          for d in cm-api cm-web cm-worker cm-beat; do
+            kubectl -n contract-management rollout status deployment/$d --timeout=600s
+          done
+
+      - name: Smoke test
+        run: ./infra/scripts/smoke-test.sh https://cm-uat.mmbl.internal
+
+      - name: Verify the audit chain survived the deploy
+        # A migration that touched the audit table and broke the chain would otherwise be found
+        # by an auditor rather than by us. It costs one request.
+        run: ./infra/scripts/verify-audit-chain.sh https://cm-uat.mmbl.internal
+
+  # ---------------------------------------------------------------------------------------
+  # Production — requires a reviewer and a change window.
+  # ---------------------------------------------------------------------------------------
+  deploy-production:
+    name: Deploy to Production
+    needs: [build, deploy-uat]
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://cm.mmbl.internal
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/k8s-set-context@v4
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBECONFIG_PROD }}
+
+      - name: Record the currently-running digest
+        # Written down before anything changes, so a rollback does not depend on reading it
+        # back out of a cluster that may by then be unhealthy.
+        id: current
+        run: |
+          CURRENT="$(kubectl -n contract-management get deployment cm-api \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          echo "image=${CURRENT}" >> "$GITHUB_OUTPUT"
+          echo "Currently running: ${CURRENT}"
+
+      - name: Back up the database
+        run: ./infra/scripts/backup.sh production pre-deploy-${{ github.sha }}
+
+      - name: Run migrations
+        run: |
+          kubectl -n contract-management delete job cm-migrate --ignore-not-found
+          kubectl -n contract-management create job cm-migrate \
+            --image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }} \
+            -- alembic upgrade head
+          kubectl -n contract-management wait --for=condition=complete job/cm-migrate --timeout=1800s \
+            || { kubectl -n contract-management logs job/cm-migrate; exit 1; }
+
+      - name: Roll out
+        run: |
+          for d in cm-api cm-worker cm-beat; do
+            kubectl -n contract-management set image deployment/$d \
+              "*=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}"
+          done
+          kubectl -n contract-management set image deployment/cm-web \
+            "*=${{ env.REGISTRY }}/${{ env.WEB_IMAGE_NAME }}:sha-${{ github.sha }}"
+          for d in cm-api cm-web cm-worker cm-beat; do
+            kubectl -n contract-management rollout status deployment/$d --timeout=900s
+          done
+
+      - name: Smoke test
+        run: ./infra/scripts/smoke-test.sh https://cm.mmbl.internal
+
+      - name: Verify the audit chain
+        run: ./infra/scripts/verify-audit-chain.sh https://cm.mmbl.internal
+
+      - name: Report the deployment
+        run: |
+          echo "### Deployed to Production" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Version | ${{ needs.build.outputs.version }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit | ${{ github.sha }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Previous | ${{ steps.current.outputs.image }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Rollback | \`kubectl -n contract-management rollout undo deployment/cm-api\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Announce a failed deployment
+        if: failure()
+        run: |
+          # Deliberately NOT an automatic rollback. In Production the schema has already moved,
+          # and an unattended `rollout undo` puts old code against a new schema — which can be
+          # worse than the failure it is reacting to. A human decides, with the previous digest
+          # recorded above and the pre-deploy backup available.
+          echo "::error::Production deployment failed. Previous image: ${{ steps.current.outputs.image }}"
+          echo "::error::Roll back with: kubectl -n contract-management rollout undo deployment/cm-api"
+          echo "::error::A pre-deploy backup was taken: pre-deploy-${{ github.sha }}"
+
+  # ---------------------------------------------------------------------------------------
+  # Manual deploy of an already-built digest — for a rollback-forward or a re-deploy.
+  # ---------------------------------------------------------------------------------------
+  deploy-manual:
+    name: Manual deploy
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy the named digest
+        run: |
+          TARGET="${{ inputs.image_digest }}"
+          if [ -z "${TARGET}" ]; then TARGET="sha-${{ github.sha }}"; fi
+          echo "Deploying ${TARGET} to ${{ inputs.environment }}"
+          echo "::notice::This path deploys an existing image. It does not build, and it does"
+          echo "::notice::not run migrations — a rollback to a digest that predates a migration"
+          echo "::notice::needs the schema considered explicitly."

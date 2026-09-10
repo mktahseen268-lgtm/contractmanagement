@@ -1,4 +1,4 @@
-# 25 · Database — PostgreSQL First, MSSQL-Ready
+# 25 · Database — PostgreSQL, MSSQL and Oracle (portable since Phase 0)
 
 **Preferred database: PostgreSQL.** Reasons:
 
@@ -127,22 +127,64 @@ CREATE SECURITY POLICY TenantIsolation
 Both behave the same way: rows are filtered to the current session's tenant, and an attempt
 to insert into the wrong tenant fails.
 
-The Alembic migration `0002_rls` would gain an `elif bind.dialect.name == "mssql":` branch
-that issues the MSSQL DDL. The application code is unchanged.
+Oracle equivalent (Virtual Private Database):
 
-## 5. Implementation plan (when first MSSQL customer arrives)
+```sql
+CREATE OR REPLACE CONTEXT CM_CTX USING CM_CTX_PKG;   -- set via DBMS_SESSION.SET_CONTEXT
 
-| Step | Effort | Notes |
+CREATE OR REPLACE FUNCTION CM_TENANT_PREDICATE(P_SCHEMA IN VARCHAR2, P_OBJECT IN VARCHAR2)
+RETURN VARCHAR2 AS
+BEGIN
+  IF SYS_CONTEXT('CM_CTX', 'TENANT_ID') IS NULL THEN
+    RETURN NULL;                                     -- no predicate == permissive
+  END IF;
+  RETURN 'tenant_id = SYS_CONTEXT(''CM_CTX'', ''TENANT_ID'')';
+END;
+
+BEGIN DBMS_RLS.ADD_POLICY(
+  object_schema => USER, object_name => 'CONTRACTS', policy_name => 'CM_TENANT_CONTRACTS',
+  function_schema => USER, policy_function => 'CM_TENANT_PREDICATE',
+  statement_types => 'SELECT,INSERT,UPDATE,DELETE', update_check => TRUE); END;
+```
+
+All three behave the same way: rows are filtered to the current session's tenant, the
+predicate is permissive when the tenant is unset (so `/auth/login` and `/auth/refresh` work),
+and an attempt to write into the wrong tenant fails.
+
+## 5. Status — implemented (Phase 0, Aug 2026)
+
+**This is no longer a plan.** The dialect-specific DDL and runtime calls live in
+[`apps/api/app/db_dialect.py`](../apps/api/app/db_dialect.py), and migration `0002_rls`
+routes through it rather than carrying a Postgres-only body.
+
+| Piece | Where | State |
 |---|---|---|
-| Add `pyodbc + msodbcsql18` build path | 0.5 d | optional Docker build arg |
-| Mirror RLS DDL in migrations 0002, 0003, 0004, 0005, 0006, 0008, 0009, 0010, 0011 | 1 d | small per-migration patches |
-| Add the MSSQL branch in `database.py::_session_set_tenant` | 0.5 d | one engine event |
-| Port the two JSON-path callsites to `db_json.py` helper | 0.5 d | trivial |
-| CI matrix: add MSSQL job to the test pipeline | 0.5 d | uses `mcr.microsoft.com/mssql/server` container |
-| Customer-side: provide TDE keys, FT-search catalog policy, backup strategy | varies | document |
+| RLS / Security Policy / VPD DDL | `db_dialect.enable_row_security` | PG + MSSQL + Oracle |
+| Tenant session context | `db_dialect.set_tenant_context`, called from the engine `begin` listener | PG `set_config` · MSSQL `sp_set_session_context` · Oracle `DBMS_SESSION.SET_CONTEXT` |
+| Audit-chain advisory lock | `db_dialect.advisory_lock` | PG `pg_advisory_xact_lock` · MSSQL `sp_getapplock` · Oracle `DBMS_LOCK` |
+| JSON typing + checks | `db_dialect.json_column` / `json_check`, applied in `0013_hardening` | PG JSONB · MSSQL `ISJSON` · Oracle `IS JSON` |
+| Full-text search | `db_dialect.fulltext_index` / `fulltext_search` | PG `tsvector` · MSSQL `CONTAINS` · Oracle Text — **consumed in Phase 5** |
+| Drivers | `requirements-mssql.txt`, `requirements-oracle.txt` | optional extras, base install stays lean |
+| CI | `.github/workflows/ci.yml` job `migrations` | Postgres + MSSQL run `alembic upgrade head`, re-run for idempotency, and downgrade round-trip |
 
-**Total: ~3 dev-days** for the first MSSQL deployment, mostly DDL + CI. Subsequent customer
-deployments are a config switch.
+### 5.1 Two honest caveats
+
+1. **Oracle DDL is written to spec but not executed in CI.** No Oracle container is in the
+   pipeline (licensing + image size). The generated SQL is unit-tested as strings in
+   `tests/test_db_dialect.py`, and the first Oracle deployment must run the migration
+   matrix manually as an acceptance gate. Do not claim Oracle is "tested" until it is.
+2. **Row security is optional in single-tenant mode** (`ENFORCE_DB_ISOLATION=false`). With
+   one tenant the predicate is a tautology, and the Oracle/MSSQL policies cost real latency
+   on every query. `validate_for_production` refuses that combination in the SaaS profile,
+   where DB-level isolation is the primary boundary. The repository-layer `tenant_id`
+   filters are unconditional either way.
+
+### 5.2 What the earlier version of this document conceded — and no longer needs to
+
+This doc previously stated that on MSSQL "isolation silently degrades to app-layer
+filtering". That was true and it was the single biggest credibility risk in a bid that asks
+for Oracle or MSSQL. It is fixed: the policy DDL is emitted per dialect, and the CI matrix
+proves it applies. The remaining gap is Oracle *execution* coverage, above.
 
 ## 6. Not portable (won't try)
 

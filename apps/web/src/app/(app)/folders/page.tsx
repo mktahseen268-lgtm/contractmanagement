@@ -1,147 +1,349 @@
 "use client";
 
-// Folders & Organization — PROTOTYPE of hierarchical foldering for the contract repository (vs the
-// current flat tags). A nested folder tree on the left, contracts in the selected folder on the
-// right, with move/organize. Mockup: in-memory tree. Wires later to a folders table + contract
-// folder_id.
+/**
+ * Folders — the repository tree.
+ *
+ *   GET/POST /folders, POST /folders/{id}/move, DELETE /folders/{id}
+ *
+ * Paths are materialised server-side (`/Legal/Vendors/2026`), so a folder filter in search
+ * means "this folder and everything beneath it". Deleting refuses while anything is filed
+ * here or below — a delete must never orphan an agreement.
+ */
 
-import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, FileText, Folder, FolderOpen, FolderPlus, Move } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { ChevronRight, FolderPlus, FolderTree, Lock, Move, Trash2 } from "lucide-react";
+import { api, ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { PageHeader } from "@/components/shell";
-import { Badge, Button, Card, CardBody } from "@/components/ui";
-import { statusMeta } from "@/lib/utils";
+import {
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  CardTitle,
+  ErrorBanner,
+  Field,
+  Input,
+  Select,
+  Skeleton,
+} from "@/components/ui";
+import type { Folder } from "@/lib/types";
 
-type Node = { id: string; name: string; count: number; children?: Node[] };
-type Doc = { id: string; ref: string; title: string; status: string; folderId: string };
-
-const TREE: Node[] = [
-  {
-    id: "all", name: "All contracts", count: 31, children: [
-      { id: "sales", name: "Sales", count: 12, children: [
-        { id: "sales-emea", name: "EMEA", count: 7 },
-        { id: "sales-apac", name: "APAC", count: 5 },
-      ] },
-      { id: "procurement", name: "Procurement", count: 9, children: [
-        { id: "proc-vendors", name: "Vendors", count: 6 },
-        { id: "proc-saas", name: "SaaS subscriptions", count: 3 },
-      ] },
-      { id: "hr", name: "HR & People", count: 6 },
-      { id: "legal", name: "Legal & Compliance", count: 4 },
-    ],
-  },
-];
-
-const DOCS: Doc[] = [
-  { id: "a", ref: "C-2026-0012", title: "Northwind Master Services Agreement", status: "active", folderId: "sales-emea" },
-  { id: "b", ref: "C-2026-0033", title: "Lumen Labs Reseller Agreement", status: "out_for_signature", folderId: "sales-apac" },
-  { id: "c", ref: "C-2025-0119", title: "Platform Inc Data Processing Addendum", status: "signed", folderId: "proc-saas" },
-  { id: "d", ref: "C-2026-0007", title: "Acme ↔ ThiqaTech NDA", status: "active", folderId: "legal" },
-  { id: "e", ref: "C-2026-0041", title: "Trial Co Subscription Order", status: "draft", folderId: "proc-saas" },
-  { id: "f", ref: "C-2026-0050", title: "Field Engineer Offer Letter", status: "signed", folderId: "hr" },
-  { id: "g", ref: "C-2026-0021", title: "GoldStar Vendor Agreement", status: "active", folderId: "proc-vendors" },
-  { id: "h", ref: "C-2026-0009", title: "EMEA Distribution Agreement", status: "approved", folderId: "sales-emea" },
-];
-
-function descendantIds(node: Node): string[] {
-  const ids = [node.id];
-  node.children?.forEach((c) => ids.push(...descendantIds(c)));
-  return ids;
-}
+const ROLES = ["owner", "admin", "manager", "approver", "author", "viewer"];
 
 export default function FoldersPage() {
-  const [selected, setSelected] = useState("all");
-  const [open, setOpen] = useState<Record<string, boolean>>({ all: true, sales: true, procurement: true });
+  const { me } = useAuth();
+  const role = me?.user.role;
+  const canEdit = role === "owner" || role === "admin" || role === "manager";
 
-  const selectedNode = useMemo(() => {
-    const find = (n: Node): Node | null => (n.id === selected ? n : (n.children?.map(find).find(Boolean) ?? null));
-    return TREE.map(find).find(Boolean) ?? TREE[0];
-  }, [selected]);
+  const [items, setItems] = useState<Folder[] | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [moving, setMoving] = useState<Folder | null>(null);
+  const [error, setError] = useState("");
 
-  const inScope = useMemo(() => {
-    if (!selectedNode) return [];
-    const ids = new Set(descendantIds(selectedNode));
-    return DOCS.filter((d) => ids.has(d.folderId) || selected === "all");
-  }, [selectedNode, selected]);
+  const load = useCallback(() => {
+    api.get<Folder[]>("/folders").then(setItems).catch(() => setItems([]));
+  }, []);
+  useEffect(load, [load]);
+
+  const total = useMemo(
+    () => (items ?? []).reduce((sum, f) => sum + f.contract_count, 0),
+    [items],
+  );
+
+  async function remove(folder: Folder) {
+    if (!window.confirm(`Delete ${folder.path}?`)) return;
+    setError("");
+    try {
+      await api.del(`/folders/${folder.id}`);
+      load();
+    } catch (e: unknown) {
+      setError(e instanceof ApiError ? e.message : "Couldn't delete that folder.");
+    }
+  }
 
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Folders</span>}
-        subtitle="Organise the repository into nested folders — beyond flat tags."
-        actions={<Button size="sm" variant="secondary"><FolderPlus className="h-3.5 w-3.5" /> New folder</Button>}
+        title="Folders"
+        subtitle={
+          items === null
+            ? "Loading…"
+            : `${items.length} folder${items.length === 1 ? "" : "s"} · ${total} agreement${total === 1 ? "" : "s"} filed`
+        }
+        actions={
+          canEdit ? (
+            <Button size="sm" onClick={() => setCreating(true)}>
+              <FolderPlus className="h-3.5 w-3.5" /> New folder
+            </Button>
+          ) : null
+        }
       />
 
-      <div className="grid gap-4 p-4 lg:grid-cols-[240px_1fr]">
-        {/* tree */}
-        <Card className="h-max">
-          <CardBody className="space-y-0.5">
-            {TREE.map((n) => (
-              <TreeNode key={n.id} node={n} depth={0} selected={selected} setSelected={setSelected} open={open} setOpen={setOpen} />
-            ))}
-          </CardBody>
-        </Card>
+      <div className="space-y-4 p-6">
+        {error && <ErrorBanner message={error} />}
 
-        {/* docs in folder */}
-        <Card>
-          <CardBody className="p-0">
-            <div className="flex items-center justify-between border-b border-line px-4 py-3">
-              <div className="flex items-center gap-2 text-sm font-semibold text-ink">
-                <FolderOpen className="h-4 w-4 text-accent" /> {selectedNode?.name}
-                <span className="text-xs font-normal text-ink-3">· {inScope.length} contract{inScope.length === 1 ? "" : "s"}</span>
-              </div>
-              <Button size="sm" variant="ghost"><Move className="h-3.5 w-3.5" /> Move selected</Button>
-            </div>
-            <div className="divide-y divide-line">
-              {inScope.map((d) => (
-                <Link key={d.id} href={`/contracts/${d.id}`} className="flex items-center gap-3 px-4 py-2.5 hover:bg-surface-2">
-                  <FileText className="h-4 w-4 shrink-0 text-ink-3" />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium text-ink">{d.title}</div>
-                    <div className="text-[11px] text-ink-3">{d.ref}</div>
-                  </div>
-                  <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${statusMeta(d.status).pill}`}>{statusMeta(d.status).label}</span>
-                </Link>
+        {creating && (
+          <FolderForm
+            folders={items ?? []}
+            onCancel={() => setCreating(false)}
+            onSaved={() => {
+              setCreating(false);
+              load();
+            }}
+            onError={setError}
+          />
+        )}
+
+        {moving && (
+          <MoveForm
+            folder={moving}
+            folders={items ?? []}
+            onCancel={() => setMoving(null)}
+            onSaved={() => {
+              setMoving(null);
+              load();
+            }}
+            onError={setError}
+          />
+        )}
+
+        {items === null && <Skeleton className="h-32" />}
+
+        {items?.length === 0 && (
+          <Card>
+            <CardBody className="py-10 text-center text-sm text-ink-2">
+              <FolderTree className="mx-auto mb-3 h-10 w-10 text-ink-3" />
+              <div className="text-base font-semibold text-ink">No folders yet</div>
+              <p className="mt-1">
+                Folders give the repository a shape you can filter by — and a subtree you can
+                restrict to particular roles.
+              </p>
+            </CardBody>
+          </Card>
+        )}
+
+        {items && items.length > 0 && (
+          <Card>
+            <CardBody className="divide-y divide-line p-0">
+              {items.map((f) => (
+                <div
+                  key={f.id}
+                  className="flex flex-wrap items-center gap-2 px-3 py-2"
+                  style={{ paddingLeft: `${12 + f.depth * 20}px` }}
+                >
+                  {f.depth > 0 && <ChevronRight className="h-3 w-3 shrink-0 text-ink-3" />}
+                  <FolderTree className="h-4 w-4 shrink-0 text-accent" />
+                  <span className="text-sm text-ink">{f.name}</span>
+                  <span className="text-[11px] text-ink-3">
+                    {f.contract_count} agreement{f.contract_count === 1 ? "" : "s"}
+                  </span>
+                  {f.visible_to_roles.length > 0 && (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full bg-surface-3 px-2 py-0.5 text-[10px] text-ink-3"
+                      title={f.visible_to_roles.join(", ")}
+                    >
+                      <Lock className="h-3 w-3" /> {f.visible_to_roles.join(", ")}
+                    </span>
+                  )}
+                  <span className="ml-auto flex items-center gap-1">
+                    <Link
+                      href={`/search?folder=${encodeURIComponent(f.path)}`}
+                      className="text-xs text-ink-3 hover:text-ink"
+                    >
+                      view
+                    </Link>
+                    {canEdit && (
+                      <>
+                        <button
+                          onClick={() => setMoving(f)}
+                          className="p-1 text-ink-3 hover:text-ink"
+                          title="Move"
+                        >
+                          <Move className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          onClick={() => remove(f)}
+                          className="p-1 text-ink-3 hover:text-ink"
+                          title="Delete"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </>
+                    )}
+                  </span>
+                </div>
               ))}
-              {inScope.length === 0 && <div className="px-4 py-8 text-center text-sm text-ink-3">This folder is empty.</div>}
-            </div>
-          </CardBody>
-        </Card>
+            </CardBody>
+          </Card>
+        )}
       </div>
     </div>
   );
 }
 
-function TreeNode({
-  node, depth, selected, setSelected, open, setOpen,
+function FolderForm({
+  folders,
+  onCancel,
+  onSaved,
+  onError,
 }: {
-  node: Node; depth: number; selected: string; setSelected: (id: string) => void;
-  open: Record<string, boolean>; setOpen: (fn: (o: Record<string, boolean>) => Record<string, boolean>) => void;
+  folders: Folder[];
+  onCancel: () => void;
+  onSaved: () => void;
+  onError: (m: string) => void;
 }) {
-  const hasKids = !!node.children?.length;
-  const isOpen = open[node.id];
-  const on = selected === node.id;
+  const [name, setName] = useState("");
+  const [parentId, setParentId] = useState("");
+  const [roles, setRoles] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    onError("");
+    try {
+      await api.post("/folders", {
+        name: name.trim(),
+        parent_id: parentId || null,
+        visible_to_roles: roles,
+      });
+      onSaved();
+    } catch (e: unknown) {
+      onError(e instanceof ApiError ? e.message : "Couldn't create that folder.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div>
-      <div
-        className={`flex cursor-pointer items-center gap-1 rounded-md py-1.5 pr-2 text-sm ${on ? "bg-accent/10 font-medium text-accent" : "text-ink-2 hover:bg-surface-2"}`}
-        style={{ paddingLeft: `${depth * 14 + 6}px` }}
-        onClick={() => setSelected(node.id)}
-      >
-        {hasKids ? (
-          <button onClick={(e) => { e.stopPropagation(); setOpen((o) => ({ ...o, [node.id]: !o[node.id] })); }} className="shrink-0 text-ink-3">
-            {isOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-          </button>
-        ) : (
-          <span className="w-3.5 shrink-0" />
-        )}
-        {on ? <FolderOpen className="h-4 w-4 shrink-0" /> : <Folder className="h-4 w-4 shrink-0" />}
-        <span className="flex-1 truncate">{node.name}</span>
-        <span className="shrink-0 text-[11px] text-ink-3">{node.count}</span>
-      </div>
-      {hasKids && isOpen && node.children!.map((c) => (
-        <TreeNode key={c.id} node={c} depth={depth + 1} selected={selected} setSelected={setSelected} open={open} setOpen={setOpen} />
-      ))}
-    </div>
+    <Card>
+      <CardHeader>
+        <CardTitle>New folder</CardTitle>
+      </CardHeader>
+      <CardBody>
+        <form onSubmit={save} className="grid gap-3 sm:grid-cols-12">
+          <div className="sm:col-span-4">
+            <Field label="Name">
+              <Input value={name} onChange={(e) => setName(e.target.value)} required />
+            </Field>
+          </div>
+          <div className="sm:col-span-4">
+            <Field label="Inside">
+              <Select value={parentId} onChange={(e) => setParentId(e.target.value)}>
+                <option value="">Top level</option>
+                {folders.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.path}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          <div className="sm:col-span-4">
+            <Field label="Visible to" hint="Leave empty for everyone">
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                {ROLES.map((r) => (
+                  <label
+                    key={r}
+                    className="inline-flex items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-xs text-ink-2"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={roles.includes(r)}
+                      onChange={(e) =>
+                        setRoles((prev) =>
+                          e.target.checked ? [...prev, r] : prev.filter((x) => x !== r),
+                        )
+                      }
+                    />
+                    {r}
+                  </label>
+                ))}
+              </div>
+            </Field>
+          </div>
+          <div className="flex justify-end gap-2 sm:col-span-12">
+            <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
+              Cancel
+            </Button>
+            <Button type="submit" size="sm" loading={busy}>
+              Create
+            </Button>
+          </div>
+        </form>
+      </CardBody>
+    </Card>
+  );
+}
+
+function MoveForm({
+  folder,
+  folders,
+  onCancel,
+  onSaved,
+  onError,
+}: {
+  folder: Folder;
+  folders: Folder[];
+  onCancel: () => void;
+  onSaved: () => void;
+  onError: (m: string) => void;
+}) {
+  const [parentId, setParentId] = useState(folder.parent_id ?? "");
+  const [busy, setBusy] = useState(false);
+
+  // A folder cannot move into itself or its own subtree — the server refuses too, but
+  // offering the option and then rejecting it is a worse experience than not offering it.
+  const candidates = folders.filter(
+    (f) => f.id !== folder.id && !f.path.startsWith(`${folder.path}/`),
+  );
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    onError("");
+    try {
+      await api.post(`/folders/${folder.id}/move`, { parent_id: parentId || null });
+      onSaved();
+    } catch (e: unknown) {
+      onError(e instanceof ApiError ? e.message : "Couldn't move that folder.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Move {folder.path}</CardTitle>
+      </CardHeader>
+      <CardBody>
+        <form onSubmit={save} className="flex flex-wrap items-end gap-3">
+          <div className="min-w-[240px] flex-1">
+            <Field label="Into">
+              <Select value={parentId} onChange={(e) => setParentId(e.target.value)}>
+                <option value="">Top level</option>
+                {candidates.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.path}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          <Button type="submit" size="sm" loading={busy}>
+            Move
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
+            Cancel
+          </Button>
+        </form>
+        <p className="mt-2 text-xs text-ink-3">
+          Everything beneath this folder moves with it.
+        </p>
+      </CardBody>
+    </Card>
   );
 }

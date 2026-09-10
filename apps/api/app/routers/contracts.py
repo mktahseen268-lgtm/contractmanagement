@@ -1,6 +1,7 @@
 import datetime as dt
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -59,11 +60,21 @@ def list_contracts(
     owner_id: str | None = None,
     risk: str | None = None,
     mine: bool = False,
+    include_archived: bool = Query(
+        False,
+        description="Include contracts moved to the cold retention tier. They stay retrievable "
+                    "by id/reference at any time; this only controls the live search index.",
+    ),
     sort: str = "-updated_at",
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=200),
 ) -> schemas.ContractListOut:
     stmt = select(models.Contract).where(models.Contract.tenant_id == user.tenant_id)
+    # The hot search index is the last HOT_SEARCH_YEARS of contracts (RFP: "1 year instantly
+    # searchable"). Archived rows are excluded here, not deleted — /contracts/{id} still
+    # serves them, and `include_archived=true` searches the full 10-year corpus.
+    if not include_archived:
+        stmt = stmt.where(models.Contract.archived_at.is_(None))
     if q:
         like = f"%{q.lower()}%"
         stmt = stmt.where(or_(func.lower(models.Contract.title).like(like), func.lower(models.Contract.reference_no).like(like), func.lower(models.Contract.counterparty).like(like)))
@@ -519,3 +530,406 @@ def decide_workflow(contract_id: str, data: schemas.WorkflowDecideIn, request: R
     db.commit()
     db.refresh(c)
     return _detail(db, c)
+
+
+# ---------------------------------------------------------------------------------------
+# Word round-trip (Phase 3)
+# ---------------------------------------------------------------------------------------
+
+
+@router.get("/{contract_id}/export.docx")
+def export_docx(contract_id: str, db: Session = Depends(get_db),
+                user: models.User = Depends(get_current_user)) -> StreamingResponse:
+    """The contract as an editable Word document.
+
+    Clause numbers are real Word numbering, so a counterparty who inserts a clause gets
+    correct renumbering rather than a document that silently lies about its own structure.
+    """
+    import io as _io
+
+    from ..docx_engine import export as docx_export
+
+    c = _get_owned_contract(db, user, contract_id)
+    tenant = db.get(models.Tenant, user.tenant_id)
+    payload = docx_export.render_contract(c, (tenant.name if tenant else "Workspace"))
+    name = f"{c.reference_no or 'agreement'}.docx".replace("/", "_")
+    return StreamingResponse(
+        _io.BytesIO(payload),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+@router.post("/{contract_id}/import.docx", response_model=schemas.DocxImportOut)
+async def import_docx_endpoint(
+    contract_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    apply: bool = Form(False),
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+) -> schemas.DocxImportOut:
+    """Read a returned .docx: its text, its tracked changes and its comments.
+
+    `apply=false` (the default) previews. `apply=true` replaces the contract body, snapshots
+    the previous text as a version, files each comment against the agreement, and — because
+    the counterparty edited the document — classifies it **non-standard**, which selects the
+    non-standard approval route (RFI 3.1).
+    """
+    from .. import comment_service, workflow_service
+    from ..docx_engine import import_docx, summarise
+
+    c = _get_owned_contract(db, user, contract_id)
+    if apply and user.role not in _EDIT_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You cannot edit this contract.")
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="The uploaded file is empty.")
+    try:
+        result = import_docx(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+    summary = summarise(result)
+    out = schemas.DocxImportOut(
+        applied=False,
+        paragraphs=summary["paragraphs"], tables=summary["tables"],
+        insertions=summary["insertions"], deletions=summary["deletions"],
+        comment_count=summary["comments"], authors=summary["authors"],
+        has_revisions=summary["has_revisions"], warnings=summary["warnings"],
+        body=result.body,
+        changes=[schemas.DocxChangeOut(**vars(ch)) for ch in result.changes],
+        comments=[schemas.DocxCommentOut(**vars(cm)) for cm in result.comments],
+    )
+    if not apply:
+        return out
+
+    # Snapshot the current text before overwriting it — an import is a destructive edit and
+    # the previous wording must stay recoverable.
+    previous = list(db.scalars(
+        select(models.ContractVersion).where(models.ContractVersion.contract_id == c.id)
+    ).all())
+    version_no = max((v.version_no for v in previous), default=0) + 1
+    db.add(models.ContractVersion(
+        tenant_id=c.tenant_id, contract_id=c.id, version_no=version_no, body=c.body or "",
+        change_summary=f"Before Word import from {file.filename or 'document.docx'}",
+        created_by=user.id,
+    ))
+    c.body = result.body
+
+    # File the counterparty's comments against the agreement. Marked external (not
+    # internal-only) because they came FROM the counterparty — they are already outside.
+    for comment in result.comments:
+        anchor = f" (on: {comment.anchor_text[:120]})" if comment.anchor_text else ""
+        comment_service.create(
+            db, contract=c, author=user,
+            body=f"[{comment.author or 'Counterparty'}] {comment.text}{anchor}",
+            internal_only=False, kind="amendment", department="Counterparty",
+            ip=client_ip(request),
+        )
+
+    classified = False
+    if result.has_revisions:
+        before = c.is_non_standard
+        workflow_service.mark_non_standard(
+            db, c,
+            reason=(f"Counterparty returned {summary['insertions']} insertion(s) and "
+                    f"{summary['deletions']} deletion(s) via Word."),
+            actor=user, ip=client_ip(request),
+        )
+        classified = not before and c.is_non_standard
+
+    record(db, tenant_id=user.tenant_id, action="contract.docx_imported", actor=user,
+           object_type="contract", object_id=c.id, object_label=c.title,
+           ip=client_ip(request),
+           meta={"file": file.filename or "", "version_no": version_no, **summary})
+    db.commit()
+
+    out.applied = True
+    out.version_no = version_no
+    out.classified_non_standard = classified
+    return out
+
+
+# ---------------------------------------------------------------------------------------
+# Redline (Phase 3, item 8)
+# ---------------------------------------------------------------------------------------
+
+
+def _redline_body(db: Session, c: models.Contract, version_no: int | None) -> tuple[str, str, int | None]:
+    """(body, label, version_no). `None` means the live document."""
+    if version_no is None:
+        return c.body or "", "Current draft", None
+    v = db.scalar(
+        select(models.ContractVersion).where(
+            models.ContractVersion.contract_id == c.id,
+            models.ContractVersion.tenant_id == c.tenant_id,
+            models.ContractVersion.version_no == version_no,
+        )
+    )
+    if v is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"Version {version_no} not found.")
+    return v.body or "", f"v{v.version_no} — {v.change_summary or 'no summary'}", v.version_no
+
+
+@router.get("/{contract_id}/redline", response_model=schemas.RedlineOut)
+def get_redline(contract_id: str, base: int | None = None, compare: int | None = None,
+                db: Session = Depends(get_db),
+                user: models.User = Depends(get_current_user)) -> schemas.RedlineOut:
+    """Word-level comparison of two versions (or a version against the live draft).
+
+    With no parameters, compares the most recent saved version against the current draft —
+    "what has changed since the last checkpoint", which is the question actually being asked
+    most of the time.
+    """
+    from .. import redline_service
+
+    c = _get_owned_contract(db, user, contract_id)
+    if base is None and compare is None:
+        latest = db.scalar(
+            select(models.ContractVersion)
+            .where(models.ContractVersion.contract_id == c.id)
+            .order_by(desc(models.ContractVersion.version_no))
+        )
+        base = latest.version_no if latest is not None else None
+        if base is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail="There is nothing to compare against yet.")
+
+    base_body, base_label, base_no = _redline_body(db, c, base)
+    compare_body, compare_label, compare_no = _redline_body(db, c, compare)
+    result = redline_service.compare(base_body, compare_body)
+
+    return schemas.RedlineOut(
+        base_label=base_label, compare_label=compare_label,
+        base_version_no=base_no, compare_version_no=compare_no,
+        base_body=base_body, compare_body=compare_body,
+        **result.to_dict(),
+    )
+
+
+@router.post("/{contract_id}/redline/apply", response_model=schemas.ContractDetail)
+def apply_redline(contract_id: str, data: schemas.RedlineApplyIn, request: Request,
+                  db: Session = Depends(get_db),
+                  user: models.User = Depends(get_current_user)) -> schemas.ContractDetail:
+    """Take the accepted changes, leave the rest, and save the result as a new version.
+
+    The previous wording is snapshotted first: applying a redline is a destructive edit and
+    what it replaced has to stay recoverable.
+    """
+    from .. import redline_service
+    from ..redline_service import RedlineError
+
+    c = _get_owned_contract(db, user, contract_id)
+    if user.role not in _EDIT_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You cannot edit this contract.")
+    if c.status not in ("draft", "in_review", "changes_requested"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An agreement can only be redlined while it is still being negotiated.",
+        )
+
+    base_body, _base_label, _bn = _redline_body(db, c, data.base_version_no)
+    compare_body, _compare_label, _cn = _redline_body(db, c, data.compare_version_no)
+    result = redline_service.compare(base_body, compare_body)
+    try:
+        accepted = redline_service.validate_selection(result, data.accept)
+    except RedlineError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+    merged = redline_service.apply(base_body, compare_body, accepted)
+
+    previous = db.scalars(
+        select(models.ContractVersion).where(models.ContractVersion.contract_id == c.id)
+    ).all()
+    version_no = max((v.version_no for v in previous), default=0) + 1
+    db.add(models.ContractVersion(
+        tenant_id=c.tenant_id, contract_id=c.id, version_no=version_no, body=c.body or "",
+        change_summary=redline_service.summarise(result, accepted=accepted),
+        created_by=user.id,
+    ))
+    c.body = merged
+
+    record(db, tenant_id=user.tenant_id, action="contract.redline_applied", actor=user,
+           object_type="contract", object_id=c.id, object_label=c.title,
+           ip=client_ip(request),
+           meta={"accepted": len(accepted), "offered": len(result.changes),
+                 "added": result.added, "removed": result.removed,
+                 "version_no": version_no})
+    db.commit()
+    db.refresh(c)
+    return _detail(db, c)
+
+
+@router.post("/{contract_id}/redline/comment", response_model=schemas.CommentOut,
+             status_code=status.HTTP_201_CREATED)
+def comment_on_change(contract_id: str, data: schemas.RedlineCommentIn, request: Request,
+                      db: Session = Depends(get_db),
+                      user: models.User = Depends(get_current_user)) -> schemas.CommentOut:
+    """Start a thread against one proposed change.
+
+    Anchored to a character range so the discussion stays attached to the wording it is about
+    rather than becoming a general comment nobody can place three revisions later.
+    """
+    from .. import comment_service
+
+    c = _get_owned_contract(db, user, contract_id)
+    if data.anchor_end < data.anchor_start:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="That is not a valid anchor.")
+    comment = comment_service.create(
+        db, contract=c, author=user, body=data.body,
+        internal_only=data.internal_only, kind="amendment",
+        anchor_start=data.anchor_start, anchor_end=data.anchor_end,
+        ip=client_ip(request),
+    )
+    db.commit()
+    db.refresh(comment)
+    return schemas.CommentOut.model_validate(comment)
+
+
+# ---------------------------------------------------------------------------------------
+# Sign-off readiness pack (Phase 4, item 10)
+# ---------------------------------------------------------------------------------------
+
+
+@router.get("/{contract_id}/readiness", response_model=schemas.ReadinessOut)
+def readiness(contract_id: str, db: Session = Depends(get_db),
+              user: models.User = Depends(get_current_user)) -> schemas.ReadinessOut:
+    """Everything a signatory needs before committing, in one answer."""
+    from .. import readiness as readiness_service
+
+    c = _get_owned_contract(db, user, contract_id)
+    return schemas.ReadinessOut(**readiness_service.build(db, c))
+
+
+@router.get("/{contract_id}/readiness.pdf")
+def readiness_pdf(contract_id: str, db: Session = Depends(get_db),
+                  user: models.User = Depends(get_current_user)) -> StreamingResponse:
+    """The same assessment as a PDF, for the signatory who wants it on paper or in a file."""
+    import io as _io
+
+    from .. import pdf as pdf_render
+    from .. import readiness as readiness_service
+
+    c = _get_owned_contract(db, user, contract_id)
+    tenant = db.get(models.Tenant, user.tenant_id)
+    pack = readiness_service.build(db, c)
+    payload = pdf_render.render_readiness_pack_bytes(
+        contract=c, org_name=(tenant.name if tenant else "Workspace"), pack=pack,
+    )
+    name = f"{c.reference_no or 'agreement'}-readiness.pdf".replace("/", "_")
+    return StreamingResponse(
+        _io.BytesIO(payload), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+# ---------------------------------------------------------------------------------------
+# AI assist (Phase 3, item 7)
+# ---------------------------------------------------------------------------------------
+
+
+@router.get("/{contract_id}/ai/suggestions", response_model=list[schemas.ClauseSuggestionOut])
+def clause_suggestions(contract_id: str, db: Session = Depends(get_db),
+                       user: models.User = Depends(get_current_user)) -> list[schemas.ClauseSuggestionOut]:
+    """Approved clauses this draft is missing, ranked and explained.
+
+    Grounded in the library and the playbook, not generated: every suggestion cites why, and
+    the same draft always produces the same list.
+    """
+    from .. import ai_service
+
+    c = _get_owned_contract(db, user, contract_id)
+    return [schemas.ClauseSuggestionOut(**s) for s in ai_service.suggest_clauses(db, c)]
+
+
+@router.post("/{contract_id}/ai/capture", response_model=schemas.ExtractionReviewOut,
+             status_code=status.HTTP_201_CREATED)
+async def ai_capture(contract_id: str, request: Request, file: UploadFile = File(...),
+                     db: Session = Depends(get_db),
+                     user: models.User = Depends(get_current_user)) -> schemas.ExtractionReviewOut:
+    """Extract metadata from a document **for confirmation**. Writes nothing to the contract."""
+    from .. import ai_service
+
+    c = _get_owned_contract(db, user, contract_id)
+    if user.role not in _EDIT_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You cannot edit this contract.")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="The uploaded file is empty.")
+    review = ai_service.capture(
+        db, c, file_bytes=raw, file_name=file.filename or "document",
+        content_type=file.content_type or "", actor=user, ip=client_ip(request),
+    )
+    db.commit()
+    db.refresh(review)
+    return schemas.ExtractionReviewOut(**ai_service.presentable(db, review, c))
+
+
+@router.get("/{contract_id}/ai/captures", response_model=list[schemas.ExtractionReviewOut])
+def list_captures(contract_id: str, db: Session = Depends(get_db),
+                  user: models.User = Depends(get_current_user)) -> list[schemas.ExtractionReviewOut]:
+    from .. import ai_service
+
+    c = _get_owned_contract(db, user, contract_id)
+    rows = db.scalars(
+        select(models.ExtractionReview)
+        .where(models.ExtractionReview.contract_id == c.id,
+               models.ExtractionReview.tenant_id == user.tenant_id)
+        .order_by(desc(models.ExtractionReview.created_at))
+    ).all()
+    return [schemas.ExtractionReviewOut(**ai_service.presentable(db, r, c)) for r in rows]
+
+
+@router.post("/{contract_id}/ai/captures/{review_id}/apply",
+             response_model=schemas.ContractDetail)
+def apply_capture(contract_id: str, review_id: str, data: schemas.ApplyCaptureIn,
+                  request: Request, db: Session = Depends(get_db),
+                  user: models.User = Depends(get_current_user)) -> schemas.ContractDetail:
+    """Write the fields a person confirmed. Nothing else."""
+    from .. import ai_service
+    from ..ai_service import AiError
+
+    c = _get_owned_contract(db, user, contract_id)
+    if user.role not in _EDIT_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You cannot edit this contract.")
+    review = db.get(models.ExtractionReview, review_id)
+    if review is None or review.tenant_id != user.tenant_id or review.contract_id != c.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Extraction not found")
+    try:
+        ai_service.apply_capture(db, review, c, data.accept, actor=user, ip=client_ip(request))
+    except AiError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    db.commit()
+    db.refresh(c)
+    return _detail(db, c)
+
+
+@router.post("/{contract_id}/ai/captures/{review_id}/discard",
+             status_code=status.HTTP_204_NO_CONTENT)
+def discard_capture(contract_id: str, review_id: str, request: Request,
+                    db: Session = Depends(get_db),
+                    user: models.User = Depends(get_current_user)) -> None:
+    from .. import ai_service
+    from ..ai_service import AiError
+
+    c = _get_owned_contract(db, user, contract_id)
+    review = db.get(models.ExtractionReview, review_id)
+    if review is None or review.tenant_id != user.tenant_id or review.contract_id != c.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Extraction not found")
+    try:
+        ai_service.discard(db, review, actor=user, ip=client_ip(request))
+    except AiError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    db.commit()

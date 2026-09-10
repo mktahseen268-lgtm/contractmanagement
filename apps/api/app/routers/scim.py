@@ -12,7 +12,6 @@ This is a real HTTP API — testable end-to-end without an IdP by calling it wit
 
 from __future__ import annotations
 
-import datetime as dt
 import hmac
 import secrets
 

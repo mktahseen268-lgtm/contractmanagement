@@ -82,19 +82,25 @@ def _body_flowables(md: str, st: dict) -> list:
     for raw in (md or "").splitlines():
         s = raw.strip()
         if not s:
-            flush(); continue
+            flush()
+            continue
         if s.startswith("### "):
-            flush(); out.append(Paragraph(_inline(s[4:]), st["h3"]))
+            flush()
+            out.append(Paragraph(_inline(s[4:]), st["h3"]))
         elif s.startswith("## "):
-            flush(); out.append(Paragraph(_inline(s[3:]), st["h2"]))
+            flush()
+            out.append(Paragraph(_inline(s[3:]), st["h2"]))
         elif s.startswith("# "):
-            flush(); out.append(Paragraph(_inline(s[2:]), st["h1"]))
+            flush()
+            out.append(Paragraph(_inline(s[2:]), st["h1"]))
         elif s.startswith(("- ", "* ", "• ")):
             bullets.append(s[2:])
         elif set(s) <= {"-", "_", "="} and len(s) >= 3:
-            flush(); out.append(HRFlowable(width="100%", color=_LINE, spaceBefore=6, spaceAfter=8))
+            flush()
+            out.append(HRFlowable(width="100%", color=_LINE, spaceBefore=6, spaceAfter=8))
         else:
-            flush(); out.append(Paragraph(_inline(s), st["body"]))
+            flush()
+            out.append(Paragraph(_inline(s), st["body"]))
     flush()
     if not out:
         out.append(Paragraph("<i>(This contract has no document body yet.)</i>", st["body"]))
@@ -286,7 +292,8 @@ def stamp_tabs_on_pdf(pdf_bytes: bytes, tabs: list[dict]) -> bytes:
         # build an overlay matching this page's size
         mb = base.mediabox
         try:
-            pw = float(mb.width); ph = float(mb.height)
+            pw = float(mb.width)
+            ph = float(mb.height)
         except Exception:  # noqa: BLE001
             pw, ph = 595.0, 842.0  # A4 default points
         ov_buf = io.BytesIO()
@@ -458,6 +465,233 @@ def render_certificate_bytes(*, envelope, contract, org_name: str, recipients: l
     story.append(et)
     story.append(Spacer(1, 14))
     story.append(Paragraph(f"Issued by {org_name} via the Contract Management platform. This certificate evidences the electronic signing of the document identified above.", st["small"]))
+
+    doc.build(story, onFirstPage=_decorate, onLaterPages=_decorate)
+    return buf.getvalue()
+
+
+def render_readiness_pack_bytes(*, contract, org_name: str, pack: dict) -> bytes:
+    """The sign-off readiness pack.
+
+    Leads with blockers, not with a status summary: the failure this document prevents is an
+    authorised signatory executing an agreement whose deviations nobody resolved. Putting the
+    approval history first would bury the one thing they need to see.
+    """
+    st = _styles()
+    buf = io.BytesIO()
+
+    def _decorate(canvas, doc):
+        canvas.saveState()
+        w, h = A4
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(_INK3)
+        canvas.drawString(18 * mm, h - 12 * mm, org_name[:80])
+        canvas.drawRightString(w - 18 * mm, h - 12 * mm,
+                               dt.datetime.now().strftime("Generated %d %b %Y %H:%M"))
+        canvas.setStrokeColor(_LINE)
+        canvas.line(18 * mm, h - 14 * mm, w - 18 * mm, h - 14 * mm)
+        canvas.drawCentredString(w / 2, 12 * mm, f"Sign-off readiness pack \u00b7 Page {doc.page}")
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm,
+                            topMargin=22 * mm, bottomMargin=20 * mm,
+                            title="Sign-off readiness pack")
+
+    ready = pack.get("ready")
+    story: list = [
+        Paragraph("Sign-off readiness pack", st["title"]),
+        Spacer(1, 4),
+        Paragraph(
+            f"{_inline(contract.title or 'Contract')} &nbsp;&nbsp;"
+            f"<font color='#6B7280'>{_inline(contract.reference_no or '')}</font>",
+            st["body"],
+        ),
+        Spacer(1, 10),
+    ]
+
+    verdict = ("READY FOR SIGNATURE" if ready else "NOT READY \u2014 SEE BLOCKERS BELOW")
+    verdict_colour = colors.HexColor("#047857") if ready else colors.HexColor("#B91C1C")
+    banner = Table([[Paragraph(f"<b>{verdict}</b>", st["body"])]], colWidths=[174 * mm])
+    banner.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 1, verdict_colour),
+        ("TEXTCOLOR", (0, 0), (-1, -1), verdict_colour),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story += [banner, Spacer(1, 12)]
+
+    # --- 1. Blockers -------------------------------------------------------------------
+    if pack.get("blockers"):
+        story.append(Paragraph("1. Blockers", st["h2"]))
+        for item in pack["blockers"]:
+            story.append(Paragraph(f"\u2022 {_inline(item)}", st["body"]))
+        story.append(Spacer(1, 10))
+
+    if pack.get("notes"):
+        story.append(Paragraph("Worth knowing", st["h2"]))
+        for item in pack["notes"]:
+            story.append(Paragraph(f"\u2022 {_inline(item)}", st["body"]))
+        story.append(Spacer(1, 10))
+
+    # --- 2. Approvals ------------------------------------------------------------------
+    story.append(Paragraph("2. Approvals", st["h2"]))
+    decisions = pack.get("decisions") or []
+    if not decisions:
+        story.append(Paragraph("No approval decisions recorded.", st["body"]))
+    else:
+        rows = [["Stage", "Step", "Decided by", "Decision", "When", "SLA"]]
+        for d in decisions:
+            if d["on_time"] is None:
+                sla = "\u2014"
+            else:
+                sla = "on time" if d["on_time"] else "late"
+            if d["escalated"]:
+                sla += " (escalated)"
+            rows.append([
+                str(d["stage"]), _inline(d["name"])[:38], _inline(d["who"])[:26],
+                d["decision"], d["at"], sla,
+            ])
+        table = Table(rows, colWidths=[14 * mm, 46 * mm, 34 * mm, 26 * mm, 30 * mm, 24 * mm],
+                      repeatRows=1)
+        table.setStyle(TableStyle([
+            ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 8),
+            ("FONT", (0, 1), (-1, -1), "Helvetica", 8),
+            ("TEXTCOLOR", (0, 0), (-1, 0), _INK3),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.5, _LINE),
+            ("LINEBELOW", (0, 1), (-1, -2), 0.25, _LINE),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(table)
+    story.append(Spacer(1, 12))
+
+    # --- 3. Provenance -----------------------------------------------------------------
+    story.append(Paragraph("3. Where this wording came from", st["h2"]))
+    prov = pack.get("provenance") or {}
+    info = [
+        ("Source", str(prov.get("source", "\u2014"))),
+        ("Template", str(prov.get("template", "\u2014"))),
+        ("Template revision", str(prov.get("template_version", "\u2014"))),
+    ]
+    edited = prov.get("edited_since_generation")
+    if edited is not None:
+        info.append(("Edited after generation", "Yes" if edited else "No"))
+
+    policy = pack.get("policy") or {}
+    info.append(("Policy checks run", str(policy.get("checked", 0))))
+    info.append(("Deviations", str(policy.get("deviation_count", 0))))
+
+    meta = Table([[Paragraph(_inline(k), st["label"]), Paragraph(_inline(v), st["val"])]
+                  for k, v in info],
+                 colWidths=[52 * mm, 122 * mm])
+    meta.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    story += [meta, Spacer(1, 8)]
+
+    clauses = prov.get("clauses") or []
+    if clauses:
+        rows = [["Clause", "Version used", "Current version"]]
+        for c in clauses:
+            rows.append([
+                _inline(c.get("title", ""))[:60],
+                f"v{c.get('used')}" if c.get("used") else "\u2014",
+                (f"v{c.get('current')} \u2014 revised since"
+                 if c.get("stale") else f"v{c.get('current')}" if c.get("current") else "\u2014"),
+            ])
+        table = Table(rows, colWidths=[94 * mm, 40 * mm, 40 * mm], repeatRows=1)
+        table.setStyle(TableStyle([
+            ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 8),
+            ("FONT", (0, 1), (-1, -1), "Helvetica", 8),
+            ("TEXTCOLOR", (0, 0), (-1, 0), _INK3),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.5, _LINE),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(table)
+
+    doc.build(story, onFirstPage=_decorate, onLaterPages=_decorate)
+    return buf.getvalue()
+
+
+def render_training_certificate(*, user, course, progress) -> bytes:
+    """A training certificate (Phase 9, item 3).
+
+    Every fact that qualifies the certificate is printed on it: the certificate number, when it
+    was earned, the score, and **when it stops being valid**. A certificate that shows only the
+    achievement gets presented years later as though it were current, which is how a training
+    register turns into fiction. The expiry is set in the same size as the award, not in a
+    footnote.
+    """
+    st = _styles()
+    buf = io.BytesIO()
+    expires = getattr(progress, "expires_at", None)
+
+    def _decorate(canvas, doc):
+        canvas.saveState()
+        w, h = A4
+        canvas.setStrokeColor(_LINE)
+        canvas.setLineWidth(2)
+        canvas.rect(14 * mm, 14 * mm, w - 28 * mm, h - 28 * mm)
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(_INK3)
+        canvas.drawCentredString(
+            w / 2, 18 * mm,
+            "Verify this certificate against the training record in the contract management "
+            "system.")
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4, leftMargin=26 * mm, rightMargin=26 * mm,
+        topMargin=40 * mm, bottomMargin=26 * mm, title="Certificate of Completion")
+
+    centred = ParagraphStyle("cert_centre", parent=st["val"], alignment=TA_CENTER, fontSize=11,
+                             leading=16)
+    name_style = ParagraphStyle("cert_name", parent=st["title"], alignment=TA_CENTER,
+                                fontSize=22, leading=28, spaceBefore=6, spaceAfter=6)
+    course_style = ParagraphStyle("cert_course", parent=st["h2"], alignment=TA_CENTER,
+                                  fontSize=15, leading=20)
+
+    story: list = [
+        Paragraph("Certificate of Completion", ParagraphStyle(
+            "cert_title", parent=st["title"], alignment=TA_CENTER, fontSize=16)),
+        Spacer(1, 18),
+        Paragraph("This certifies that", centred),
+        Paragraph(_inline(user.name or user.email), name_style),
+        Paragraph("has completed", centred),
+        Spacer(1, 6),
+        Paragraph(_inline(course.title), course_style),
+        Spacer(1, 22),
+        HRFlowable(width="60%", color=_LINE, hAlign="CENTER", spaceAfter=18),
+    ]
+
+    facts = [
+        ("Certificate number", progress.certificate_no or "—"),
+        ("Awarded", _fmt_dt(progress.passed_at)),
+        ("Score", f"{progress.best_score}% (pass mark {course.pass_mark}%)"),
+        ("Valid until", _fmt_dt(expires) if expires else "No expiry set"),
+    ]
+    rows = [[Paragraph(k.upper(), st["label"]), Paragraph(_inline(str(v)), st["val"])]
+            for k, v in facts]
+    table = Table(rows, colWidths=[46 * mm, 80 * mm], hAlign="CENTER")
+    table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.4, _LINE),
+    ]))
+    story.append(table)
+
+    if expires:
+        story.append(Spacer(1, 16))
+        story.append(Paragraph(
+            "This certification lapses on the date above. After that it is no longer evidence "
+            "of training on the current process, and the course must be retaken.", centred))
 
     doc.build(story, onFirstPage=_decorate, onLaterPages=_decorate)
     return buf.getvalue()

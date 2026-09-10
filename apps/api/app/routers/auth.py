@@ -67,6 +67,13 @@ def _user_from_mfa_token(db: Session, mfa_token: str) -> models.User:
 
 @router.post("/register", response_model=schemas.AuthOut, status_code=status.HTTP_201_CREATED)
 def register(data: schemas.RegisterIn, request: Request, response: Response, db: Session = Depends(get_db)) -> schemas.AuthOut:
+    # Self-service signup creates a *new tenant*, which must not be possible in the
+    # single-tenant on-prem profile. Accounts there come from SSO/SCIM or an admin invite.
+    if not settings.registration_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Self-service registration is disabled on this deployment. Contact your administrator.",
+        )
     email = data.email.lower()
     if db.scalar(select(models.User).where(func.lower(models.User.email) == email)) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An account with this email already exists.")
@@ -187,7 +194,25 @@ def refresh(request: Request, response: Response, db: Session = Depends(get_db))
     if status_ != "ok" or new is None or new_raw is None:
         svc.clear_refresh_cookie(response)
         if status_ == "reuse":
-            db.commit()  # persist the chain revocation
+            # Presenting an already-rotated refresh token is the strongest signal of token
+            # theft this system has, and it was previously invisible: the chain was revoked,
+            # the caller got a 401, and nothing reached the audit log or the SIEM. A failed
+            # password attempt was recorded and an actual stolen session was not.
+            #
+            # `s` is the session the token belonged to, read before rotation — it is the only
+            # thing tying the event to a tenant and a user, since the token itself is now dead.
+            if s is not None:
+                victim = db.get(models.User, s.user_id)
+                record(
+                    db, tenant_id=s.tenant_id, action="auth.session.reuse_detected",
+                    actor=victim, object_type="session", object_id=s.id,
+                    object_label=(victim.email if victim else ""), ip=client_ip(request),
+                    meta={"chain_id": s.chain_id,
+                          "user_agent": (request.headers.get("user-agent", "") or "")[:200],
+                          "note": "an already-rotated refresh token was presented; "
+                                  "every session in the chain was revoked"},
+                )
+            db.commit()  # persist the chain revocation and the audit entry
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Suspicious activity detected — all sessions for this account were signed out. Please sign in again.")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Your session has expired — please sign in again.")
     user = db.get(models.User, new.user_id)
@@ -229,8 +254,19 @@ _SSO_COOKIE = "cm_sso_state"
 
 @router.get("/sso/config", response_model=dict)
 def sso_config() -> dict:
-    """Lets the web app decide whether to show a 'Sign in with SSO' button."""
-    return {"enabled": sso.is_enabled()}
+    """Public, unauthenticated config for the sign-in screen: whether to show the
+    'Sign in with SSO' button, and whether self-service registration exists at all.
+
+    `registration_enabled` is false in the single-tenant on-prem profile, where accounts come
+    from SSO/SCIM or an admin invite. The web app hides the register link and the
+    workspace-switching UI accordingly — the server-side gate in `/auth/register` is the
+    actual enforcement.
+    """
+    return {
+        "enabled": sso.is_enabled(),
+        "registration_enabled": settings.registration_enabled,
+        "deployment_mode": settings.deployment_mode,
+    }
 
 
 @router.get("/sso/login")
@@ -419,3 +455,175 @@ def mfa_regenerate_recovery(data: schemas.PasswordIn, request: Request, user: mo
     record(db, tenant_id=user.tenant_id, action="auth.mfa_recovery_regenerated", actor=user, object_type="user", object_id=user.id, object_label=user.name, ip=client_ip(request))
     db.commit()
     return schemas.RecoveryCodesOut(recovery_codes=codes)
+
+
+def _frontend() -> str:
+    """Where to send the browser back to. Same source the OIDC callback uses."""
+    return settings.frontend_url.rstrip("/")
+
+
+# ---------------------------------------------------------------------------------------
+# SAML 2.0 (Phase 7, item 1)
+# ---------------------------------------------------------------------------------------
+
+
+@router.get("/saml/metadata")
+def saml_metadata() -> Response:
+    """SP metadata for the IdP administrator to import.
+
+    Generated rather than hand-maintained: an entity ID that disagrees with what the service
+    actually uses is the most common reason a SAML integration fails on the first attempt.
+    """
+    from .. import saml
+
+    if not saml.is_enabled():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SAML is not configured.")
+    return Response(content=saml.metadata_xml(), media_type="application/xml")
+
+
+@router.get("/saml/login")
+def saml_login(relay_state: str = "") -> RedirectResponse:
+    """SP-initiated login: send the browser to the IdP.
+
+    The request id is carried in `RelayState` rather than a cookie: the IdP round trip is
+    cross-site, and a cookie that survives it has to be `SameSite=None`, which is a worse
+    trade than echoing an unguessable id we then check on the way back.
+    """
+    from .. import saml
+
+    if not saml.is_enabled():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SAML is not configured.")
+    url, request_id = saml.build_authn_request(relay_state=relay_state)
+    separator = "&" if "RelayState=" in url else "&"
+    if not relay_state:
+        url += f"{separator}RelayState={request_id}"
+    return RedirectResponse(url, status_code=status.HTTP_302_FOUND)
+
+
+@router.post("/saml/acs")
+async def saml_acs(request: Request, db: Session = Depends(get_db)) -> RedirectResponse:
+    """Assertion Consumer Service — where the IdP posts the signed assertion.
+
+    Handles both SP-initiated (we sent a request, `RelayState` carries its id) and
+    IdP-initiated (the user started at the IdP portal, there is no request to match) flows.
+
+    Failures redirect to the login page with a generic marker rather than rendering the
+    reason: telling an unauthenticated caller *why* their assertion was rejected is a probing
+    oracle. The detail goes to the audit log.
+    """
+    from .. import saml
+    from ..saml import SamlError
+
+    if not saml.is_enabled():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SAML is not configured.")
+
+    form = await request.form()
+    raw = str(form.get("SAMLResponse") or "")
+    relay_state = str(form.get("RelayState") or "")
+    if not raw:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="No SAML response was posted.")
+
+    expected = relay_state if relay_state.startswith("_") else ""
+    try:
+        identity = saml.parse_response(raw, expected_request_id=expected)
+    except SamlError as e:
+        record(db, tenant_id=settings.saml_default_tenant_id or "", action="auth.saml_rejected",
+               actor=None, object_type="user", ip=client_ip(request),
+               meta={"reason": str(e)[:300]})
+        db.commit()
+        return RedirectResponse(f"{_frontend()}/login?sso_error=saml_rejected",
+                                status_code=status.HTTP_302_FOUND)
+
+    user = _provision_saml_user(db, identity, ip=client_ip(request))
+    raw, _sid = svc.create_session(db, user, request)
+    record(db, tenant_id=user.tenant_id, action="auth.login.saml", actor=user,
+           object_type="user", object_id=user.id, object_label=user.name,
+           ip=client_ip(request))
+    metrics.record_login("saml")
+    db.commit()
+
+    # Same shape as the OIDC callback above: land on the app, carry the session in the
+    # httpOnly refresh cookie, and let the boot flow exchange it for an access token. Putting
+    # a token in the URL would leak it into server logs, browser history and the Referer of
+    # whatever the user clicks next.
+    target = relay_state if relay_state.startswith("/") else "/dashboard"
+    response = RedirectResponse(f"{_frontend()}{target}", status_code=status.HTTP_302_FOUND)
+    svc.set_refresh_cookie(response, raw)
+    return response
+
+
+@router.get("/saml/sls")
+def saml_sls(request: Request) -> RedirectResponse:
+    """Single logout. Redirects to the IdP when it has an SLO endpoint, otherwise home."""
+    from .. import saml
+
+    if not saml.is_enabled():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SAML is not configured.")
+    response = RedirectResponse(saml.logout_redirect(name_id="", session_index=""),
+                                status_code=status.HTTP_302_FOUND)
+    svc.clear_refresh_cookie(response)
+    return response
+
+
+def _provision_saml_user(db: Session, identity, *, ip: str = "") -> models.User:
+    """Match the assertion to a user, creating one on first sign-in.
+
+    Matched by email across the configured tenant. A SAML user is never given a password —
+    there is nothing to phish, and the IdP stays the only way in.
+    """
+    from .. import saml
+
+    tenant_id = settings.saml_default_tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail="SAML has no default workspace configured.")
+
+    user = db.scalar(select(models.User).where(
+        models.User.tenant_id == tenant_id,
+        func.lower(models.User.email) == identity.email.lower()))
+    if user is not None:
+        if identity.name and user.name != identity.name:
+            user.name = identity.name[:200]
+        record(db, tenant_id=tenant_id, action="auth.saml_login", actor=user,
+               object_type="user", object_id=user.id, object_label=user.email, ip=ip,
+               meta={"name_id": identity.name_id, "groups": identity.groups[:10]})
+        return user
+
+    user = models.User(
+        tenant_id=tenant_id, email=identity.email, name=identity.name or identity.email,
+        password_hash="", role=saml.role_for(identity), is_active=True,
+    )
+    db.add(user)
+    db.flush()
+    record(db, tenant_id=tenant_id, action="auth.saml_provisioned", actor=user,
+           object_type="user", object_id=user.id, object_label=user.email, ip=ip,
+           meta={"name_id": identity.name_id, "role": user.role,
+                 "groups": identity.groups[:10]})
+    return user
+
+
+@router.get("/saml/config", response_model=schemas.SamlConfigOut)
+def saml_config() -> schemas.SamlConfigOut:
+    """What the login page and the SSO admin screen need to know.
+
+    Public and unauthenticated, like `/auth/sso/config`: the login page has to know whether to
+    show a "Sign in with SAML" button before anybody has signed in. It reports URLs and
+    on/off, never the IdP certificate or any secret.
+    """
+    from .. import saml
+
+    enabled = saml.is_enabled()
+    return schemas.SamlConfigOut(
+        enabled=enabled,
+        entity_id=saml.entity_id() if enabled else "",
+        acs_url=saml.acs_url() if enabled else "",
+        sls_url=saml.sls_url() if enabled else "",
+        metadata_url=f"{settings.saml_sp_base_url}/auth/saml/metadata" if enabled else "",
+        idp_sso_url=settings.saml_idp_sso_url if enabled else "",
+        idp_slo_url=settings.saml_idp_slo_url if enabled else "",
+        login_url=f"{settings.saml_sp_base_url}/auth/saml/login" if enabled else "",
+        default_role=settings.saml_default_role,
+        group_role_map=dict(settings.saml_group_role_map or {}),
+        certificate_configured=bool(settings.saml_idp_certificate),
+    )

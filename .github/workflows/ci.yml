@@ -74,12 +74,158 @@ jobs:
       # Import smoke: catches import-time errors that pytest collection might mask.
       - run: cd apps/api && python -c "from app.main import app; print('import ok')"
       # Real test suite: lifecycle invariants, audit hash-chain, refresh-token reuse,
-      # signing-token hash storage, password policy. Runs against the live Postgres + Redis
-      # services declared above so RLS + JSONB + advisory-lock paths are exercised for real.
+      # signing-token hash storage, password policy, dialect seam, archive/purge retention.
+      # Runs against the live Postgres + Redis services so the JSONB and advisory-lock paths
+      # are exercised for real. NOTE: conftest builds the schema from SQLAlchemy metadata, so
+      # the RLS *DDL* is not executed here — the `migrations` job below does that.
       - run: cd apps/api && pytest -v --tb=short
         env:
           CM_TEST_DATABASE_URL: "postgresql+psycopg2://cm:cm@localhost:5432/cm"
           RATE_LIMIT_STORE: "redis"
+
+  # ------------------------------------------------------------------ migration DB matrix
+  # Phase 0 acceptance gate: every migration must apply, round-trip and leave a working
+  # tenant-isolation policy on each supported engine. This is the only job that executes the
+  # dialect-specific DDL in `apps/api/app/db_dialect.py` against a real server.
+  migrations:
+    name: Migrations (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: postgres
+            url: "postgresql+psycopg2://cm:cm@localhost:5432/cm"
+            extra: ""
+          - engine: mssql
+            url: "mssql+pyodbc://sa:Cm-Str0ng-Passw0rd@localhost:1433/master?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes"
+            extra: "apps/api/requirements-mssql.txt"
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_USER: cm, POSTGRES_PASSWORD: cm, POSTGRES_DB: cm }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env: { ACCEPT_EULA: "Y", MSSQL_SA_PASSWORD: "Cm-Str0ng-Passw0rd" }
+        ports: ["1433:1433"]
+    env:
+      ENV: "test"
+      AUTO_SEED: "false"
+      RUN_MIGRATIONS_ON_STARTUP: "false"
+      DATA_RESIDENCY_ENFORCED: "false"
+      SECRET_KEY: "ci-test-secret-key-32-bytes-long-aaaaaa"
+      DATABASE_URL: ${{ matrix.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PY_VERSION }}" }
+      - name: Install ODBC driver (mssql only)
+        if: matrix.engine == 'mssql'
+        run: |
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc             | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+          echo "deb [arch=amd64,signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main"             | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+      - run: pip install -r apps/api/requirements.txt
+      - run: if [ -n "${{ matrix.extra }}" ]; then pip install -r ${{ matrix.extra }}; fi
+      - name: Wait for the database
+        env:
+          WAIT_URL: ${{ matrix.url }}
+        run: |
+          python - <<'EOF'
+          import os, sys, time
+          import sqlalchemy as sa
+          url = os.environ["WAIT_URL"]
+          for attempt in range(60):
+              try:
+                  sa.create_engine(url).connect().close()
+                  print(f"database reachable after {attempt * 5}s")
+                  sys.exit(0)
+              except Exception as exc:
+                  last = exc
+                  time.sleep(5)
+          sys.exit(f"database never became reachable: {last}")
+          EOF
+      - name: alembic upgrade head
+        run: cd apps/api && alembic upgrade head
+      - name: Re-run (migrations must be idempotent)
+        run: cd apps/api && alembic upgrade head
+      - name: Downgrade round-trip
+        run: cd apps/api && alembic downgrade 0014_signature_methods && alembic upgrade head
+
+  # ------------------------------------------------------------------------- PKI on SoftHSM2
+  # The RFP requires HSM-protected keys at FIPS 140-2 Level 3. CI cannot have such a device,
+  # but SoftHSM2 speaks the same PKCS#11 API, so the real Pkcs11KeyStore code path is
+  # exercised for real here: keys generated inside the token, signatures computed inside the
+  # token, and the token refusing to export the private value.
+  pki-hsm:
+    name: PKI (SoftHSM2 / PKCS#11)
+    runs-on: ubuntu-latest
+    env:
+      ENV: "test"
+      AUTO_SEED: "false"
+      RUN_MIGRATIONS_ON_STARTUP: "false"
+      DATA_RESIDENCY_ENFORCED: "false"
+      SECRET_KEY: "ci-test-secret-key-32-bytes-long-aaaaaa"
+      HSM_LIBRARY_PATH: "/usr/lib/softhsm/libsofthsm2.so"
+      HSM_TOKEN_LABEL: "cm-test"
+      HSM_PIN: "1234"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PY_VERSION }}" }
+      - name: Install SoftHSM2 and initialise a token
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y softhsm2
+          sudo mkdir -p /var/lib/softhsm/tokens
+          sudo chown -R "$USER" /var/lib/softhsm
+          softhsm2-util --init-token --free --label cm-test --pin 1234 --so-pin 1234
+          softhsm2-util --show-slots | head -20
+      - run: pip install -r apps/api/requirements-dev.txt -r apps/api/requirements-pki.txt
+      - name: PKCS#11 keystore tests
+        run: cd apps/api && pytest tests/test_pki_hsm.py -v --tb=short
+      - name: PKI suite on the software keystore (regression guard)
+        run: cd apps/api && pytest tests/test_pki.py -q
+
+  # ---------------------------------------------------------------------------------- SBOM
+  # MMBL requires a Software Bill of Materials alongside the sworn undertaking that the
+  # PKI/eSignature engine is the bidder's own work. Published as build artefacts so the
+  # submission can attach the exact SBOM for the commit that was demonstrated.
+  sbom:
+    name: SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PY_VERSION }}" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}" }
+      - run: pip install cyclonedx-bom==4.6.1
+      - name: API SBOM
+        run: cyclonedx-py requirements apps/api/requirements.txt --output-format json --outfile sbom-api.json
+      - run: cd apps/web && npm ci
+      - name: Web SBOM
+        run: cd apps/web && npx --yes @cyclonedx/cyclonedx-npm@1.19.3 --output-format json --output-file ../../sbom-web.json
+      - name: Summarise
+        run: |
+          python - <<'EOF'
+          import json
+          for name in ("sbom-api.json", "sbom-web.json"):
+              with open(name) as fh:
+                  doc = json.load(fh)
+              print(f"{name}: {len(doc.get('components', []))} components, spec {doc.get('specVersion')}")
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: |
+            sbom-api.json
+            sbom-web.json
+          retention-days: 90
 
   # ---------------------------------------------------------------------- SAST + secrets
   sast:
@@ -146,9 +292,94 @@ jobs:
           ignore-unfixed: true
 
   # ---------------------------------------------------------------------- summary gate
+  # ------------------------------------------------------------------------------- DAST
+  # Phase 8, item 15. A dynamic scan against a running instance — the half that SAST cannot
+  # do, because a missing header or an error page that says too much only exists at runtime.
+  #
+  # Failing on WARN and above is deliberate, and so is `.zap/rules.tsv`: every rule that does
+  # not fail the build is listed there with the reason it does not. A scan tuned by lowering
+  # the threshold is a scan nobody reads, and a scan that never fails is the same thing.
+  dast:
+    name: DAST (ZAP baseline)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_USER: cm, POSTGRES_PASSWORD: cm, POSTGRES_DB: cm }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: "postgresql+psycopg2://cm:cm@localhost:5432/cm"
+      RUN_MIGRATIONS_ON_STARTUP: "true"
+      AUTO_SEED: "true"
+      CELERY_TASK_ALWAYS_EAGER: "true"
+      EMAIL_BACKEND: "console"
+      STORAGE_BACKEND: "local"
+      RATE_LIMIT_STORE: "memory"
+      ENV: "test"
+      SECRET_KEY: "ci-test-secret-key-32-bytes-long-aaaaaa"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PY_VERSION }}", cache: "pip", cache-dependency-path: apps/api/requirements.txt }
+      - run: pip install -r apps/api/requirements.txt
+      - name: Start the API
+        run: |
+          cd apps/api
+          nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/api.log 2>&1 &
+          # Wait for readiness, not liveness: /healthz/ready only answers once migrations have
+          # run, and scanning a half-migrated app produces findings about a state that never
+          # reaches production.
+          timeout 120 sh -c 'until curl -sf http://localhost:8000/healthz/ready; do sleep 2; done'             || { echo "API did not come up:"; cat /tmp/api.log; exit 1; }
+      - name: ZAP baseline
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: http://localhost:8000
+          rules_file_name: .zap/rules.tsv
+          # -a includes the alpha passive rules; -I stops ZAP exiting 0 on warnings, so an
+          # untriaged finding turns the build red instead of scrolling past in the log.
+          cmd_options: "-a"
+          allow_issue_writing: false
+      - name: API log
+        if: always()
+        run: cat /tmp/api.log || true
+
+  # -------------------------------------------------------------------------------- a11y
+  # Phase 9, item 5. axe-core against the surfaces a customer or a keyboard user actually hits.
+  #
+  # Serious and critical impacts fail; moderate and minor are printed. The known-open items in
+  # docs/32-accessibility.md §3 sit at moderate, and a job that is red on its first run gets
+  # disabled in its first week. As each of those closes, its rule moves into the failing set.
+  #
+  # No API service: these are the signed-out and error-state surfaces, which is deliberate —
+  # an expired signing link is what a real customer most often lands on, and an error state
+  # nobody can read is an error state nobody can act on.
+  a11y:
+    name: Accessibility (axe)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: "npm", cache-dependency-path: apps/web/package-lock.json }
+      - run: cd apps/web && npm ci
+      - run: cd apps/web && npx playwright install --with-deps chromium
+      - run: cd apps/web && npm run test:a11y
+        env:
+          CI: "true"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report/
+          retention-days: 7
+
   gate:
     name: All checks passed
     runs-on: ubuntu-latest
-    needs: [lint, test-api, sast, secrets-scan, deps-audit, build-image]
+    needs: [lint, test-api, migrations, pki-hsm, sbom, sast, secrets-scan, deps-audit, dast, a11y, build-image]
     steps:
       - run: echo "CI green."

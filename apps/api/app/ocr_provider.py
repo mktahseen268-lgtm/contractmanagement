@@ -33,10 +33,14 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import json
+import logging
 import random
 from abc import ABC, abstractmethod
 
 from .config import settings
+
+log = logging.getLogger("uvicorn.error")
+
 
 # Fields we ask any provider to populate. Kept here so the prompt + the stub agree on the schema.
 EXTRACTION_FIELDS = ["title", "type", "counterparty", "effective_date", "end_date", "value", "currency", "renewal_type", "governing_law"]
@@ -187,9 +191,134 @@ def _parse_json_object(text: str) -> dict:
 # ---------------------------------------------------------------- factory ----
 
 
+# ------------------------------------------------------- local, on-prem model ----
+
+
+def _plain_text(file_bytes: bytes | None, file_name: str) -> str:
+    """Best-effort text from an uploaded document.
+
+    PDFs go through pypdf (already a dependency for the signing pipeline); .docx through the
+    Phase 3 importer; anything else is decoded as text. A scanned image needs a real OCR step,
+    which is the operator's to supply — this returns nothing rather than pretending.
+    """
+    if not file_bytes:
+        return ""
+    lowered = (file_name or "").lower()
+    try:
+        if lowered.endswith(".pdf"):
+            import io as _io
+
+            from pypdf import PdfReader
+
+            reader = PdfReader(_io.BytesIO(file_bytes))
+            return "\n\n".join((page.extract_text() or "") for page in reader.pages)
+        if lowered.endswith(".docx"):
+            from .docx_engine import import_docx
+
+            return import_docx(file_bytes).body
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not read %s for extraction: %s", file_name, e)
+        return ""
+    try:
+        return file_bytes.decode("utf-8", errors="ignore")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+class LocalOcrProvider(OcrProvider):
+    """Extraction against an OpenAI-compatible endpoint hosted inside the deployment.
+
+    This is the MMBL-compliant provider: vLLM, Ollama or anything else speaking
+    `/chat/completions`, running on the bank's own hardware. Nothing leaves the network.
+
+    Uses `urllib` rather than an SDK on purpose — the wire format is three JSON fields, and a
+    dependency whose main contribution is a `base_url` parameter is a dependency to patch.
+    """
+
+    name = "local"
+
+    def __init__(self, base_url: str, model: str, api_key: str = "", timeout: int = 120):
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.api_key = api_key
+        self.timeout = timeout
+
+    def _ask(self, prompt: str, document_text: str) -> str:
+        import json as _json
+        import urllib.request
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": document_text[:120_000]},
+            ],
+            "temperature": 0,
+        }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        request = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=_json.dumps(payload).encode("utf-8"),
+            headers=headers,
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:  # noqa: S310
+            body = _json.loads(response.read().decode("utf-8"))
+        return body["choices"][0]["message"]["content"]
+
+    def extract(self, *, file_bytes: bytes | None, file_name: str, content_type: str = "") -> dict:
+        import json as _json
+
+        text = _plain_text(file_bytes, file_name)
+        if not text.strip():
+            # Nothing readable. Returning fabricated fields would be worse than returning none:
+            # even a low-confidence guess reaches a human as a finding worth considering.
+            return {"fields": {}, "summary": "", "detected_clauses": [],
+                    "provider": self.name, "error": "No extractable text in the document."}
+
+        prompt = (
+            "You extract contract metadata. Reply with JSON only, no prose. Shape: "
+            '{"fields": {"<name>": {"value": <value>, "confidence": <0..1>}}, '
+            '"summary": "<2 sentences>", "detected_clauses": ["<clause name>"]}. '
+            f"Field names: {', '.join(EXTRACTION_FIELDS)}. "
+            "Dates must be YYYY-MM-DD. Omit any field you cannot find in the text — never "
+            "guess a value. Confidence must reflect how directly the text states it."
+        )
+        try:
+            raw = self._ask(prompt, text)
+        except Exception as e:  # noqa: BLE001 — any transport failure is the same to the caller
+            log.warning("local OCR provider failed: %s", e)
+            return {"fields": {}, "summary": "", "detected_clauses": [],
+                    "provider": self.name, "error": str(e)[:200]}
+
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].removeprefix("json").strip()
+        try:
+            parsed = _json.loads(raw)
+        except ValueError:
+            log.warning("local OCR provider returned non-JSON")
+            return {"fields": {}, "summary": "", "detected_clauses": [],
+                    "provider": self.name, "error": "The model did not return JSON."}
+
+        parsed["provider"] = self.name
+        parsed.setdefault("fields", {})
+        parsed.setdefault("summary", "")
+        parsed.setdefault("detected_clauses", [])
+        return parsed
+
+
 def get_ocr_provider() -> OcrProvider:
-    """Pick the provider from config. Falls back to the stub when the cloud provider isn't fully
-    configured, so the app always works (it just won't read the document for real)."""
+    """Pick the provider from config.
+
+    Falls back to the stub when the configured provider is not fully set up, so the app always
+    works — it just will not read the document for real. That fallback is deliberate, and it is
+    also a trap for sales copy: **the stub does not read the document**, so any deployment
+    claiming real extraction must be verified to be on `local` or `anthropic`.
+    """
+    if settings.ocr_provider == "local" and settings.ocr_base_url:
+        return LocalOcrProvider(settings.ocr_base_url, settings.ocr_model, settings.ocr_api_key)
     if settings.ocr_provider == "anthropic" and settings.ocr_api_key:
         return AnthropicOcrProvider(settings.ocr_api_key, settings.ocr_model, settings.ocr_max_pages)
     return StubOcrProvider()

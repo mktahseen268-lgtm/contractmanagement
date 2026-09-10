@@ -12,10 +12,22 @@
   --color-border-strong: #cdd2d9;
   --color-text: #0f1729;
   --color-text-2: #475467;
-  --color-text-3: #7a8694;
+  /* WCAG 1.4.3 needs 4.5:1 for body text. #7a8694 measured 3.30:1 on surface-3 and 3.71:1 on
+     white — failing on every background it is used against, not marginally. #616b78 measures
+     4.81 / 5.03 / 5.27 / 5.41 on surface-3 / canvas / surface-2 / white, so it clears the bar
+     with headroom on all four rather than passing on the lightest and failing in situ. */
+  --color-text-3: #616b78;
 
-  --color-accent: #3e7bfa; /* the one knob — swap for client branding */
-  --color-accent-hover: #2f66e0;
+  /* The button background, and therefore the thing white text sits on. #3e7bfa measured
+     3.88:1 against white — below the 4.5:1 small text needs, so every primary button in the
+     product failed on this one value. #2f6ae8 is the same blue with the lightness taken down
+     to 4.83:1. A tenant's own colour is corrected the same way at runtime by
+     `lib/contrast.ts`, because darkening only the default fixes only the default. */
+  --color-accent: #2f6ae8; /* the one knob — swap for client branding */
+  /* The colour exactly as chosen, for borders, icons and large text where 3:1 applies and the
+     brand should still look like itself. */
+  --color-accent-brand: #3e7bfa;
+  --color-accent-hover: #2a5ecc;
   --color-accent-fg: #ffffff;
   --color-accent-subtle: #eaf1fe;
 
@@ -220,4 +232,154 @@ body {
   .card-interactive { animation: none; transition: none; }
   .card-interactive:hover { transform: none; }
   .chart-draw, .chart-fade, .bar-grow { animation: none; stroke-dashoffset: 0; opacity: 1; transform: none; }
+}
+
+/* ---------------------------------------------------------------------------------------
+   Print
+   ---------------------------------------------------------------------------------------
+   Contract managers print agreements, obligation lists and reports for meetings and for
+   auditors. The screen layout is wrong on paper: the 3-pane chrome eats a third of the page,
+   dark surfaces waste toner, and interactive controls print as dead rectangles.
+
+   Anything marked `no-print` disappears; anything marked `print-only` appears only here.
+   ------------------------------------------------------------------------------------- */
+@media print {
+  /* Force the light palette regardless of the viewer's theme — printing a dark UI produces
+     a solid black page on most printers. */
+  :root {
+    --color-bg: #ffffff;
+    --color-surface: #ffffff;
+    --color-surface-2: #ffffff;
+    --color-surface-3: #f4f4f5;
+    --color-ink: #000000;
+    --color-ink-2: #262626;
+    --color-ink-3: #525252;
+    --color-line: #d4d4d8;
+  }
+
+  html, body {
+    background: #fff !important;
+    color: #000 !important;
+    font-size: 11pt;
+  }
+
+  /* Navigation, action buttons, filters and anything else you cannot click on paper. */
+  nav, aside, .no-print,
+  button:not(.print-keep),
+  input[type="checkbox"], input[type="radio"],
+  [role="tablist"], [data-progress-tray] {
+    display: none !important;
+  }
+
+  .print-only { display: block !important; }
+
+  /* Cards become plain sections: shadows and rounded borders are noise in print. */
+  .card, [class*="rounded-lg"], [class*="rounded-md"] {
+    box-shadow: none !important;
+    border-radius: 0 !important;
+  }
+
+  main, .print-full {
+    width: 100% !important;
+    max-width: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  /* Keep a row of a table, or a card, from splitting across a page break. */
+  tr, .card, .avoid-break { break-inside: avoid; page-break-inside: avoid; }
+  h1, h2, h3 { break-after: avoid; page-break-after: avoid; }
+
+  /* Show where a link actually goes — a printed link with no href is useless. */
+  a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 9pt; color: #525252; }
+
+  @page { margin: 14mm; }
+}
+
+/* --- accessibility base (Phase 9, item 5) ------------------------------------------------
+   WCAG 2.1 AA. Three rules that have to live in global CSS because a component-by-component
+   version always misses something.
+
+   2.4.7 Focus Visible. Browsers give every interactive element a focus ring; the usual reason
+   a keyboard user cannot tell where they are is a reset that removed it. `:focus-visible` shows
+   it for keyboard navigation and not for mouse clicks, which is what people actually want when
+   they reach for `outline: none`.
+
+   1.4.13 / 2.5.5. `.sr-only` is the standard clip pattern — content available to a screen
+   reader and not painted. `.sr-only:focus-visible` un-hides it, which is what makes the skip
+   link appear when it is tabbed to.
+
+   2.3.3 / prefers-reduced-motion. Honoured, because vestibular disorders are real and the cost
+   of respecting the preference is four lines.
+--------------------------------------------------------------------------------------------- */
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+.sr-only:focus-visible,
+.sr-only:active {
+  position: fixed;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 100;
+  width: auto;
+  height: auto;
+  padding: 0.6rem 1rem;
+  margin: 0;
+  overflow: visible;
+  clip: auto;
+  white-space: normal;
+  background: var(--color-accent);
+  color: #fff;
+  border-radius: 0.375rem;
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Touch targets. WCAG 2.5.5 asks for 44x44 CSS pixels; a dense desktop table cannot always
+   give that, but on a touch screen the constraint is physical and not negotiable. */
+@media (pointer: coarse) {
+  button,
+  [role="button"],
+  a.btn,
+  input[type="checkbox"],
+  input[type="radio"] {
+    min-height: 44px;
+  }
+  button,
+  [role="button"],
+  a.btn {
+    min-width: 44px;
+  }
+  input[type="checkbox"],
+  input[type="radio"] {
+    min-width: 1.15rem;
+    width: 1.15rem;
+    height: 1.15rem;
+  }
 }

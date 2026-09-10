@@ -34,11 +34,24 @@ class SigningProvider(ABC):
     name: str
     #: True if this provider applies a real cryptographic signature (vs. visual-only evidence).
     cryptographic: bool = False
+    #: True if each signatory signs with *their own* certificate rather than one shared
+    #: organisational certificate. The RFP forbids shared/role certificates, so this is the
+    #: property that distinguishes a compliant configuration from a merely cryptographic one.
+    per_signatory: bool = False
 
     @abstractmethod
     def seal_pdf(self, pdf_bytes: bytes, *, contract_ref: str = "", reason: str = "") -> bytes:
         """Return the (possibly cryptographically-signed) executed PDF bytes."""
         raise NotImplementedError
+
+    def sign_for_recipients(self, db, pdf_bytes: bytes, signers: list, *,
+                            contract_ref: str = "") -> tuple[bytes, list[dict]]:
+        """Apply one signature per signatory. Returns (pdf, per-signature receipts).
+
+        `signers` is a list of (recipient, certificate) pairs. The default implementation is a
+        no-op for providers that cannot do this, so `seal_envelope` has one code path.
+        """
+        return pdf_bytes, []
 
 
 class InternalSigningProvider(SigningProvider):
@@ -97,9 +110,74 @@ class PadesSigningProvider(SigningProvider):
         return out.getvalue()
 
 
+class PkiSigningProvider(SigningProvider):
+    """**Per-signatory** PAdES-LTV signing using the in-platform PKI (Phase 1 + 2).
+
+    This is the RFP-compliant configuration. Each signatory signs with the certificate issued
+    to them by the internal CA, whose private key lives in the keystore (HSM in production and
+    never exported). A document signed by three people carries three independently verifiable
+    signatures, each naming its own certificate serial.
+
+    Contrast with `PadesSigningProvider`, which seals the whole document once with a single
+    shared organisational PKCS#12 — the arrangement the RFP explicitly forbids. That provider
+    is kept for deployments without an internal CA, and `/pki/health` warns when it is active.
+    """
+
+    name = "pki"
+    cryptographic = True
+    per_signatory = True
+
+    def seal_pdf(self, pdf_bytes: bytes, *, contract_ref: str = "", reason: str = "") -> bytes:
+        # There is no org-level seal in this mode — the per-signatory signatures *are* the
+        # cryptographic evidence. Returning the document unchanged is correct, not a no-op bug.
+        return pdf_bytes
+
+    def sign_for_recipients(self, db, pdf_bytes: bytes, signers: list, *,
+                            contract_ref: str = "") -> tuple[bytes, list[dict]]:
+        from .pki import signer as pki_signer
+
+        receipts: list[dict] = []
+        out = pdf_bytes
+        for index, (recipient, certificate) in enumerate(signers, start=1):
+            # A unique field per signature: pyHanko refuses to reuse a signed field, which
+            # stops a later signature silently replacing an earlier one.
+            field = f"Signature_{index}_{recipient.id[:8]}"
+            try:
+                out = pki_signer.sign_pdf_as(
+                    db, out, certificate,
+                    field_name=field,
+                    reason=f"Executed: {contract_ref}" if contract_ref else settings.signing_reason,
+                    signer_name=recipient.signed_name or recipient.name,
+                )
+                receipts.append({
+                    "recipient_id": recipient.id,
+                    "recipient_name": recipient.name,
+                    "field_name": field,
+                    "certificate_id": certificate.id,
+                    "certificate_serial": certificate.serial_number,
+                    "subject_dn": certificate.subject_dn,
+                    "algorithm": certificate.key_algorithm,
+                    "ok": True,
+                })
+            except Exception as e:  # noqa: BLE001
+                # One signatory's signature failing must not discard the others. Record it and
+                # keep going; `seal_envelope` surfaces partial results to the dead-letter view.
+                log.exception("pki signing failed for recipient %s", recipient.id)
+                receipts.append({
+                    "recipient_id": recipient.id,
+                    "recipient_name": recipient.name,
+                    "certificate_serial": getattr(certificate, "serial_number", ""),
+                    "ok": False,
+                    "error": str(e)[:400],
+                })
+        return out, receipts
+
+
 def get_signing_provider() -> SigningProvider:
-    """Pick the sealing provider from config; falls back to internal when PAdES isn't fully
-    configured so envelope sealing always succeeds."""
+    """Pick the sealing provider from config; falls back to internal when a cryptographic
+    provider isn't fully configured, so envelope sealing always succeeds."""
+    if settings.signing_provider == "pki":
+        return PkiSigningProvider()
     if settings.signing_provider == "pades" and settings.signing_cert_path:
         return PadesSigningProvider(
             cert_path=settings.signing_cert_path,

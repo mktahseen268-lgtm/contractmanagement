@@ -62,13 +62,17 @@ def update_endpoint(eid: str, data: schemas.WebhookEndpointUpdateIn, request: Re
         u = payload["url"].strip()
         if not (u.startswith("http://") or u.startswith("https://")):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="URL must start with http:// or https://")
-        e.url = u[:800]; changed = True
+        e.url = u[:800]
+        changed = True
     if "description" in payload and payload["description"] is not None:
-        e.description = payload["description"].strip()[:300]; changed = True
+        e.description = payload["description"].strip()[:300]
+        changed = True
     if "events" in payload and payload["events"] is not None:
-        e.events = [ev for ev in payload["events"] if isinstance(ev, str)][:30] or ["*"]; changed = True
+        e.events = [ev for ev in payload["events"] if isinstance(ev, str)][:30] or ["*"]
+        changed = True
     if "is_active" in payload and payload["is_active"] is not None:
-        e.is_active = bool(payload["is_active"]); changed = True
+        e.is_active = bool(payload["is_active"])
+        changed = True
     if changed:
         record(db, tenant_id=user.tenant_id, action="webhook.updated", actor=user, object_type="webhook", object_id=e.id, object_label=e.url[:200], ip=client_ip(request))
         db.commit()

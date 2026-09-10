@@ -37,11 +37,12 @@ What this migration does, in order:
      - background_jobs: (tenant_id, status, created_at)
      - email_outbox: (status, created_at) — outbox-flush sweep
 
-5. PostgreSQL JSONB conversion (no-op on SQLite / MSSQL) for JSON columns that get filtered
-   or scanned: `audit_log.metadata`, `signature_events.metadata`, `contracts.tags`,
-   `workflow_definitions.steps`, `workflow_definitions.default_for_types`,
-   `webhook_endpoints.events`, `webhook_deliveries.payload`, `contract_templates.default_tags`.
-   GIN indexes on the queried-by-key ones (`webhook_endpoints.events`, `contracts.tags`).
+5. JSON column typing, per dialect via `app/db_dialect.py` (`_JSON_COLUMNS` below):
+   Postgres converts to JSONB; MSSQL and Oracle keep NVARCHAR(MAX)/CLOB and gain an
+   `ISJSON` / `IS JSON` check constraint; SQLite is a no-op. GIN indexes on the two columns
+   we filter by (`contracts.tags`, `webhook_endpoints.events`) — both are JSON *arrays*, so
+   only Postgres can index them for containment and `json_index` returns nothing on the
+   other engines rather than creating an index the planner would ignore.
 
 Revision ID: 0013_hardening
 Revises: 0012_compliance
@@ -55,6 +56,8 @@ import hashlib
 import sqlalchemy as sa
 from alembic import op
 
+from app import db_dialect
+
 revision = "0013_hardening"
 down_revision = "0012_compliance"
 branch_labels = None
@@ -62,6 +65,27 @@ depends_on = None
 
 
 _TOKEN_TTL_DAYS = 14
+
+# JSON columns that are filtered or scanned — typed per dialect in step 5.
+_JSON_COLUMNS = [
+    ("audit_log", "metadata"),
+    ("signature_events", "metadata"),
+    ("contracts", "tags"),
+    ("workflow_definitions", "steps"),
+    ("workflow_definitions", "default_for_types"),
+    ("webhook_endpoints", "events"),
+    ("webhook_deliveries", "payload"),
+    ("contract_templates", "default_tags"),
+]
+
+
+def _try(op_, stmt: str) -> None:
+    """Run idempotent DDL that has no portable IF NOT EXISTS form (MSSQL check constraints,
+    Oracle preferences). Re-running the migration must not fail on an already-migrated DB."""
+    try:
+        op_.execute(stmt)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _has_column(bind, table: str, column: str) -> bool:
@@ -127,10 +151,12 @@ def upgrade() -> None:
     # ---------- 2. webhook_endpoints.secret: encrypted at rest ----------
     if "webhook_endpoints" in sa.inspect(bind).get_table_names():
         # Widen the column so Fernet ciphertext fits comfortably (~100 chars + headroom).
-        if dialect == "postgresql":
+        if dialect == db_dialect.PG:
             op.execute("ALTER TABLE webhook_endpoints ALTER COLUMN secret TYPE VARCHAR(512)")
-        elif dialect == "mssql":
+        elif dialect == db_dialect.MSSQL:
             op.execute("ALTER TABLE webhook_endpoints ALTER COLUMN secret NVARCHAR(512) NOT NULL")
+        elif dialect == db_dialect.ORACLE:
+            op.execute("ALTER TABLE WEBHOOK_ENDPOINTS MODIFY (SECRET VARCHAR2(512))")
         # SQLite: no length enforcement — skip.
 
         # Data migration: re-encrypt any plaintext secret rows. EncryptedString.process_result_value
@@ -174,19 +200,26 @@ def upgrade() -> None:
     _create_index_if_missing(bind, "ix_background_jobs_tenant_status_at", "background_jobs", ["tenant_id", "status", "created_at"])
     _create_index_if_missing(bind, "ix_email_outbox_status_created", "email_outbox", ["status", "created_at"])
 
-    # ---------- 5. JSONB conversion + GIN (PostgreSQL only) ----------
-    if dialect == "postgresql":
-        _convert_json_to_jsonb(bind, "audit_log", "metadata")
-        _convert_json_to_jsonb(bind, "signature_events", "metadata")
-        _convert_json_to_jsonb(bind, "contracts", "tags")
-        _convert_json_to_jsonb(bind, "workflow_definitions", "steps")
-        _convert_json_to_jsonb(bind, "workflow_definitions", "default_for_types")
-        _convert_json_to_jsonb(bind, "webhook_endpoints", "events")
-        _convert_json_to_jsonb(bind, "webhook_deliveries", "payload")
-        _convert_json_to_jsonb(bind, "contract_templates", "default_tags")
-        # GIN indexes for the JSON columns we actually filter by.
-        op.execute('CREATE INDEX IF NOT EXISTS ix_contracts_tags_gin ON contracts USING GIN (tags)')
-        op.execute('CREATE INDEX IF NOT EXISTS ix_webhook_endpoints_events_gin ON webhook_endpoints USING GIN (events)')
+    # ---------- 5. JSON column typing + indexes (per dialect, via app/db_dialect.py) ----------
+    # Postgres gets the JSONB type change (a real column rewrite, so it stays here rather than
+    # in db_dialect); MSSQL/Oracle keep NVARCHAR(MAX)/CLOB and get an ISJSON / IS JSON check.
+    for table, column in _JSON_COLUMNS:
+        if not _has_column(bind, table, column):
+            continue
+        if dialect == db_dialect.PG:
+            _convert_json_to_jsonb(bind, table, column)
+        else:
+            for stmt in db_dialect.json_check(dialect, table, column):
+                _try(op, stmt)
+
+    # Indexes on the JSON columns we actually filter by. Both are arrays, so only Postgres
+    # (GIN) can index them for containment — json_index returns nothing on MSSQL/Oracle
+    # rather than creating an index that would not be used. Phase 5 revisits this if array
+    # filtering turns out to be hot on those engines.
+    for stmt in db_dialect.json_index(dialect, "contracts", "tags", name="ix_contracts_tags_gin"):
+        _try(op, stmt)
+    for stmt in db_dialect.json_index(dialect, "webhook_endpoints", "events", name="ix_webhook_endpoints_events_gin"):
+        _try(op, stmt)
 
 
 def _create_index_if_missing(bind, name: str, table: str, columns: list[str]) -> None:
@@ -217,8 +250,8 @@ def downgrade() -> None:
     bind = op.get_bind()
     dialect = bind.dialect.name
 
-    # GIN indexes
-    if dialect == "postgresql":
+    # JSON indexes (Postgres GIN only — see upgrade step 5)
+    if dialect == db_dialect.PG:
         op.execute('DROP INDEX IF EXISTS ix_contracts_tags_gin')
         op.execute('DROP INDEX IF EXISTS ix_webhook_endpoints_events_gin')
 

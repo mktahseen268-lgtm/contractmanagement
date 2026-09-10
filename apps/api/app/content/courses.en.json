@@ -1,0 +1,167 @@
+{
+  "_comment": [
+    "Starter courses, seeded per tenant — gap-fill only, like help and the knowledge base.",
+    "The `answer` and `why` on each question are the marking scheme. They are stored server-side",
+    "and stripped by `training_service.quiz_for` before the quiz is ever served."
+  ],
+  "courses": [
+    {
+      "slug": "contract-lifecycle-essentials",
+      "title": "Contract lifecycle essentials",
+      "summary": "What happens at each stage, who decides, and the mistakes that cost the most.",
+      "is_required": true,
+      "pass_mark": 75,
+      "certificate_valid_months": 12,
+      "sort_order": 1,
+      "modules": [
+        {
+          "title": "The stages, and what each one is for",
+          "minutes": 10,
+          "article_slug": "quick-start-raise-an-agreement",
+          "body": "An agreement moves through intake, drafting, review, approval and signature before it becomes active.\n\nEach stage exists to catch something the next one cannot. Review catches wording; approval catches authority; signature catches identity. Skipping a stage does not save the time — it moves the problem to where it is more expensive to fix."
+        },
+        {
+          "title": "Dates, and why they matter more than they look",
+          "minutes": 8,
+          "body": "Three dates drive everything downstream: effective date, expiry date, and notice period.\n\nThe effective date is when obligations start running, which is often not the signature date. Every reminder is counted from it, so an effective date entered a month late moves every deadline a month late with it.\n\nThe notice period is the one people miss. It runs backwards from expiry, and once it has passed the agreement renews whatever anyone intended."
+        },
+        {
+          "title": "Approval authority",
+          "minutes": 7,
+          "body": "The approval matrix sets what a role may approve, by value. Routing picks the lowest band that covers the contract value.\n\nTwo consequences worth remembering. A value entered in the wrong currency can route a large agreement to somebody without the authority to approve it. And nobody can approve their own work — separation of duties is enforced by the system, not by convention, so there is no 'just this once'."
+        },
+        {
+          "title": "What the audit trail records",
+          "minutes": 5,
+          "article_slug": "faq-common-questions",
+          "body": "Every state-changing action is recorded, and each entry carries a cryptographic hash of the one before it. Removing or altering an entry breaks the chain from that point and can be detected.\n\nThis is why agreements are voided rather than deleted, and why a departing colleague's name stays on what they did. An audit trail that can be tidied up is not evidence."
+        }
+      ],
+      "quiz": [
+        {
+          "q": "An agreement expires on 31 December and requires 90 days' notice to stop it renewing. What is the last day to give notice?",
+          "options": ["31 December", "1 December", "2 October", "30 September"],
+          "answer": 3,
+          "why": "Notice runs backwards from expiry. 90 days before 31 December is 2 October, so the last safe day is 30 September — in October it has already renewed."
+        },
+        {
+          "q": "Why does document generation stop when a merge field has no value?",
+          "options": [
+            "To save processing time",
+            "Because a blank in a signed agreement is a dispute",
+            "Because the template is invalid",
+            "It does not stop; it leaves the field blank"
+          ],
+          "answer": 1,
+          "why": "An unresolved placeholder is an error, never a blank. A gap in an executed agreement is exactly the thing that ends up being argued about."
+        },
+        {
+          "q": "An approval run is active on an agreement. Why are the status buttons locked?",
+          "options": [
+            "The agreement is read-only while it is being viewed",
+            "So that decisions go through the approvers rather than around them",
+            "Because only administrators may change status",
+            "A bug — status should always be changeable"
+          ],
+          "answer": 1,
+          "why": "Changing status directly would step around the approval that is in progress, which would make the approval record untrue."
+        },
+        {
+          "q": "The effective date is usually:",
+          "options": [
+            "The same as the signature date",
+            "When obligations start running, which may not be the signature date",
+            "The date the draft was created",
+            "The expiry date minus the term"
+          ],
+          "answer": 1,
+          "why": "Effective and signature dates coincide often enough that people assume they always do. Everything downstream is counted from the effective date."
+        },
+        {
+          "q": "Why can an agreement not be deleted?",
+          "options": [
+            "It can, if you are an owner",
+            "Deletion is disabled to save storage",
+            "Agreements are voided or terminated so the record survives; retention decides when data goes",
+            "Only the counterparty may request deletion"
+          ],
+          "answer": 2,
+          "why": "The record is the point. Retention policy governs disposal, and a legal hold overrides retention unconditionally."
+        }
+      ]
+    },
+    {
+      "slug": "security-and-handling",
+      "title": "Handling agreements securely",
+      "summary": "Confidentiality, sharing outside the bank, and what the controls can and cannot do.",
+      "is_required": true,
+      "pass_mark": 80,
+      "certificate_valid_months": 12,
+      "sort_order": 2,
+      "modules": [
+        {
+          "title": "Who can see what",
+          "minutes": 6,
+          "body": "By default everyone in the workspace can see an agreement. Marking it **confidential** restricts it to people explicitly given access, and refused attempts are recorded.\n\nUse it where the existence of the agreement is itself sensitive — not as a habit. A workspace where everything is confidential is one where nobody can find anything, and the marking stops meaning anything."
+        },
+        {
+          "title": "Sharing with people outside the bank",
+          "minutes": 8,
+          "article_slug": "faq-common-questions",
+          "body": "Outside counsel and counterparties get a **temporary access link**: scoped, expiring, revocable, and shown once. Only a hash is stored, so a leaked link cannot be recovered from the database either.\n\nWatermarking stamps the viewer's name across every page. It does not stop a screenshot — nothing served to a browser can — but it makes a copy attributable, which is the part that actually deters. Never email a document where a link would do."
+        },
+        {
+          "title": "Passwords, passkeys and step-up",
+          "minutes": 6,
+          "body": "A passkey signs only for this exact site, so a convincing copy of the login page gets nothing from you. That is what makes it different from a 6-digit code, which can be read out over the phone to somebody claiming to be from IT.\n\nSensitive actions re-prompt for authentication even if you signed in minutes ago. The prompt is bound to that one action, so proving who you are once does not open a window over everything else."
+        }
+      ],
+      "quiz": [
+        {
+          "q": "A counterparty's lawyer needs to read a draft. What is the right way?",
+          "options": [
+            "Email the PDF",
+            "Create an account for them",
+            "Issue a temporary access link, scoped and expiring",
+            "Share your own login"
+          ],
+          "answer": 2,
+          "why": "A link is scoped, expiring and revocable. An emailed PDF is none of those and cannot be withdrawn."
+        },
+        {
+          "q": "What does watermarking a shared document actually achieve?",
+          "options": [
+            "It prevents copying and screenshots",
+            "It encrypts the document",
+            "It makes any copy attributable to the person who was shown it",
+            "It stops the file being downloaded"
+          ],
+          "answer": 2,
+          "why": "Nothing served to a browser can prevent a screenshot. Attribution is the honest control, and it is the one that deters."
+        },
+        {
+          "q": "Why is a passkey harder to phish than a 6-digit code?",
+          "options": [
+            "It is longer",
+            "It only ever signs for the site it was registered against",
+            "It changes every 30 seconds",
+            "It is stored on the server"
+          ],
+          "answer": 1,
+          "why": "The browser will not use the credential on a lookalike domain, so a convincing copy of the login page gets nothing. A code can simply be typed into the wrong page."
+        },
+        {
+          "q": "You are asked for your password again when changing somebody's role. Why?",
+          "options": [
+            "Your session expired",
+            "It is a sensitive action, and the re-prompt is bound to that one action",
+            "The system does this hourly",
+            "Your role changed"
+          ],
+          "answer": 1,
+          "why": "A session-wide 'recently authenticated' flag would turn one re-authentication into a window over everything. The challenge is tied to the action and the object."
+        }
+      ]
+    }
+  ]
+}

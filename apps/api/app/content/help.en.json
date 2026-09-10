@@ -1,0 +1,168 @@
+{
+  "_comment": [
+    "Shipped defaults for contextual help. Seeded into `help_topics` on first start, per tenant.",
+    "The seed FILLS GAPS ONLY — a topic somebody has edited is never overwritten by a deploy.",
+    "That is the point of the requirement: Legal can correct wording without waiting on a release.",
+    "Keys are stable addresses. Renaming one orphans the help on that field, so don't.",
+    "Copy rule: say what the field decides, not what it is called. 'Effective date: the date the",
+    "agreement takes effect' tells a reader nothing they could not see."
+  ],
+  "topics": [
+    {
+      "key": "contract.effective_date",
+      "surface": "Contract form",
+      "title": "Effective date",
+      "body": "When the obligations start running — which is often not the day it was signed. Renewal notice periods, expiry and every obligation reminder are counted from this date, so getting it wrong shifts every downstream deadline by the same amount."
+    },
+    {
+      "key": "contract.expiry_date",
+      "surface": "Contract form",
+      "title": "Expiry date",
+      "body": "The last day the agreement is in force. The renewal sweep starts warning from here backwards using the notice period, so leaving it blank means nobody is warned at all."
+    },
+    {
+      "key": "contract.notice_period_days",
+      "surface": "Contract form",
+      "title": "Notice period",
+      "body": "How many days before expiry the other side must be told you are not renewing. Miss it and most agreements roll over automatically for another full term. Set it from the clause, not from habit — 30, 60 and 90 days are all common in the same portfolio."
+    },
+    {
+      "key": "contract.auto_renew",
+      "surface": "Contract form",
+      "title": "Auto-renews",
+      "body": "Tick this when the agreement continues on its own unless somebody actively stops it. This is the setting that decides whether missing the notice period costs you another year, so it changes what the reminders say and how early they start."
+    },
+    {
+      "key": "contract.value",
+      "surface": "Contract form",
+      "title": "Contract value",
+      "body": "Total value over the whole term, in the contract's own currency. Approval routing reads this: a value entered in the wrong currency can route a large agreement to someone without the authority to approve it."
+    },
+    {
+      "key": "contract.confidential",
+      "surface": "Contract form",
+      "title": "Confidential",
+      "body": "Restricts this agreement to people explicitly given access, rather than everyone in the workspace. Refused attempts are recorded. Use it for anything where the fact that the agreement exists is itself sensitive."
+    },
+    {
+      "key": "contract.counterparty",
+      "surface": "Contract form",
+      "title": "Counterparty",
+      "body": "Pick the party record rather than typing a name. Free text cannot be reported on, screened against sanctions lists, or rolled up when the same company appears under three spellings."
+    },
+    {
+      "key": "template.merge_field",
+      "surface": "Template editor",
+      "title": "Merge fields",
+      "body": "Write {{field_key}} where a value should appear. Every field is filled from intake before the document is generated — a placeholder that cannot be resolved stops generation rather than leaving a blank, because a blank in an executed agreement is a dispute."
+    },
+    {
+      "key": "template.clause_reference",
+      "surface": "Template editor",
+      "title": "Clause references",
+      "body": "Write [[clause:key]] to pull in an approved clause from the library. The template stores the reference, not the words, so when Legal updates the clause every template that references it is updated too — and the version in force at approval is frozen onto the agreement."
+    },
+    {
+      "key": "template.approval",
+      "surface": "Template editor",
+      "title": "Why templates need approval",
+      "body": "A template can only be used to generate agreements once it has been approved, and generation reads the approved snapshot rather than the live draft. Otherwise an edit made this morning would silently change the wording of an agreement someone is signing this afternoon."
+    },
+    {
+      "key": "clause.alternative",
+      "surface": "Clause library",
+      "title": "Alternative clauses",
+      "body": "An approved variation a drafter may swap in without going back to Legal — a shorter liability cap, a different governing law. Anything not listed here is a deviation and is flagged in review."
+    },
+    {
+      "key": "clause.prohibited",
+      "surface": "Clause library",
+      "title": "Prohibited language",
+      "body": "Wording that must never appear. The playbook check searches for it in every draft and raises it as a finding, which is more reliable than expecting each reviewer to remember the list."
+    },
+    {
+      "key": "workflow.parallel_group",
+      "surface": "Workflow builder",
+      "title": "Parallel approvals",
+      "body": "Steps in the same group are asked at the same time rather than one after another. Use it when approvers are genuinely independent — Finance and Legal reviewing the same draft — and sequential when one needs to see the other's decision first."
+    },
+    {
+      "key": "workflow.sla_hours",
+      "surface": "Workflow builder",
+      "title": "SLA",
+      "body": "Working hours allowed for this step before it is escalated. Counted against the business calendar, so a Friday afternoon assignment is not overdue on Monday morning. Leave it blank if there is no commitment — a stage with no SLA reports no SLA, rather than reporting 100%."
+    },
+    {
+      "key": "workflow.delegation",
+      "surface": "Workflow builder",
+      "title": "Delegation",
+      "body": "Who decides while the approver is away. Delegated decisions are recorded under both names — the person who decided and the person whose authority they used — because 'who approved this' has two honest answers."
+    },
+    {
+      "key": "signature.tab",
+      "surface": "Signature placement",
+      "title": "Signature placement",
+      "body": "Drag a field onto the page where the signatory should sign, initial or date. Anything you place here must be filled before they can finish, so don't place fields you do not actually need."
+    },
+    {
+      "key": "signature.order",
+      "surface": "Send for signature",
+      "title": "Signing order",
+      "body": "With an order set, each person is only invited once the person before them has finished. Without one, everyone is invited at once. Order matters when a later signatory needs to see an earlier signature — otherwise it only slows things down."
+    },
+    {
+      "key": "signature.identity",
+      "surface": "Send for signature",
+      "title": "Identity verification",
+      "body": "How firmly you need to know who signed. Email access proves control of a mailbox; an OTP to a phone adds a second channel; CNIC verification ties it to a person. Choose from the risk of the agreement, not the convenience of the signatory."
+    },
+    {
+      "key": "audit.chain",
+      "surface": "Audit log",
+      "title": "How this log is protected",
+      "body": "Every entry carries a cryptographic hash of the one before it, so removing or editing an entry breaks the chain from that point onward and can be detected. Verification recomputes the whole chain and reports the first entry that does not match."
+    },
+    {
+      "key": "legal_hold.matter",
+      "surface": "Legal hold",
+      "title": "Matter",
+      "body": "The case or investigation this hold belongs to. Holds are per-matter on purpose: when one matter closes, agreements still covered by another stay preserved. A single on/off flag would release them all together, which destroys evidence."
+    },
+    {
+      "key": "retention.policy",
+      "surface": "Retention",
+      "title": "Retention period",
+      "body": "How long an agreement is kept after it ends. A legal hold overrides this unconditionally — nothing under hold is ever purged, whatever the policy says."
+    },
+    {
+      "key": "temporary_access.watermark",
+      "surface": "Temporary access",
+      "title": "Watermark",
+      "body": "Stamps the viewer's name and the time across every page. It does not stop somebody taking a screenshot — nothing served to a browser can — but it makes the copy attributable, which is the part that actually deters."
+    },
+    {
+      "key": "sanctions.screening",
+      "surface": "Counterparty",
+      "title": "Sanctions screening",
+      "body": "Matches the counterparty against the loaded lists, including trading names and known aliases. A near-match is shown rather than decided for you: the system flags, a human clears."
+    },
+    {
+      "key": "authority.matrix",
+      "surface": "Approval matrix",
+      "title": "Approval authority",
+      "body": "The value a holder of this role may approve. Routing picks the lowest band that covers the contract value, so overlapping bands do not send everything to the CEO."
+    },
+    {
+      "key": "mfa.recovery_codes",
+      "surface": "Security",
+      "title": "Recovery codes",
+      "body": "Single-use codes for when you cannot reach your authenticator. Save them somewhere that is not the device generating the codes — the common lockout is a lost phone that held both."
+    },
+    {
+      "key": "passkey.what",
+      "surface": "Security",
+      "title": "Passkeys",
+      "body": "A passkey signs only for this exact site, so a convincing copy of the login page gets nothing. That is what makes it different from a 6-digit code, which can be read out over the phone to somebody claiming to be from IT."
+    }
+  ]
+}

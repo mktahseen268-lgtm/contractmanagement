@@ -1,0 +1,8 @@
+# Oracle driver for DEPLOYMENT_MODE=single_tenant on Oracle 19c+.
+#   pip install -r requirements-oracle.txt
+# python-oracledb runs in thin mode by default — no Oracle Instant Client needed.
+# DATABASE_URL=oracle+oracledb://user:pass@host:1521/?service_name=CM
+#
+# The VPD policies in migration 0002_rls need EXECUTE on DBMS_RLS and DBMS_SESSION,
+# and CREATE ANY CONTEXT. See docs/25-database-portability.md.
+oracledb==2.5.1

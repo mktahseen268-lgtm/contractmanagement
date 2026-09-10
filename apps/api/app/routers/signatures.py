@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -6,7 +6,6 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from .. import signing_service as sig
 from ..audit import record
-from ..config import settings
 from ..database import get_db, set_request_tenant
 from ..deps import client_ip, get_current_user
 from ..storage import get_storage
@@ -171,7 +170,7 @@ def remind_recipient(envelope_id: str, recipient_id: str, db: Session = Depends(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recipient not found")
     c = _get_owned_contract(db, user, env.contract_id)
     try:
-        sig.remind(db, envelope=env, recipient=r, contract=c, by_user=user)
+        sig.remind(db, envelope=env, recipient=r, contract=c, by_name=user.name)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     db.commit()
@@ -430,3 +429,340 @@ def signing_document(token: str, db: Session = Depends(get_db)) -> StreamingResp
     if env is None or env.status == "voided":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No document available.")
     return _stream(db, env.sealed_pdf_file_id if env.status == "completed" else env.document_file_id, "No document available yet.")
+
+
+# ---------------------------------------------------------------------------------------
+# Signing invitations — the admin side of the visitor eSigning surface (Phase 2)
+# ---------------------------------------------------------------------------------------
+
+
+def _owned_contract(db: Session, user: models.User, contract_id: str) -> models.Contract:
+    c = db.get(models.Contract, contract_id)
+    if c is None or c.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Contract not found")
+    return c
+
+
+@router.post("/contracts/{contract_id}/invitations", response_model=schemas.InvitationOut,
+             status_code=status.HTTP_201_CREATED)
+def create_invitation(contract_id: str, data: schemas.InvitationIn, request: Request,
+                      db: Session = Depends(get_db),
+                      user: models.User = Depends(get_current_user)) -> schemas.InvitationOut:
+    """Mint a public signing link (and its QR code) for external signatories.
+
+    The URL and QR are returned **once**: only a hash is stored, so a database leak cannot
+    reconstruct a working link. Re-issue if it is lost.
+    """
+    from .. import visitor_service
+
+    contract = _owned_contract(db, user, contract_id)
+    if user.role not in ("owner", "admin", "manager", "author"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You cannot publish signing links for this workspace.")
+    invitation, raw = visitor_service.create_invitation(
+        db, contract=contract, actor=user, label=data.label,
+        otp_channel=data.otp_channel, require_otp=data.require_otp,
+        collect_cnic=data.collect_cnic, max_signatures=data.max_signatures,
+        ttl_days=data.ttl_days,
+    )
+    db.commit()
+    out = schemas.InvitationOut.model_validate(invitation)
+    out.url = visitor_service.invitation_url(raw)
+    out.qr_svg = visitor_service.qr_svg(raw) or None
+    return out
+
+
+@router.get("/contracts/{contract_id}/invitations", response_model=list[schemas.InvitationOut])
+def list_invitations(contract_id: str, db: Session = Depends(get_db),
+                     user: models.User = Depends(get_current_user)) -> list[schemas.InvitationOut]:
+    contract = _owned_contract(db, user, contract_id)
+    rows = db.scalars(
+        select(models.SigningInvitation)
+        .where(models.SigningInvitation.contract_id == contract.id)
+        .order_by(models.SigningInvitation.created_at.desc())
+    ).all()
+    # No URL or QR here: the raw token is not recoverable, by design.
+    return [schemas.InvitationOut.model_validate(r) for r in rows]
+
+
+@router.delete("/invitations/{invitation_id}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_invitation(invitation_id: str, request: Request, db: Session = Depends(get_db),
+                      user: models.User = Depends(get_current_user)):
+    """Revoke a published link. Sessions already verified keep their own signing tokens —
+    revoking the invitation stops new visitors, it does not retract an in-flight signature."""
+    inv = db.get(models.SigningInvitation, invitation_id)
+    if inv is None or inv.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invitation not found")
+    inv.is_active = False
+    record(db, tenant_id=user.tenant_id, action="esign.invitation_revoked", actor=user,
+           object_type="contract", object_id=inv.contract_id, object_label=inv.label,
+           ip=client_ip(request),
+           meta={"invitation_id": inv.id, "signature_count": inv.signature_count})
+    db.commit()
+    from fastapi import Response
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/invitations/{invitation_id}/sessions", response_model=list[schemas.VisitorSessionOut])
+def invitation_sessions(invitation_id: str, db: Session = Depends(get_db),
+                        user: models.User = Depends(get_current_user)) -> list[schemas.VisitorSessionOut]:
+    """Who came through this link, how they identified themselves, and whether they read the
+    document. The audit view behind the visitor surface."""
+    from .. import sms as sms_mod
+
+    inv = db.get(models.SigningInvitation, invitation_id)
+    if inv is None or inv.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invitation not found")
+    rows = db.scalars(
+        select(models.VisitorSession)
+        .where(models.VisitorSession.invitation_id == inv.id)
+        .order_by(models.VisitorSession.created_at.desc()).limit(500)
+    ).all()
+    out = []
+    for s in rows:
+        item = schemas.VisitorSessionOut.model_validate(s)
+        item.masked_identifier = (
+            sms_mod.mask_msisdn(s.phone) if s.otp_channel == "sms" else sms_mod.mask_email(s.email)
+        )
+        if s.certificate_id:
+            cert = db.get(models.Certificate, s.certificate_id)
+            item.certificate_serial = cert.serial_number if cert else ""
+        out.append(item)
+    return out
+
+
+# ---------------------------------------------------------------------------------------
+# Smart signature tagging (Phase 2 item 4)
+# ---------------------------------------------------------------------------------------
+
+
+@router.post("/envelopes/{envelope_id}/auto-tag", response_model=schemas.AutoTagOut)
+def auto_tag(envelope_id: str, data: schemas.AutoTagIn, request: Request,
+             db: Session = Depends(get_db),
+             user: models.User = Depends(get_current_user)) -> schemas.AutoTagOut:
+    """Detect signature blocks in the document and place tabs automatically.
+
+    `apply=false` previews the proposal so a preparer can look before committing; `apply=true`
+    writes the tabs. Manual placement remains available and overrides whatever this produced —
+    automatic tagging is the default, not the only option.
+    """
+    from .. import tagging
+
+    env = db.get(models.SignatureEnvelope, envelope_id)
+    if env is None or env.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Envelope not found")
+    if env.status not in ("draft", "sent", "partially_signed"):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=f"Envelope is {env.status}; tabs can no longer be changed.")
+    if not env.document_file_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="Send the envelope first — there is no rendered document to tag yet.")
+
+    fo = db.get(models.FileObject, env.document_file_id)
+    if fo is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+    stream = get_storage().open_stream(fo.key)
+    try:
+        pdf_bytes = stream.read()
+    finally:
+        try:
+            stream.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    signers = [r for r in sig.recipients(db, env.id) if r.kind == "signer"]
+    proposal = tagging.propose_tabs(
+        pdf_bytes, [r.id for r in signers], extra_anchors=data.extra_anchors,
+    )
+
+    created = 0
+    if data.apply and proposal.tabs:
+        if data.replace_existing:
+            for existing in db.scalars(
+                select(models.SignatureTab).where(models.SignatureTab.envelope_id == env.id)
+            ).all():
+                db.delete(existing)
+            db.flush()
+        for spec in proposal.tabs:
+            db.add(models.SignatureTab(
+                tenant_id=env.tenant_id, envelope_id=env.id,
+                recipient_id=spec["recipient_id"], kind=spec["kind"], page=spec["page"],
+                x=spec["x"], y=spec["y"], width=spec["width"], height=spec["height"],
+                required=spec["required"], label=spec["label"],
+            ))
+            created += 1
+        record(db, tenant_id=user.tenant_id, action="signature.auto_tagged", actor=user,
+               object_type="contract", object_id=env.contract_id, object_label=env.id,
+               ip=client_ip(request),
+               meta={"envelope_id": env.id, "tabs_created": created,
+                     "anchors_found": len(proposal.anchors),
+                     "replaced_existing": data.replace_existing})
+        db.commit()
+
+    return schemas.AutoTagOut(
+        applied=bool(data.apply and created),
+        tabs_created=created,
+        note=proposal.note,
+        anchors=[
+            schemas.DetectedAnchor(page=a.page, x=a.x, y=a.y, text=a.text, kind=a.kind,
+                                   confidence=a.confidence)
+            for a in proposal.anchors
+        ],
+        proposed=[
+            schemas.ProposedTab(
+                recipient_id=t["recipient_id"], kind=t["kind"], page=t["page"], x=t["x"],
+                y=t["y"], width=t["width"], height=t["height"], required=t["required"],
+                label=t["label"], anchor_text=t.get("anchor_text", ""),
+                confidence=t.get("confidence", 0.0),
+            )
+            for t in proposal.tabs
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------------------
+# Hybrid / wet-signature execution (Phase 2 item 5)
+# ---------------------------------------------------------------------------------------
+
+
+def _owned_envelope(db: Session, user: models.User, envelope_id: str) -> models.SignatureEnvelope:
+    env = db.get(models.SignatureEnvelope, envelope_id)
+    if env is None or env.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Envelope not found")
+    return env
+
+
+def _wet_error(e: Exception) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+
+@router.post("/envelopes/{envelope_id}/execution-mode", response_model=schemas.ExecutionModeOut)
+def set_execution_mode(envelope_id: str, data: schemas.ExecutionModeIn, request: Request,
+                       db: Session = Depends(get_db),
+                       user: models.User = Depends(get_current_user)) -> schemas.ExecutionModeOut:
+    """Route named signatories down the paper path (hybrid), or all of them (wet)."""
+    from .. import wet_signature
+
+    env = _owned_envelope(db, user, envelope_id)
+    try:
+        result = wet_signature.set_execution_mode(
+            db, env, wet_recipient_ids=data.wet_recipient_ids, actor=user,
+        )
+    except wet_signature.WetSignatureError as e:
+        db.rollback()
+        raise _wet_error(e) from e
+    db.commit()
+    return schemas.ExecutionModeOut(**result)
+
+
+@router.get("/envelopes/{envelope_id}/print-pack")
+def print_pack(envelope_id: str, db: Session = Depends(get_db),
+               user: models.User = Depends(get_current_user)) -> StreamingResponse:
+    """The printable pack: cover sheet (reference, signatories, instructions) + the agreement."""
+    import io as _io
+
+    from .. import wet_signature
+
+    env = _owned_envelope(db, user, envelope_id)
+    contract = db.get(models.Contract, env.contract_id)
+    if contract is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Contract not found")
+    tenant = db.get(models.Tenant, user.tenant_id)
+    pdf_bytes = wet_signature.build_print_pack(
+        db, env, contract, (tenant.name if tenant else "Workspace"),
+    )
+    name = f"{contract.reference_no or 'agreement'}_print_pack.pdf".replace("/", "_")
+    return StreamingResponse(
+        _io.BytesIO(pdf_bytes), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+@router.post("/envelopes/{envelope_id}/attest", response_model=schemas.WetAttestationOut,
+             status_code=status.HTTP_201_CREATED)
+def attest_wet_signature(
+    envelope_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    recipient_id: str = Form(""),
+    declared_execution_date: str = Form(""),
+    signatory_name: str = Form(""),
+    signatory_designation: str = Form(""),
+    witness_name: str = Form(""),
+    witness_designation: str = Form(""),
+    notes: str = Form(""),
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+) -> schemas.WetAttestationOut:
+    """Certify a scanned executed copy and advance the paper signatories.
+
+    The uploader is the accountable party: their identity, the file hash and the declared
+    execution date all go into the append-only audit chain. Omit `recipient_id` when one paper
+    copy carries every wet signature, which is the usual case.
+    """
+    import datetime as _dt
+
+    from .. import wet_signature
+    from .files import save_upload
+
+    if user.role not in ("owner", "admin", "manager", "author"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You cannot certify executed copies for this workspace.")
+
+    env = _owned_envelope(db, user, envelope_id)
+    contract = db.get(models.Contract, env.contract_id)
+    if contract is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Contract not found")
+
+    recipient = None
+    if recipient_id:
+        recipient = db.get(models.SignatureRecipient, recipient_id)
+        if recipient is None or recipient.envelope_id != env.id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recipient not found")
+
+    declared = None
+    if declared_execution_date:
+        try:
+            declared = _dt.date.fromisoformat(declared_execution_date)
+        except ValueError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="Execution date must be YYYY-MM-DD.") from None
+        if declared > _dt.date.today():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="The execution date cannot be in the future.")
+
+    file_obj = save_upload(
+        db, tenant_id=user.tenant_id, file=file, kind="attachment",
+        created_by=user.id, parent_type="contract", parent_id=contract.id,
+    )
+    try:
+        attestation = wet_signature.attest(
+            db, envelope=env, contract=contract, file_obj=file_obj, actor=user,
+            recipient=recipient, declared_execution_date=declared,
+            signatory_name=signatory_name, signatory_designation=signatory_designation,
+            witness_name=witness_name, witness_designation=witness_designation,
+            notes=notes, ip=client_ip(request),
+        )
+    except wet_signature.WetSignatureError as e:
+        db.rollback()
+        raise _wet_error(e) from e
+    db.commit()
+
+    # Seal once every party is done, whichever path they took.
+    if env.status == "completed":
+        from ..tasks import seal_envelope
+
+        seal_envelope.delay(env.id, env.tenant_id)
+
+    return schemas.WetAttestationOut.model_validate(attestation)
+
+
+@router.get("/envelopes/{envelope_id}/evidence", response_model=schemas.ExecutionEvidenceOut)
+def execution_evidence(envelope_id: str, db: Session = Depends(get_db),
+                       user: models.User = Depends(get_current_user)) -> schemas.ExecutionEvidenceOut:
+    """What kind of evidence backs this execution - cryptographic, attested scan, or both."""
+    from .. import wet_signature
+
+    env = _owned_envelope(db, user, envelope_id)
+    return schemas.ExecutionEvidenceOut(**wet_signature.evidence_summary(db, env))

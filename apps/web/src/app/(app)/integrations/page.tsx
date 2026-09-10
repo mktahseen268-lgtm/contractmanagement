@@ -1,110 +1,389 @@
 "use client";
 
-// Integrations Marketplace — PROTOTYPE connectors gallery (CRM, Microsoft 365, storage, iPaaS).
-// Connect/disconnect toggles, categories, search. Webhooks + API keys are the real building
-// blocks already shipped; these are the packaged first-class connectors on top. Mockup: in-memory.
+/**
+ * Integrations — what this deployment is actually wired to.
+ *
+ *   GET  /connectors             Teams, SharePoint, calendar, SIEM, SMS, SOAP status
+ *   POST /connectors/teams/test  post a test card to the configured channel
+ *   GET/POST/DELETE /webhooks    outbound webhooks
+ *
+ * Replaces the mockup, which listed integrations that were not connected to anything.
+ * Everything here is read from the running service: a connector shown as configured is one
+ * that is configured, and one shown as off will not fire.
+ *
+ * Nothing on this page is a secret. Destinations and on/off states only — webhook signing
+ * secrets are never returned by the API and are not rendered here.
+ */
 
-import { useMemo, useState } from "react";
-import { Check, Plug, Search, Webhook } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import {
+  AlertTriangle,
+  Calendar,
+  Check,
+  MessageSquare,
+  Plug,
+  Plus,
+  Radio,
+  Send,
+  Server,
+  Trash2,
+  X,
+} from "lucide-react";
+import { api, ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { PageHeader } from "@/components/shell";
-import { Badge, Button, Card, CardBody, Input } from "@/components/ui";
-
-type Cat = "CRM" | "Microsoft 365" | "Storage" | "Messaging" | "Automation" | "Developer";
-type Connector = { id: string; name: string; cat: Cat; desc: string; mark: string; color: string; connected?: boolean };
-
-const CONNECTORS: Connector[] = [
-  { id: "sf", name: "Salesforce", cat: "CRM", desc: "Generate & sync contracts from Opportunities; write status back.", mark: "SF", color: "#00A1E0", connected: true },
-  { id: "hs", name: "HubSpot", cat: "CRM", desc: "Create agreements from Deals and log signed contracts.", mark: "HS", color: "#FF7A59" },
-  { id: "teams", name: "Microsoft Teams", cat: "Messaging", desc: "Approval cards + signature alerts in channels.", mark: "T", color: "#6264A7", connected: true },
-  { id: "slack", name: "Slack", cat: "Messaging", desc: "Notify channels on send / sign / decline events.", mark: "S", color: "#4A154B" },
-  { id: "outlook", name: "Outlook Add-in", cat: "Microsoft 365", desc: "Send for signature straight from an email.", mark: "O", color: "#0078D4" },
-  { id: "sp", name: "SharePoint", cat: "Microsoft 365", desc: "Sync executed PDFs to a document library.", mark: "SP", color: "#038387" },
-  { id: "gdrive", name: "Google Drive", cat: "Storage", desc: "Import documents and archive signed copies.", mark: "GD", color: "#1FA463" },
-  { id: "dropbox", name: "Dropbox", cat: "Storage", desc: "Two-way sync of contract files.", mark: "DB", color: "#0061FF" },
-  { id: "zapier", name: "Zapier", cat: "Automation", desc: "5,000+ app automations on contract events.", mark: "Z", color: "#FF4F00" },
-  { id: "power", name: "Power Automate", cat: "Automation", desc: "Microsoft flows on signature & lifecycle events.", mark: "PA", color: "#0066FF" },
-  { id: "api", name: "REST API", cat: "Developer", desc: "Full API with bearer keys — already live.", mark: "{}", color: "#475467", connected: true },
-  { id: "wh", name: "Webhooks", cat: "Developer", desc: "HMAC-signed event delivery — already live.", mark: "‹›", color: "#475467", connected: true },
-];
-
-const CATS: (Cat | "All")[] = ["All", "CRM", "Microsoft 365", "Storage", "Messaging", "Automation", "Developer"];
+import {
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  CardTitle,
+  ErrorBanner,
+  Field,
+  Input,
+  Skeleton,
+} from "@/components/ui";
+import type { ConnectorStatus, WebhookEndpoint } from "@/lib/types";
 
 export default function IntegrationsPage() {
-  const [cat, setCat] = useState<Cat | "All">("All");
-  const [q, setQ] = useState("");
-  const [state, setState] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(CONNECTORS.map((c) => [c.id, !!c.connected]))
-  );
+  const { me } = useAuth();
+  const role = me?.user.role;
+  const canManage = role === "owner" || role === "admin" || role === "manager";
 
-  const shown = useMemo(() => {
-    const n = q.trim().toLowerCase();
-    return CONNECTORS.filter((c) => (cat === "All" || c.cat === cat) && (!n || c.name.toLowerCase().includes(n) || c.desc.toLowerCase().includes(n)));
-  }, [cat, q]);
+  const [status, setStatus] = useState<ConnectorStatus | null>(null);
+  const [webhooks, setWebhooks] = useState<WebhookEndpoint[] | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState("");
+  const [note, setNote] = useState("");
+  const [testing, setTesting] = useState(false);
 
-  const connectedCount = Object.values(state).filter(Boolean).length;
+  const load = useCallback(() => {
+    api.get<ConnectorStatus>("/connectors").then(setStatus).catch(() => setStatus(null));
+    api.get<WebhookEndpoint[]>("/webhooks").then(setWebhooks).catch(() => setWebhooks([]));
+  }, []);
+  useEffect(load, [load]);
+
+  async function testTeams() {
+    setTesting(true);
+    setError("");
+    setNote("");
+    try {
+      const result = await api.post<{ delivered: boolean }>("/connectors/teams/test", {});
+      setNote(
+        result.delivered
+          ? "Test card delivered — check the channel."
+          : "The webhook did not accept the message. Check the URL.",
+      );
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "The test could not be sent.");
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  async function removeWebhook(hook: WebhookEndpoint) {
+    if (!window.confirm(`Stop sending events to ${hook.url}?`)) return;
+    try {
+      await api.del(`/webhooks/${hook.id}`);
+      load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't remove that webhook.");
+    }
+  }
 
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Integrations</span>}
-        subtitle={`Connect your CRM, Microsoft 365, storage, and automation tools — ${connectedCount} connected.`}
+        title="Integrations"
+        subtitle="What this deployment sends to, and what it accepts from"
       />
 
-      <div className="space-y-4 p-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="relative min-w-[220px] flex-1">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-3" />
-            <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search integrations…" className="pl-9" />
+      <div className="space-y-4 p-6">
+        {error && <ErrorBanner message={error} />}
+        {note && (
+          <Card className="border-accent/50">
+            <CardBody className="py-2 text-sm text-ink-2">{note}</CardBody>
+          </Card>
+        )}
+
+        {status === null ? (
+          <Skeleton className="h-48" />
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Connector
+              icon={MessageSquare}
+              name="Microsoft Teams"
+              on={status.teams.enabled}
+              detail={
+                status.teams.enabled
+                  ? `Posts adaptive cards on ${status.teams.events.length} workflow events.`
+                  : "Set TEAMS_ENABLED and a channel webhook URL to turn this on."
+              }
+              action={
+                status.teams.enabled && canManage ? (
+                  <Button size="sm" variant="ghost" loading={testing} onClick={testTeams}>
+                    <Send className="h-3.5 w-3.5" /> Send a test
+                  </Button>
+                ) : null
+              }
+            />
+
+            <Connector
+              icon={Server}
+              name="SharePoint"
+              on={status.sharepoint.enabled}
+              detail={
+                status.sharepoint.enabled
+                  ? `Executed agreements copied to ${status.sharepoint.library} at ${status.sharepoint.site_url}.`
+                  : "Set SHAREPOINT_ENABLED, the site URL and a library to sync executed agreements."
+              }
+              footnote={
+                status.sharepoint.enabled && !status.sharepoint.authenticated
+                  ? "No token configured — uploads will be rejected."
+                  : "A copy, not a move: the system of record stays here."
+              }
+            />
+
+            <Connector
+              icon={Calendar}
+              name="Calendar invites"
+              on={status.calendar.enabled}
+              detail="Renewal and review dates as .ics attachments on mail already being sent."
+              footnote="No configuration and nothing to rotate — every mail client understands it, including on-prem Exchange."
+            />
+
+            <Connector
+              icon={Radio}
+              name="SIEM"
+              on={status.siem.enabled}
+              detail={
+                status.siem.enabled
+                  ? `Security events to ${status.siem.host} as ${status.siem.format.toUpperCase()}${status.siem.tls ? " over TLS" : ""}.`
+                  : "Set SIEM_ENABLED and a collector host to ship security events."
+              }
+              footnote="A projection of the audit log — an outage is replayable, never lost."
+            />
+
+            <Connector
+              icon={MessageSquare}
+              name="SMS"
+              on={status.sms.enabled}
+              detail={`Backend: ${status.sms.backend}. Used for signing OTPs and reminders.`}
+              footnote={
+                status.sms.backend === "console"
+                  ? "Console backend — messages are logged, never sent."
+                  : undefined
+              }
+            />
+
+            <Connector
+              icon={Plug}
+              name="SOAP"
+              on={status.soap.enabled}
+              detail={
+                status.soap.enabled
+                  ? "Legacy core-banking interface is accepting requests."
+                  : "Off. An unused SOAP endpoint is attack surface with no user."
+              }
+              footnote={status.soap.enabled ? `WSDL at ${status.soap.wsdl}` : undefined}
+            />
           </div>
-          <div className="flex flex-wrap gap-1.5">
-            {CATS.map((c) => (
-              <button
-                key={c}
-                onClick={() => setCat(c)}
-                className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${cat === c ? "border-accent bg-accent text-white" : "border-line text-ink-2 hover:bg-surface-2"}`}
+        )}
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex flex-wrap items-center gap-2">
+              Outbound webhooks
+              {canManage && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="ml-auto"
+                  onClick={() => setCreating((v) => !v)}
+                >
+                  <Plus className="h-3.5 w-3.5" /> Add
+                </Button>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardBody className="space-y-2">
+            {creating && (
+              <WebhookForm
+                onCancel={() => setCreating(false)}
+                onSaved={() => {
+                  setCreating(false);
+                  load();
+                }}
+                onError={setError}
+              />
+            )}
+
+            {webhooks === null && <Skeleton className="h-16" />}
+            {webhooks?.length === 0 && (
+              <p className="py-2 text-sm text-ink-3">
+                No webhooks. Add one to push contract events into another system.
+              </p>
+            )}
+            {webhooks?.map((hook) => (
+              <div
+                key={hook.id}
+                className="flex flex-wrap items-center gap-2 rounded-md border border-line p-2"
               >
-                {c}
-              </button>
+                <Badge tone={hook.is_active ? "accent" : "neutral"}>
+                  {hook.is_active ? "active" : "paused"}
+                </Badge>
+                <code className="flex-1 truncate font-mono text-xs text-ink">{hook.url}</code>
+                <span className="text-[11px] text-ink-3">
+                  {hook.events.length ? hook.events.join(", ") : "all events"}
+                </span>
+                {canManage && (
+                  <button
+                    onClick={() => removeWebhook(hook)}
+                    className="p-1 text-ink-3 hover:text-ink"
+                    title="Remove"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
             ))}
-          </div>
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {shown.map((c) => {
-            const on = state[c.id];
-            return (
-              <Card key={c.id} className="transition hover:border-ink-3/30">
-                <CardBody className="flex h-full flex-col">
-                  <div className="mb-2 flex items-center gap-2.5">
-                    <span className="grid h-10 w-10 place-items-center rounded-xl text-sm font-bold text-white" style={{ background: c.color }}>{c.mark}</span>
-                    <div className="min-w-0">
-                      <div className="truncate font-semibold text-ink">{c.name}</div>
-                      <div className="text-[11px] text-ink-3">{c.cat}</div>
-                    </div>
-                    {on && <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700"><Check className="h-3 w-3" /> Connected</span>}
-                  </div>
-                  <p className="flex-1 text-sm text-ink-2">{c.desc}</p>
-                  <div className="mt-3">
-                    <Button
-                      size="sm"
-                      variant={on ? "secondary" : "primary"}
-                      className="w-full"
-                      onClick={() => setState((s) => ({ ...s, [c.id]: !s[c.id] }))}
-                    >
-                      {on ? "Disconnect" : <><Plug className="h-3.5 w-3.5" /> Connect</>}
-                    </Button>
-                  </div>
-                </CardBody>
-              </Card>
-            );
-          })}
-        </div>
-
-        <div className="flex items-center gap-2 rounded-xl border border-line bg-surface-2 px-4 py-3 text-sm text-ink-2">
-          <Webhook className="h-4 w-4 text-ink-3" />
-          Don&rsquo;t see your tool? Build on the <span className="font-medium text-ink">REST API + webhooks</span> that power every connector here.
-        </div>
+            <p className="pt-1 text-xs text-ink-3">
+              Each delivery is signed with an HMAC the receiving system verifies. The signing
+              secret is shown once when the webhook is created and never again.
+            </p>
+          </CardBody>
+        </Card>
       </div>
     </div>
+  );
+}
+
+function Connector({
+  icon: Icon,
+  name,
+  on,
+  detail,
+  footnote,
+  action,
+}: {
+  icon: typeof Plug;
+  name: string;
+  on: boolean;
+  detail: string;
+  footnote?: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <Card>
+      <CardBody className="space-y-1.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <Icon className="h-4 w-4 text-accent" />
+          <span className="text-sm font-semibold text-ink">{name}</span>
+          <span
+            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] ${
+              on ? "bg-emerald-100 text-emerald-800" : "bg-surface-3 text-ink-3"
+            }`}
+          >
+            {on ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />}
+            {on ? "connected" : "off"}
+          </span>
+        </div>
+        <p className="text-xs text-ink-2">{detail}</p>
+        {footnote && (
+          <p className="flex items-start gap-1 text-[11px] text-ink-3">
+            {footnote.startsWith("No token") && (
+              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-amber-600" />
+            )}
+            {footnote}
+          </p>
+        )}
+        {action}
+      </CardBody>
+    </Card>
+  );
+}
+
+function WebhookForm({
+  onCancel,
+  onSaved,
+  onError,
+}: {
+  onCancel: () => void;
+  onSaved: () => void;
+  onError: (m: string) => void;
+}) {
+  const [url, setUrl] = useState("");
+  const [events, setEvents] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [secret, setSecret] = useState("");
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    onError("");
+    try {
+      const created = await api.post<{ secret?: string }>("/webhooks", {
+        url: url.trim(),
+        events: events.split(",").map((s) => s.trim()).filter(Boolean),
+      });
+      // Shown once. The API stores only a hash, so there is no second chance to read it —
+      // saying so here is the difference between a copied secret and a support ticket.
+      if (created.secret) setSecret(created.secret);
+      else onSaved();
+    } catch (e: unknown) {
+      onError(e instanceof ApiError ? e.message : "Couldn't create that webhook.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (secret) {
+    return (
+      <div className="space-y-2 rounded-md border border-accent/50 p-3">
+        <div className="text-sm font-medium text-ink">Signing secret</div>
+        <code className="block break-all rounded bg-surface-3 p-2 font-mono text-xs">
+          {secret}
+        </code>
+        <p className="text-xs text-ink-3">
+          Copy it now — only a hash is stored, so this cannot be shown again.
+        </p>
+        <Button size="sm" onClick={onSaved}>
+          Done
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={save} className="grid gap-2 rounded-md bg-surface-2 p-2 sm:grid-cols-12">
+      <div className="sm:col-span-6">
+        <Field label="Endpoint URL">
+          <Input
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            required
+            placeholder="https://internal.mmbl.test/hooks/contracts"
+          />
+        </Field>
+      </div>
+      <div className="sm:col-span-4">
+        <Field label="Events" hint="Comma-separated; blank means all">
+          <Input
+            value={events}
+            onChange={(e) => setEvents(e.target.value)}
+            placeholder="contract.signed, contract.terminated"
+          />
+        </Field>
+      </div>
+      <div className="flex items-end gap-2 pb-1 sm:col-span-2">
+        <Button type="submit" size="sm" loading={busy}>
+          Create
+        </Button>
+        <Button type="button" size="sm" variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+      </div>
+    </form>
   );
 }

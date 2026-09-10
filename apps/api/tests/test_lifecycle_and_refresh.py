@@ -6,14 +6,14 @@ one (e.g. signed -> draft) is rejected.
 
 Refresh-token reuse: presenting a refresh token that has already been rotated must (a) burn
 the whole session chain and (b) report status='reuse' so the router returns 401. This is
-the single most important post-exfiltration defence in `auth_service`."""
+the single most important post-exfiltration defence in `auth_service`.
 
-import datetime as dt
-import uuid
+Requirements: SEC-06.
+"""
 
-import pytest
 
-from app import auth_service, lifecycle, models, security
+
+from app import auth_service, lifecycle, models
 from app.database import SessionLocal, set_request_tenant
 
 
@@ -28,12 +28,33 @@ class TestLifecycleStateMachine:
         assert "active" in lifecycle.TRANSITIONS["signed"]
         assert "draft" not in lifecycle.TRANSITIONS["signed"]
 
-    def test_void_decline_terminal_states(self):
-        # voided / declined / terminated are terminal — empty transition set.
-        for terminal in ("voided", "terminated", "expired"):
+    def test_void_and_terminate_are_final(self):
+        """Nothing comes back from voided or terminated. Both mean a deliberate human decision
+        to end the agreement, and a path out of them would let that decision be undone without
+        a record of who undid it."""
+        for terminal in ("voided", "terminated", "renewed", "superseded"):
             assert lifecycle.TRANSITIONS.get(terminal, set()) == set(), (
                 f"{terminal} should be a terminal state with no outgoing transitions"
             )
+
+    def test_expired_is_not_terminal_because_an_expired_agreement_can_be_renewed(self):
+        """`expired` looks like a terminal state and is not, deliberately.
+
+        Renewing after expiry is ordinary — somebody notices a lapsed agreement in December
+        and renews it in January. Making `expired` a dead end would force them to raise a new
+        agreement instead, breaking the `renewed_from_id` chain and losing the link between the
+        two. The only way out is renewal; it cannot go back to draft or active.
+        """
+        assert lifecycle.TRANSITIONS["expired"] == {"renewed"}
+        assert lifecycle.can_transition("expired", "renewed") is True
+        assert lifecycle.can_transition("expired", "active") is False
+        assert lifecycle.can_transition("expired", "draft") is False
+
+    def test_declined_returns_to_draft_rather_than_dying(self):
+        """A counterparty declining is feedback, not the end. The draft is the thing that needs
+        changing, so that is where it goes back to."""
+        assert "draft" in lifecycle.TRANSITIONS["declined"]
+        assert "signed" not in lifecycle.TRANSITIONS["declined"]
 
 
 class _FakeRequest:

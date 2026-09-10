@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
+import { applyAccent } from "@/lib/contrast";
+import { useLocaleDefault } from "@/lib/i18n";
 import { AppShell } from "@/components/shell";
 import { Spinner } from "@/components/ui";
 
@@ -27,22 +29,17 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     return () => clearTimeout(t);
   }, [loading]);
 
-  // apply the workspace's accent color as a CSS custom property
+  // The workspace accent, corrected so white text on it still reaches 4.5:1. Setting the
+  // variable raw would let any brand colour make every primary button unreadable, and the
+  // person who picked the colour is not the person who would notice.
   useEffect(() => {
-    const c = me?.tenant.accent_color;
-    if (typeof document !== "undefined" && c) {
-      document.documentElement.style.setProperty("--color-accent", c);
-    }
+    applyAccent(me?.tenant.accent_color);
   }, [me?.tenant.accent_color]);
 
-  // RTL / LTR flip based on tenant locale (Arabic ⇒ rtl)
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    const loc = (me?.tenant.locale || "en").toLowerCase();
-    const isRtl = loc.startsWith("ar") || loc.startsWith("he") || loc.startsWith("fa") || loc.startsWith("ur");
-    document.documentElement.setAttribute("dir", isRtl ? "rtl" : "ltr");
-    document.documentElement.setAttribute("lang", loc.slice(0, 2));
-  }, [me?.tenant.locale]);
+  // Reading direction and language are owned by the i18n provider — one owner, or two effects
+  // fight over `dir` and the loser wins whichever ran last. The workspace locale is the
+  // starting point; a person's own choice overrides it and is remembered.
+  useLocaleDefault(me?.tenant.locale);
 
   if (loading || !me) {
     return (

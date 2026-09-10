@@ -1,138 +1,328 @@
 "use client";
 
-// DOCX / Word Import-Export — PROTOTYPE. Import a .docx (or PDF) and convert it to an editable
-// contract with extracted metadata; export the contract back to Word/PDF with options. Mockup:
-// simulated conversion. Wires later to a docx engine (e.g. python-docx / docx round-trip).
+/**
+ * Word round-trip — export an agreement for a counterparty, read back what they changed.
+ *
+ * Replaces the simulated-conversion mockup. Both halves hit real endpoints:
+ *   GET  /contracts/{id}/export.docx   the editable document, clause numbering intact
+ *   POST /contracts/{id}/import.docx   the returned document, parsed for tracked changes
+ *
+ * The import is a two-step on purpose: applying it overwrites the contract body, files the
+ * counterparty's comments, and classifies the agreement non-standard. That is a lot to happen
+ * behind one button, so you see exactly what it will do first.
+ */
 
-import { useState } from "react";
-import { ArrowRight, Check, Download, FileDown, FileText, FileUp, Loader2, Settings2 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  Check,
+  Download,
+  FileText,
+  MessageSquare,
+  Minus,
+  Plus,
+  Upload,
+} from "lucide-react";
+import { api, ApiError } from "@/lib/api";
 import { PageHeader } from "@/components/shell";
-import { Badge, Button, Card, CardBody, CardHeader, CardTitle } from "@/components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  CardTitle,
+  ErrorBanner,
+  Select,
+  Skeleton,
+} from "@/components/ui";
+import type { ContractListItem, DocxImportResult, Paginated } from "@/lib/types";
 
-type Stage = "idle" | "converting" | "done";
-
-const EXTRACTED = [
-  ["Type", "Master Services Agreement"],
-  ["Counterparty", "Northwind Ltd"],
-  ["Effective date", "2026-07-01"],
-  ["Term", "24 months"],
-  ["Value", "$120,000"],
-  ["Governing law", "DIFC"],
-];
+const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export default function DocxStudioPage() {
-  const [stage, setStage] = useState<Stage>("idle");
-  const [fmt, setFmt] = useState<"docx" | "pdf">("docx");
-  const [withRedlines, setWithRedlines] = useState(false);
-  const [withWatermark, setWithWatermark] = useState(true);
-  const [exported, setExported] = useState(false);
+  const [contracts, setContracts] = useState<ContractListItem[] | null>(null);
+  const [selectedId, setSelectedId] = useState("");
+  const [preview, setPreview] = useState<DocxImportResult | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [applied, setApplied] = useState(false);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
 
-  function simulateImport() {
-    setStage("converting");
-    setTimeout(() => setStage("done"), 1400);
-  }
+  useEffect(() => {
+    api
+      .get<Paginated<ContractListItem>>("/contracts?page_size=100")
+      .then((r) => {
+        setContracts(r.items);
+        if (r.items.length) setSelectedId(r.items[0].id);
+      })
+      .catch(() => setContracts([]));
+  }, []);
+
+  const upload = useCallback(
+    async (file: File, apply: boolean) => {
+      if (!selectedId) return;
+      setBusy(true);
+      setError("");
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("apply", apply ? "true" : "false");
+        const result = await api.postForm<DocxImportResult>(
+          `/contracts/${selectedId}/import.docx`,
+          form,
+        );
+        setPreview(result);
+        setApplied(result.applied);
+        if (result.applied) setPendingFile(null);
+      } catch (e) {
+        setError(e instanceof ApiError ? e.message : "That file could not be read.");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [selectedId],
+  );
 
   return (
-    <div>
+    <div className="space-y-5">
       <PageHeader
-        title={<span className="flex items-center gap-2">Word Import / Export</span>}
-        subtitle="Bring Word documents in as editable contracts, and export back to .docx or PDF."
+        title="Word round-trip"
+        subtitle="Send an editable agreement out; read back the counterparty's tracked changes and comments"
       />
 
-      <div className="grid gap-4 p-4 lg:grid-cols-2">
-        {/* import */}
+      {error && <ErrorBanner message={error} />}
+
+      {contracts === null ? (
+        <Skeleton className="h-24 w-full" />
+      ) : contracts.length === 0 ? (
         <Card>
-          <CardHeader><CardTitle className="flex items-center gap-1.5"><FileUp className="h-4 w-4" /> Import</CardTitle></CardHeader>
-          <CardBody className="space-y-3">
-            {stage === "idle" && (
-              <button
-                onClick={simulateImport}
-                className="grid w-full place-items-center gap-2 rounded-xl border-2 border-dashed border-line bg-surface-2 py-10 text-center transition hover:border-accent"
+          <CardBody className="py-10 text-center text-sm text-ink-2">
+            No agreements yet. Create one first.
+          </CardBody>
+        </Card>
+      ) : (
+        <>
+          <Card>
+            <CardBody className="flex flex-wrap items-end gap-3">
+              <div className="min-w-[240px] flex-1">
+                <label className="mb-1 block text-xs font-medium text-ink-2">Agreement</label>
+                <Select
+                  value={selectedId}
+                  onChange={(e) => {
+                    setSelectedId(e.target.value);
+                    setPreview(null);
+                    setApplied(false);
+                    setPendingFile(null);
+                  }}
+                >
+                  {contracts.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.reference_no} — {c.title}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+              <a
+                href={`${API}/contracts/${selectedId}/export.docx`}
+                className="inline-flex h-9 items-center gap-2 rounded-md bg-accent px-3 text-sm font-medium text-white transition hover:opacity-90"
               >
-                <FileUp className="h-8 w-8 text-ink-3" />
-                <div className="text-sm font-medium text-ink">Drop a .docx or .pdf here</div>
-                <div className="text-[11px] text-ink-3">We convert it to an editable contract and extract the key terms</div>
-              </button>
-            )}
-            {stage === "converting" && (
-              <div className="grid place-items-center gap-2 rounded-xl border border-line bg-surface-2 py-10">
-                <Loader2 className="h-7 w-7 animate-spin text-accent" />
-                <div className="text-sm font-medium text-ink">Converting &ldquo;Northwind_MSA_v3.docx&rdquo;…</div>
-                <div className="text-[11px] text-ink-3">Parsing styles · mapping clauses · extracting fields</div>
-              </div>
-            )}
-            {stage === "done" && (
-              <div className="space-y-3">
-                <div className="flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
-                  <Check className="h-4 w-4" /> Converted &mdash; 14 pages, 9 clauses detected
-                </div>
-                <div className="rounded-lg border border-line">
-                  <div className="border-b border-line px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-ink-3">Extracted metadata</div>
-                  <div className="divide-y divide-line">
-                    {EXTRACTED.map(([k, v]) => (
-                      <div key={k} className="flex items-center justify-between px-3 py-1.5 text-sm">
-                        <span className="text-ink-3">{k}</span>
-                        <span className="font-medium text-ink">{v}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <Button className="w-full">
-                  Open as editable contract <ArrowRight className="h-4 w-4" />
-                </Button>
-                <button onClick={() => setStage("idle")} className="w-full text-center text-xs text-ink-3 hover:underline">Import another</button>
-              </div>
-            )}
-          </CardBody>
-        </Card>
+                <Download className="h-4 w-4" /> Export .docx
+              </a>
+            </CardBody>
+          </Card>
 
-        {/* export */}
-        <Card>
-          <CardHeader><CardTitle className="flex items-center gap-1.5"><FileDown className="h-4 w-4" /> Export</CardTitle></CardHeader>
-          <CardBody className="space-y-3">
-            <div>
-              <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-3">Format</label>
-              <div className="flex gap-2">
-                {([["docx", "Word (.docx)"], ["pdf", "PDF"]] as const).map(([v, label]) => (
-                  <button
-                    key={v}
-                    onClick={() => setFmt(v)}
-                    className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-sm transition ${fmt === v ? "border-accent bg-accent/5 font-medium text-accent" : "border-line text-ink-2 hover:bg-surface-2"}`}
-                  >
-                    <FileText className="h-4 w-4" /> {label}
-                  </button>
-                ))}
-              </div>
-            </div>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-1.5">
+                  <FileText className="h-4 w-4" /> Send out
+                </CardTitle>
+              </CardHeader>
+              <CardBody className="space-y-2 text-sm text-ink-2">
+                <p>
+                  The export is a real working draft. Clause numbers are Word numbering, not typed
+                  digits — so if the counterparty inserts a clause, everything below it renumbers
+                  correctly instead of silently going wrong.
+                </p>
+                <p>Headings, tables and the reference in the page header all survive the trip.</p>
+              </CardBody>
+            </Card>
 
-            <div className="space-y-2 rounded-lg border border-line p-3">
-              <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-3">
-                <Settings2 className="h-3.5 w-3.5" /> Options
-              </div>
-              <label className="flex items-center gap-2 text-sm text-ink-2">
-                <input type="checkbox" checked={withRedlines} onChange={(e) => setWithRedlines(e.target.checked)} />
-                Include tracked changes / redlines
-              </label>
-              <label className="flex items-center gap-2 text-sm text-ink-2">
-                <input type="checkbox" checked={withWatermark} onChange={(e) => setWithWatermark(e.target.checked)} />
-                Add &ldquo;DRAFT&rdquo; watermark (non-final statuses)
-              </label>
-            </div>
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-1.5">
+                  <Upload className="h-4 w-4" /> Read back
+                </CardTitle>
+              </CardHeader>
+              <CardBody className="space-y-3">
+                <p className="text-sm text-ink-2">
+                  Upload the returned document. You will see its tracked changes and comments
+                  before anything is applied.
+                </p>
+                <input
+                  type="file"
+                  accept=".docx"
+                  className="block w-full text-sm text-ink-2 file:mr-3 file:rounded-md file:border-0 file:bg-surface-3 file:px-3 file:py-2 file:text-sm file:font-medium file:text-ink hover:file:bg-surface-2"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    setPendingFile(file);
+                    setApplied(false);
+                    void upload(file, false);
+                  }}
+                />
+                {busy && <p className="text-sm text-ink-3">Reading…</p>}
+              </CardBody>
+            </Card>
+          </div>
 
-            <div className="rounded-lg border border-line bg-surface-2 p-3">
-              <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">Preview</div>
-              <div className="mt-1 text-sm text-ink-2">
-                Northwind MSA → <span className="font-medium text-ink">{fmt === "docx" ? "Northwind_MSA.docx" : "Northwind_MSA.pdf"}</span>
-                {withRedlines ? " · with redlines" : ""}{withWatermark ? " · watermarked" : ""}
-              </div>
-            </div>
+          {preview && (
+            <ImportPreview
+              result={preview}
+              applied={applied}
+              busy={busy}
+              onApply={() => pendingFile && upload(pendingFile, true)}
+            />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
 
-            <Button className="w-full" onClick={() => { setExported(true); setTimeout(() => setExported(false), 1800); }}>
-              {exported ? <><Check className="h-4 w-4" /> Exported</> : <><Download className="h-4 w-4" /> Export {fmt.toUpperCase()}</>}
-            </Button>
-          </CardBody>
-        </Card>
+function ImportPreview({
+  result,
+  applied,
+  busy,
+  onApply,
+}: {
+  result: DocxImportResult;
+  applied: boolean;
+  busy: boolean;
+  onApply: () => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 sm:grid-cols-4">
+        <Stat label="Insertions" value={result.insertions} icon={Plus} tone="text-accent" />
+        <Stat label="Deletions" value={result.deletions} icon={Minus} tone="text-red-600" />
+        <Stat label="Comments" value={result.comment_count} icon={MessageSquare} />
+        <Stat label="Paragraphs" value={result.paragraphs} icon={FileText} />
       </div>
+
+      {result.warnings.length > 0 && (
+        <Card className="border-amber-300/60 bg-amber-50/50 dark:bg-amber-950/20">
+          <CardBody className="space-y-1 py-3">
+            {result.warnings.map((w) => (
+              <div key={w} className="flex items-start gap-2 text-sm text-ink-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                <span>{w}</span>
+              </div>
+            ))}
+          </CardBody>
+        </Card>
+      )}
+
+      {result.changes.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Tracked changes</CardTitle>
+          </CardHeader>
+          <CardBody className="space-y-2">
+            {result.changes.map((c, i) => (
+              <div key={i} className="rounded-md border border-line p-2 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge tone={c.kind === "insert" ? "accent" : "neutral"}>
+                    {c.kind === "insert" ? "inserted" : "deleted"}
+                  </Badge>
+                  <span className="text-xs text-ink-2">
+                    {c.author || "Unknown"}
+                    {c.at && ` · ${new Date(c.at).toLocaleDateString()}`}
+                  </span>
+                </div>
+                <p
+                  className={`mt-1 font-mono text-xs ${
+                    c.kind === "insert" ? "text-accent" : "text-red-600 line-through"
+                  }`}
+                >
+                  {c.text}
+                </p>
+                {c.context && <p className="mt-1 text-xs text-ink-3">in: {c.context}</p>}
+              </div>
+            ))}
+          </CardBody>
+        </Card>
+      )}
+
+      {result.comments.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Comments</CardTitle>
+          </CardHeader>
+          <CardBody className="space-y-2">
+            {result.comments.map((c) => (
+              <div key={c.comment_id} className="rounded-md border border-line p-2 text-sm">
+                <div className="flex flex-wrap items-center gap-2 text-xs text-ink-2">
+                  <span className="font-medium text-ink">{c.author || "Unknown"}</span>
+                  {c.at && <span>{new Date(c.at).toLocaleDateString()}</span>}
+                </div>
+                <p className="mt-1 text-ink">{c.text}</p>
+                {c.anchor_text && (
+                  <p className="mt-1 text-xs text-ink-3">on: “{c.anchor_text.slice(0, 160)}”</p>
+                )}
+              </div>
+            ))}
+          </CardBody>
+        </Card>
+      )}
+
+      <Card>
+        <CardBody className="space-y-3">
+          {applied ? (
+            <div className="flex items-center gap-2 text-sm text-accent">
+              <Check className="h-4 w-4" />
+              Imported. Version {result.version_no} saved with the previous wording
+              {result.classified_non_standard && ", and the agreement is now Non-Standard"}.
+            </div>
+          ) : (
+            <>
+              <p className="text-sm text-ink-2">
+                Applying this replaces the agreement text, saves the current wording as a new
+                version, files the counterparty&rsquo;s comments
+                {result.has_revisions && ", and classifies the agreement Non-Standard so it takes the non-standard approval route"}.
+              </p>
+              <Button onClick={onApply} disabled={busy}>
+                {busy ? "Applying…" : "Apply to the agreement"}
+                {!busy && <ArrowRight className="h-4 w-4" />}
+              </Button>
+            </>
+          )}
+        </CardBody>
+      </Card>
+    </div>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  icon: Icon,
+  tone,
+}: {
+  label: string;
+  value: number;
+  icon: typeof FileText;
+  tone?: string;
+}) {
+  return (
+    <div className="rounded-lg border border-line bg-surface p-3">
+      <div className={`flex items-center gap-1.5 font-display text-2xl font-semibold ${tone ?? "text-ink"}`}>
+        <Icon className="h-4 w-4" />
+        {value}
+      </div>
+      <div className="text-xs text-ink-2">{label}</div>
     </div>
   );
 }

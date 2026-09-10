@@ -1,0 +1,173 @@
+# Kong API Gateway — declarative configuration (Phase 7, item 3).
+#
+# Deployment topology this assumes:
+#
+#     internet ─▶ WAF ─▶ Kong ─▶ [ api (FastAPI) ]
+#                                [ web (Next.js) ]
+#
+# Kong terminates TLS, applies rate limiting and request-size caps, and is the only thing that
+# can reach the API. The API's own middleware stack (logging → rate limit → CORS → security
+# headers) stays in place: a gateway is a second layer, never a replacement. If Kong is
+# bypassed — a misconfigured network policy, a port-forward during an incident — the
+# application must still defend itself.
+#
+# Apply with:  deck gateway sync kong.yaml
+# Validate with: deck file validate kong.yaml
+#
+# Everything marked CHANGE-ME is deployment-specific. Nothing here contains a secret: the JWT
+# and OIDC credentials are referenced by name and provisioned separately, because a gateway
+# config lives in version control and secrets must not.
+
+_format_version: "3.0"
+_transform: true
+
+services:
+  # -------------------------------------------------------------------------------------
+  # The API
+  # -------------------------------------------------------------------------------------
+  - name: cm-api
+    url: http://api:8000
+    # Deliberately generous: PDF rendering, DOCX export and a large repository export are all
+    # legitimately slow. A 60s read timeout would turn a working export into a 504.
+    connect_timeout: 5000
+    write_timeout: 120000
+    read_timeout: 120000
+    retries: 2
+    routes:
+      - name: cm-api-public
+        # The unauthenticated surface: login, refresh, the public signing portal, SAML ACS.
+        # Kept as its own route so it can carry a tighter rate limit than the authenticated
+        # API without throttling ordinary work.
+        paths:
+          - /auth
+          - /sign
+          - /healthz
+          - /readyz
+        strip_path: false
+        protocols: [https]
+        plugins:
+          - name: rate-limiting
+            config:
+              minute: 30
+              hour: 300
+              policy: redis
+              redis_host: redis
+              redis_port: 6379
+              # Fail open. A Redis outage must not lock everybody out of a bank's contract
+              # system; the API has its own limiter underneath as the second layer.
+              fault_tolerant: true
+              hide_client_headers: false
+          - name: bot-detection
+
+      - name: cm-api-main
+        paths:
+          - /
+        strip_path: false
+        protocols: [https]
+        plugins:
+          - name: rate-limiting
+            config:
+              minute: 300
+              hour: 10000
+              policy: redis
+              redis_host: redis
+              redis_port: 6379
+              fault_tolerant: true
+
+      - name: cm-api-soap
+        # SOAP is off unless an operator enables it, and when it is on it is for core banking
+        # only — hence its own route and its own IP restriction.
+        paths:
+          - /soap
+        strip_path: false
+        protocols: [https]
+        plugins:
+          - name: ip-restriction
+            config:
+              allow:
+                - 10.0.0.0/8        # CHANGE-ME: the core banking network
+          - name: rate-limiting
+            config:
+              minute: 60
+              policy: local
+
+    plugins:
+      # 50 MB matches `MAX_UPLOAD_MB`. Two different limits would mean an upload that Kong
+      # accepts and the API then rejects — a confusing failure at the worst moment.
+      - name: request-size-limiting
+        config:
+          allowed_payload_size: 50
+          size_unit: megabytes
+
+      - name: cors
+        config:
+          origins:
+            - https://contracts.mmbl.test    # CHANGE-ME
+          methods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+          headers: [Accept, Authorization, Content-Type, X-Requested-With]
+          exposed_headers: [Content-Disposition]
+          credentials: true
+          max_age: 3600
+
+      - name: response-ratelimiting
+        config:
+          limits:
+            export:
+              minute: 10
+          policy: local
+
+  # -------------------------------------------------------------------------------------
+  # The web app
+  # -------------------------------------------------------------------------------------
+  - name: cm-web
+    url: http://web:3000
+    routes:
+      - name: cm-web-root
+        paths: ["/"]
+        strip_path: false
+        protocols: [https]
+    plugins:
+      - name: rate-limiting
+        config:
+          minute: 600
+          policy: local
+
+# ---------------------------------------------------------------------------------------
+# Consumers
+# ---------------------------------------------------------------------------------------
+# One consumer per integrating system, so a compromised core-banking credential can be
+# revoked without touching anyone else. Credentials themselves are provisioned out of band —
+# never in this file.
+consumers:
+  - username: core-banking
+    tags: [integration]
+  - username: siem-collector
+    tags: [integration]
+
+# ---------------------------------------------------------------------------------------
+# Global plugins
+# ---------------------------------------------------------------------------------------
+plugins:
+  # Correlation id in, correlation id out. The API logs it, so a request can be followed from
+  # the gateway access log through to an audit row.
+  - name: correlation-id
+    config:
+      header_name: X-Request-Id
+      generator: uuid
+      echo_downstream: true
+
+  - name: request-termination
+    enabled: false          # flipped on for planned maintenance
+    config:
+      status_code: 503
+      message: "Contract Management is undergoing scheduled maintenance."
+
+  # Kong adds these; the API sets them too. Both, on purpose — see the note at the top about
+  # the gateway being a second layer rather than a replacement.
+  - name: response-transformer
+    config:
+      add:
+        headers:
+          - "X-Content-Type-Options: nosniff"
+          - "Referrer-Policy: strict-origin-when-cross-origin"
+          - "Strict-Transport-Security: max-age=31536000; includeSubDomains"

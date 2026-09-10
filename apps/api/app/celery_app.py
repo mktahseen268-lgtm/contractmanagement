@@ -25,5 +25,12 @@ celery.conf.update(
     task_routes={"ocr.*": {"queue": "ocr"}},
 )
 
+# Worker-side metrics. Installed before the task modules so the signal handlers are connected
+# when the first task runs — the API's /metrics lives in the request process and sees none of
+# this, which left OCR, envelope sealing and every scheduled sweep invisible to monitoring.
+from . import worker_metrics  # noqa: E402
+
+worker_metrics.install()
+
 # register task modules
 from . import tasks  # noqa: E402,F401

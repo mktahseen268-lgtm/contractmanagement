@@ -511,7 +511,8 @@ def contracts_csv(
             "tags", "created_at", "updated_at",
         ])
         yield buf.getvalue()
-        buf.seek(0); buf.truncate(0)
+        buf.seek(0)
+        buf.truncate(0)
         for c in db.scalars(q).yield_per(200):
             w.writerow([
                 c.reference_no, c.title, c.type, c.status, owners.get(c.owner_id, ""), c.counterparty,
@@ -524,7 +525,8 @@ def contracts_csv(
                 c.updated_at.isoformat() if c.updated_at else "",
             ])
             yield buf.getvalue()
-            buf.seek(0); buf.truncate(0)
+            buf.seek(0)
+            buf.truncate(0)
 
     fname = f"contracts_{rfrom.isoformat()}_to_{rto.isoformat()}.csv"
     return StreamingResponse(_row_iter(), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{fname}"'})

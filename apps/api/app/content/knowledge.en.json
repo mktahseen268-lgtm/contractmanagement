@@ -1,0 +1,59 @@
+{
+  "_comment": [
+    "Starter knowledge-base content, seeded per tenant like help.en.json — gap-fill only, so an",
+    "article somebody has edited is never overwritten by a deploy.",
+    "These are real guides, not placeholders. A knowledge base that ships empty stays empty:",
+    "nobody writes the first article, and the feature is judged on the blank page."
+  ],
+  "articles": [
+    {
+      "slug": "quick-start-raise-an-agreement",
+      "category": "quickstart",
+      "title": "Raise your first agreement",
+      "summary": "From a blank page to a draft ready for review, in five steps.",
+      "sort_order": 1,
+      "body": "## 1. Start from a template, not a blank page\n\nGo to **Templates** and pick the one that matches what you are agreeing. Templates carry clauses Legal has already approved, so starting from one means the review is about the commercial terms rather than the wording.\n\nIf nothing fits, start blank — but tell Legal, because a gap in the template library will come back on the next one.\n\n## 2. Fill in intake\n\nThe template asks for the values it needs. Every question is there because the document cannot be produced without it — if a field looks unnecessary, it is filling a placeholder somewhere in the text.\n\nAnything you cannot answer yet, leave. The document will not generate until it is complete, which is deliberate: a blank in an executed agreement is a dispute.\n\n## 3. Set the dates properly\n\nThe three that matter:\n\n- **Effective date** — when obligations start running. Often not the signature date.\n- **Expiry date** — the last day in force.\n- **Notice period** — how long before expiry the other side must be told you are not renewing.\n\nEverything downstream is counted from these. Getting the effective date wrong shifts every reminder by the same amount.\n\n## 4. Add the counterparty as a record\n\nPick from the party list rather than typing a name. A typed name cannot be screened against sanctions lists, cannot be reported on, and will not roll up when the same company appears under three spellings.\n\n## 5. Send it for approval\n\nThe workflow routes it based on value and type. While an approval run is active the status buttons are locked — decisions go through the workflow, so nothing can be stepped around.\n\n**If it comes back with changes requested**, the reviewer's comments are on the agreement. Address them and resubmit; the history keeps both versions."
+    },
+    {
+      "slug": "quick-start-sign",
+      "category": "quickstart",
+      "title": "Send an agreement for signature",
+      "summary": "Placing fields, choosing an order, and what the signing record proves.",
+      "sort_order": 2,
+      "body": "## Before you send\n\nThe agreement must be **approved**. If it is still in draft or review, sending is blocked — an agreement that goes out before it is approved is the single most expensive mistake this system exists to prevent.\n\n## Placing signature fields\n\nDrag a field onto the page where each person signs, initials or dates. Every field you place must be filled before they can finish, so do not place fields you do not actually need — each one is a place the signing can stall.\n\nCoordinates are relative to the page, so the fields stay in place whatever the reader's zoom or screen.\n\n## Signing order\n\n**With an order**, each person is invited only once the person before them has finished. Use it when a later signatory needs to see an earlier signature.\n\n**Without one**, everyone is invited at once. Faster, and right for most agreements.\n\n## Identity verification\n\nChoose from the risk of the agreement, not the convenience of the signatory:\n\n- **Email access** — proves control of a mailbox.\n- **OTP to a phone** — adds a second channel, so a compromised mailbox is not enough.\n- **CNIC verification** — ties the signature to a person.\n\n## What the record proves\n\nWhen the last person signs, the system produces the executed PDF and a **Certificate of Completion**: who signed, when, from which address, and the hash of the document they saw. That certificate is the evidence, and it is generated automatically — there is nothing to remember to keep."
+    },
+    {
+      "slug": "playbook-renewals",
+      "category": "playbook",
+      "title": "Renewals: what to do, and when",
+      "summary": "The notice period is usually shorter than people assume. Here is the sequence.",
+      "sort_order": 10,
+      "body": "## The trap\n\nMost agreements that roll over unwanted were not forgotten. Somebody looked at the expiry date, saw months left, and missed that the **notice period** had already started running.\n\nAn agreement expiring on 31 December with 90 days' notice must be stopped by **30 September**. In October it is already renewed, whatever anyone intends.\n\n## The sequence\n\n**120 days out** — the system flags it. Decide the direction: renew as-is, renegotiate, or exit.\n\n**Renegotiating?** Start now. Reaching agreement takes longer than the notice period allows if you begin when the reminder gets urgent.\n\n**Exiting?** Check the clause for *how* notice must be given. Many require it in writing to a named address, and an email to your usual contact does not satisfy that. This is the most common way a valid exit fails.\n\n**Renewing as-is?** Still check the price mechanism. Agreements that renew automatically often renew at an indexed rate that nobody has looked at since it was signed.\n\n## After the decision\n\nRecord it on the agreement. A decision that lives in somebody's inbox is not a decision the next person can find — and the person handling this renewal in three years will not be you."
+    },
+    {
+      "slug": "playbook-review",
+      "category": "playbook",
+      "title": "Reviewing an agreement: what to actually look at",
+      "summary": "The clauses that cause disputes, in the order they cause them.",
+      "sort_order": 11,
+      "audience_roles": ["manager", "approver", "admin", "owner"],
+      "body": "## Read these first\n\n**Liability and indemnity.** What is capped, at what, and what sits outside the cap. An uncapped indemnity is the single largest exposure in most agreements, and it is usually one sentence.\n\n**Termination.** Can you get out, on what notice, and what does it cost? Note whether termination for convenience exists at all — plenty of agreements only allow termination for cause, which means proving fault.\n\n**Payment terms.** When, in what currency, and what happens if late. Currency matters more than it looks: an agreement priced in a foreign currency moves the exchange risk onto the bank.\n\n**Governing law and dispute resolution.** Where a dispute would be heard. A favourable agreement heard in an inconvenient forum is not favourable.\n\n## Then check the deviations\n\nThe playbook check has already compared the draft against approved clause wording and flagged what changed. Read those findings before reading the document — they point at exactly the paragraphs somebody negotiated.\n\nA finding marked **prohibited** means language Legal has said must never appear. That is not a judgement call.\n\n## What a reviewer owes the next person\n\nIf you request changes, say what would make it acceptable. \"Not comfortable with clause 8\" sends it back around the loop; \"clause 8 needs a cap at 12 months' fees\" ends it in one pass."
+    },
+    {
+      "slug": "faq-common-questions",
+      "category": "faq",
+      "title": "Common questions",
+      "summary": "Why is this locked, where did my draft go, and who can see what.",
+      "sort_order": 20,
+      "body": "**Why can't I change the status?**\n\nAn approval run is active. Decisions go through the workflow so that approvals cannot be stepped around. Open the workflow and decide it there, or cancel the run if it was started in error.\n\n**Why won't the document generate?**\n\nA merge field has no value. Generation stops rather than leaving a blank, because a blank in a signed agreement is a dispute. The error names the field.\n\n**Who can see my agreement?**\n\nEveryone in the workspace, unless it is marked **confidential** — then only people explicitly given access. Refused attempts are recorded either way.\n\n**I marked something confidential by mistake.**\n\nUnmark it. The access list is kept, so re-marking it later restores the same people.\n\n**Can I delete an agreement?**\n\nNo, and this is deliberate. Agreements are voided or terminated, and both keep the record. Retention policy decides when data actually goes, and a legal hold overrides retention unconditionally.\n\n**Somebody left the bank. What happens to their agreements?**\n\nOwnership transfers; history does not. Their name stays on what they did, because an audit trail that can be rewritten when somebody leaves is not an audit trail.\n\n**Why did I get asked for my password again?**\n\nA sensitive action — changing a role, revealing a webhook secret, voiding a signature. The re-prompt is bound to that one action, so proving who you are once does not open a window over everything else."
+    },
+    {
+      "slug": "faq-signing-for-clients",
+      "category": "faq",
+      "title": "Helping a client sign at a branch",
+      "summary": "For staff assisting a customer who is not comfortable online.",
+      "sort_order": 21,
+      "body": "## Before you start\n\nMake sure the customer has time. A rushed signature is the one that gets disputed, and the record will show how long they spent on the page.\n\n## Use assisted mode\n\nOpen the signing link on the branch tablet and switch on **assisted mode**. It enlarges the text and the buttons, removes everything that is not part of signing, and shows one step at a time.\n\n## What to say\n\nRead the summary aloud — what the agreement is, who it is with, what it commits them to, and for how long. Then let them read it themselves. **Do not read it on their behalf and ask them to sign**; the record shows that the document was displayed, and a customer who did not read it is a customer who can say so later.\n\n## What you must not do\n\n- Do not sign for them, or hold the stylus.\n- Do not enter the OTP for them. It goes to their phone and only they should type it.\n- Do not skip the review step to save time.\n\n## If they cannot read the screen\n\nPrint the step-by-step guide and the agreement itself. A wet signature on paper is a valid route, and the system records it as one — with the scanned page attached — rather than pretending it happened online.\n\n## Afterwards\n\nThey get a copy by email. If they have no email, print it. Somebody who signed something and has no copy of it will call the branch, and you will not have a better answer then than you do now."
+    }
+  ]
+}

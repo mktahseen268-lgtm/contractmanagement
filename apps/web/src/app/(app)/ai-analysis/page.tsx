@@ -1,160 +1,343 @@
 "use client";
 
-// AI Risk & Clause Analysis — PROTOTYPE. Runs an LLM review of a contract: overall risk score,
-// flagged clauses by severity, missing-clause warnings, and extracted obligations. Mockup:
-// canned analysis + a simulated "Analyze" run. Wires later to the OCR/AI provider seam (Claude).
+/**
+ * AI assist — clause suggestions and document data capture.
+ *
+ * Replaces the simulated-analysis mockup. Two halves, and they work differently on purpose:
+ *
+ *   GET  /contracts/{id}/ai/suggestions   clause suggestions — deterministic, grounded in the
+ *                                         library and the playbook, every entry cites why
+ *   POST /contracts/{id}/ai/capture       extract metadata from a document, FOR CONFIRMATION
+ *   POST /contracts/{id}/ai/captures/{r}/apply   writes only the fields a person ticked
+ *
+ * Nothing extracted is ever written automatically. A confidence score is not a fact; it is a
+ * reason to look. The provider is shown because `stub` means the document was not read at all.
+ */
 
-import { useState } from "react";
-import { AlertTriangle, CheckCircle2, FileSearch, Loader2, ShieldAlert, Sparkles, TriangleAlert } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import {
+  AlertTriangle,
+  Check,
+  FileSearch,
+  Lightbulb,
+  Sparkles,
+  Upload,
+  X,
+} from "lucide-react";
+import { api, ApiError } from "@/lib/api";
 import { PageHeader } from "@/components/shell";
-import { Badge, Button, Card, CardBody, CardHeader, CardTitle } from "@/components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  CardTitle,
+  ErrorBanner,
+  Select,
+  Skeleton,
+} from "@/components/ui";
+import type {
+  ClauseSuggestion,
+  ContractListItem,
+  ExtractionReview,
+  Paginated,
+} from "@/lib/types";
 
-type Sev = "high" | "medium" | "low";
-type Finding = { id: string; clause: string; severity: Sev; issue: string; suggestion: string };
-
-const SEV: Record<Sev, { label: string; pill: string; dot: string }> = {
-  high: { label: "High", pill: "bg-red-50 text-red-700", dot: "#EF4444" },
-  medium: { label: "Medium", pill: "bg-amber-50 text-amber-700", dot: "#F59E0B" },
-  low: { label: "Low", pill: "bg-emerald-50 text-emerald-700", dot: "#12B76A" },
+const RISK_TONE: Record<string, string> = {
+  low: "text-emerald-700",
+  medium: "text-amber-700",
+  high: "text-orange-700",
+  critical: "text-red-700",
 };
 
-const FINDINGS: Finding[] = [
-  { id: "f1", clause: "§7 Limitation of Liability", severity: "high", issue: "Liability is uncapped for data-breach events — unlimited exposure.", suggestion: "Add a super-cap (e.g. 2× annual fees) for data-breach claims rather than unlimited." },
-  { id: "f2", clause: "§3 Payment Terms", severity: "medium", issue: "Net-60 payment terms exceed your standard Net-30 policy.", suggestion: "Negotiate to Net-30, or add late-payment interest at 1.5%/month." },
-  { id: "f3", clause: "§11 Auto-Renewal", severity: "medium", issue: "Auto-renews for successive 12-month terms with 90-day notice — long lock-in.", suggestion: "Shorten the non-renewal notice window to 30 days." },
-  { id: "f4", clause: "§9 Governing Law", severity: "low", issue: "Governing law is DIFC — acceptable, matches your preferred jurisdiction.", suggestion: "No change needed." },
-];
-
-const MISSING = [
-  "Force Majeure clause not found",
-  "Data Processing Addendum (GDPR) not referenced",
-  "Assignment / change-of-control clause missing",
-];
-
-const OBLIGATIONS = [
-  { who: "You", what: "Pay first invoice", due: "Within 30 days of effective date" },
-  { who: "Provider", what: "Deliver onboarding plan", due: "10 business days after signing" },
-  { who: "You", what: "Renewal decision", due: "90 days before term end (2027-03-31)" },
-];
+const BASIS_LABEL: Record<string, string> = {
+  policy: "Required by policy",
+  peers: "Used by comparable agreements",
+  risk: "High-risk clause not present",
+};
 
 export default function AiAnalysisPage() {
-  const [state, setState] = useState<"idle" | "running" | "done">("done");
+  const [contracts, setContracts] = useState<ContractListItem[] | null>(null);
+  const [contractId, setContractId] = useState("");
+  const [suggestions, setSuggestions] = useState<ClauseSuggestion[] | null>(null);
+  const [captures, setCaptures] = useState<ExtractionReview[]>([]);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  function run() {
-    setState("running");
-    setTimeout(() => setState("done"), 1600);
+  useEffect(() => {
+    api
+      .get<Paginated<ContractListItem>>("/contracts?page_size=100")
+      .then((r) => {
+        setContracts(r.items);
+        if (r.items.length) setContractId(r.items[0].id);
+      })
+      .catch(() => setContracts([]));
+  }, []);
+
+  const load = useCallback(() => {
+    if (!contractId) return;
+    setSuggestions(null);
+    api
+      .get<ClauseSuggestion[]>(`/contracts/${contractId}/ai/suggestions`)
+      .then(setSuggestions)
+      .catch(() => setSuggestions([]));
+    api
+      .get<ExtractionReview[]>(`/contracts/${contractId}/ai/captures`)
+      .then(setCaptures)
+      .catch(() => setCaptures([]));
+  }, [contractId]);
+  useEffect(load, [load]);
+
+  async function upload(file: File) {
+    setBusy(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      await api.postForm<ExtractionReview>(`/contracts/${contractId}/ai/capture`, form);
+      load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "That document could not be read.");
+    } finally {
+      setBusy(false);
+    }
   }
-
-  const score = 62; // /100 — higher = riskier
-  const highN = FINDINGS.filter((f) => f.severity === "high").length;
 
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">AI Risk Analysis</span>}
-        subtitle="LLM review of a contract — risk score, flagged clauses, missing terms, extracted obligations."
-        actions={<Button size="sm" onClick={run} disabled={state === "running"}><Sparkles className="h-3.5 w-3.5" /> {state === "running" ? "Analyzing…" : "Re-analyze"}</Button>}
+        title="AI assist"
+        subtitle="Clause suggestions from your own library, and document capture you confirm before anything is written"
       />
 
-      <div className="p-4">
-        <div className="mb-3 flex items-center gap-2 text-sm text-ink-3">
-          <FileSearch className="h-4 w-4" /> Analyzing <span className="font-medium text-ink-2">Northwind Master Services Agreement (C-2026-0012)</span>
-        </div>
+      <div className="space-y-5 p-6">
+        {error && <ErrorBanner message={error} />}
 
-        {state === "running" ? (
-          <Card><CardBody className="grid place-items-center gap-2 py-16">
-            <Loader2 className="h-8 w-8 animate-spin text-accent" />
-            <div className="text-sm font-medium text-ink">Reading the document &amp; assessing risk…</div>
-          </CardBody></Card>
+        {contracts === null ? (
+          <Skeleton className="h-24" />
+        ) : contracts.length === 0 ? (
+          <Card>
+            <CardBody className="py-10 text-center text-sm text-ink-2">
+              No agreements yet. Create one first.
+            </CardBody>
+          </Card>
         ) : (
-          <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
-            {/* score + summary */}
-            <div className="space-y-4">
-              <Card>
-                <CardBody className="text-center">
-                  <RiskGauge score={score} />
-                  <div className="mt-2 text-sm font-medium text-ink">Moderate–High risk</div>
-                  <div className="text-[11px] text-ink-3">{highN} high-severity finding{highN === 1 ? "" : "s"} · review before signing</div>
-                </CardBody>
-              </Card>
-              <Card>
-                <CardHeader><CardTitle className="flex items-center gap-1.5"><TriangleAlert className="h-4 w-4" /> Missing clauses</CardTitle></CardHeader>
-                <CardBody className="space-y-1.5">
-                  {MISSING.map((m) => (
-                    <div key={m} className="flex items-start gap-2 text-sm text-ink-2">
-                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" /> {m}
-                    </div>
-                  ))}
-                </CardBody>
-              </Card>
-            </div>
+          <>
+            <Card>
+              <CardBody className="flex flex-wrap items-end gap-3">
+                <div className="min-w-[260px] flex-1">
+                  <label className="mb-1 block text-xs font-medium text-ink-2">Agreement</label>
+                  <Select value={contractId} onChange={(e) => setContractId(e.target.value)}>
+                    {contracts.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.reference_no} — {c.title}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </CardBody>
+            </Card>
 
-            {/* findings + obligations */}
-            <div className="space-y-4">
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-1.5"><ShieldAlert className="h-4 w-4" /> Flagged clauses</CardTitle>
-                  <span className="text-xs text-ink-3">{FINDINGS.length} findings</span>
-                </CardHeader>
-                <CardBody className="space-y-2.5">
-                  {FINDINGS.map((f) => (
-                    <div key={f.id} className="rounded-lg border border-line p-3">
-                      <div className="flex items-center gap-2">
-                        <span className="h-2.5 w-2.5 rounded-full" style={{ background: SEV[f.severity].dot }} />
-                        <span className="text-sm font-semibold text-ink">{f.clause}</span>
-                        <span className={`ml-auto rounded-full px-2 py-0.5 text-[10px] font-semibold ${SEV[f.severity].pill}`}>{SEV[f.severity].label}</span>
-                      </div>
-                      <p className="mt-1.5 text-sm text-ink-2">{f.issue}</p>
-                      <div className="mt-1.5 flex items-start gap-1.5 rounded-md bg-accent/5 px-2.5 py-1.5 text-[13px] text-ink-2">
-                        <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent" />
-                        <span><span className="font-medium text-ink">Suggestion:</span> {f.suggestion}</span>
-                      </div>
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-1.5">
+                  <Lightbulb className="h-4 w-4 text-accent" /> Clause suggestions
+                </CardTitle>
+              </CardHeader>
+              <CardBody className="space-y-2">
+                <p className="text-xs text-ink-3">
+                  Grounded in your clause library and playbooks, not generated — every
+                  suggestion says what it is based on, and the same draft always gives the same
+                  list.
+                </p>
+                {suggestions === null && <Skeleton className="h-20" />}
+                {suggestions?.length === 0 && (
+                  <p className="py-4 text-sm text-ink-2">
+                    Nothing to suggest — this draft already carries the clauses your library and
+                    policy would add.
+                  </p>
+                )}
+                {suggestions?.map((s) => (
+                  <div key={s.key} className="rounded-md border border-line p-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium text-ink">{s.title}</span>
+                      <Badge tone={s.basis === "policy" ? "accent" : "neutral"}>
+                        {BASIS_LABEL[s.basis] ?? s.basis}
+                      </Badge>
+                      <span className={`text-xs font-medium ${RISK_TONE[s.risk_level] ?? "text-ink-3"}`}>
+                        {s.risk_level} risk
+                      </span>
+                      {s.severity === "blocker" && (
+                        <span className="inline-flex items-center gap-1 text-xs text-red-700">
+                          <AlertTriangle className="h-3 w-3" /> blocking
+                        </span>
+                      )}
+                      <code className="rounded bg-surface-3 px-1.5 py-0.5 text-[10px] text-ink-3">
+                        [[clause:{s.key}]]
+                      </code>
                     </div>
-                  ))}
-                </CardBody>
-              </Card>
+                    <p className="mt-1 text-xs text-ink-2">{s.reason}</p>
+                    {s.body && <p className="mt-1 line-clamp-2 text-xs text-ink-3">{s.body}</p>}
+                  </div>
+                ))}
+              </CardBody>
+            </Card>
 
-              <Card>
-                <CardHeader><CardTitle className="flex items-center gap-1.5"><CheckCircle2 className="h-4 w-4" /> Extracted obligations</CardTitle></CardHeader>
-                <CardBody className="p-0">
-                  <table className="w-full text-sm">
-                    <tbody className="divide-y divide-line">
-                      {OBLIGATIONS.map((o, i) => (
-                        <tr key={i}>
-                          <td className="px-3 py-2"><span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] font-medium text-ink-2">{o.who}</span></td>
-                          <td className="px-3 py-2 font-medium text-ink">{o.what}</td>
-                          <td className="px-3 py-2 text-right text-[12px] text-ink-3">{o.due}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <div className="border-t border-line px-3 py-2 text-[11px] text-ink-3">These can be added to the contract's Obligations tab with one click.</div>
-                </CardBody>
-              </Card>
-            </div>
-          </div>
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-1.5">
+                  <FileSearch className="h-4 w-4" /> Capture from a document
+                </CardTitle>
+              </CardHeader>
+              <CardBody className="space-y-3">
+                <p className="text-sm text-ink-2">
+                  Upload a signed or scanned agreement. Fields are extracted{" "}
+                  <strong>for your confirmation</strong> — nothing is written to the agreement
+                  until you tick it.
+                </p>
+                <input
+                  type="file"
+                  className="block w-full text-sm text-ink-2 file:mr-3 file:rounded-md file:border-0 file:bg-surface-3 file:px-3 file:py-2 file:text-sm file:font-medium file:text-ink hover:file:bg-surface-2"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) void upload(file);
+                  }}
+                />
+                {busy && (
+                  <p className="flex items-center gap-1.5 text-sm text-ink-3">
+                    <Upload className="h-4 w-4" /> Reading…
+                  </p>
+                )}
+              </CardBody>
+            </Card>
+
+            {captures.map((c) => (
+              <CaptureCard
+                key={c.id}
+                capture={c}
+                contractId={contractId}
+                onChanged={load}
+                onError={setError}
+              />
+            ))}
+          </>
         )}
       </div>
     </div>
   );
 }
 
-function RiskGauge({ score }: { score: number }) {
-  // semicircular gauge, green→amber→red. score 0..100.
-  const r = 52;
-  const c = Math.PI * r; // half-circumference
-  const dash = (score / 100) * c;
-  const color = score >= 66 ? "#EF4444" : score >= 40 ? "#F59E0B" : "#12B76A";
+function CaptureCard({
+  capture,
+  contractId,
+  onChanged,
+  onError,
+}: {
+  capture: ExtractionReview;
+  contractId: string;
+  onChanged: () => void;
+  onError: (m: string) => void;
+}) {
+  const [accepted, setAccepted] = useState<Set<string>>(
+    () => new Set(capture.fields.filter((f) => f.suggested).map((f) => f.field)),
+  );
+  const [busy, setBusy] = useState(false);
+  const pending = capture.status === "pending";
+
+  async function act(path: string, body?: unknown) {
+    setBusy(true);
+    onError("");
+    try {
+      await api.post(`/contracts/${contractId}/ai/captures/${capture.id}/${path}`, body ?? {});
+      onChanged();
+    } catch (e) {
+      onError(e instanceof ApiError ? e.message : "That didn't work.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div className="relative mx-auto h-[80px] w-[140px]">
-      <svg viewBox="0 0 140 80" className="h-full w-full">
-        <path d="M14 74 A52 52 0 0 1 126 74" fill="none" stroke="#E6E8EB" strokeWidth="12" strokeLinecap="round" />
-        <path d="M14 74 A52 52 0 0 1 126 74" fill="none" stroke={color} strokeWidth="12" strokeLinecap="round" strokeDasharray={`${dash} ${c}`} />
-      </svg>
-      <div className="absolute inset-x-0 bottom-0 text-center">
-        <div className="text-2xl font-bold tnum" style={{ color }}>{score}</div>
-        <div className="-mt-1 text-[10px] uppercase tracking-wide text-ink-3">risk / 100</div>
-      </div>
-    </div>
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex flex-wrap items-center gap-2">
+          <Sparkles className="h-4 w-4 text-accent" />
+          {capture.file_name}
+          <Badge tone={pending ? "accent" : "neutral"}>{capture.status}</Badge>
+          {capture.provider === "stub" && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] text-amber-800">
+              <AlertTriangle className="h-3 w-3" /> demo provider — the document was not read
+            </span>
+          )}
+        </CardTitle>
+      </CardHeader>
+      <CardBody className="space-y-3">
+        {capture.summary && <p className="text-sm text-ink-2">{capture.summary}</p>}
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-ink-3">
+                <th className="py-1 pr-3">Accept</th>
+                <th className="py-1 pr-3">Field</th>
+                <th className="py-1 pr-3">Found</th>
+                <th className="py-1 pr-3">Currently</th>
+                <th className="py-1">Confidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              {capture.fields.map((f) => (
+                <tr key={f.field} className="border-t border-line">
+                  <td className="py-1.5 pr-3">
+                    <input
+                      type="checkbox"
+                      disabled={!pending || !f.changes}
+                      checked={accepted.has(f.field)}
+                      onChange={() =>
+                        setAccepted((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(f.field)) next.delete(f.field);
+                          else next.add(f.field);
+                          return next;
+                        })
+                      }
+                    />
+                  </td>
+                  <td className="py-1.5 pr-3 text-ink">{f.field.replace(/_/g, " ")}</td>
+                  <td className="py-1.5 pr-3 text-ink">{f.value || "—"}</td>
+                  <td className="py-1.5 pr-3 text-ink-3">
+                    {f.changes ? f.current || "(empty)" : "same"}
+                  </td>
+                  <td className="py-1.5 text-ink-3">{Math.round(f.confidence * 100)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {pending ? (
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              loading={busy}
+              onClick={() => act("apply", { accept: Array.from(accepted) })}
+            >
+              <Check className="h-3.5 w-3.5" /> Apply {accepted.size} field
+              {accepted.size === 1 ? "" : "s"}
+            </Button>
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => act("discard")}>
+              <X className="h-3.5 w-3.5" /> Discard
+            </Button>
+          </div>
+        ) : (
+          <p className="text-xs text-ink-3">
+            {capture.applied_fields.length > 0
+              ? `Applied: ${capture.applied_fields.join(", ")}.`
+              : "Discarded — nothing was written."}
+          </p>
+        )}
+      </CardBody>
+    </Card>
   );
 }

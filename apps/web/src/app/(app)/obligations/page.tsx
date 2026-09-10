@@ -1,148 +1,285 @@
 "use client";
 
-// Obligations Dashboard — PROTOTYPE of a portfolio-wide view of every contract obligation, with
-// status, owner, due dates, and reminder cadence. Today obligations are per-contract; this is the
-// cross-contract rollup + email reminders. Mockup: sample data + simulated reminder toggle.
+/**
+ * Obligations across the whole repository.
+ *
+ *   GET  /obligations             every obligation, with the counts an operations view needs
+ *   POST /obligations/sweep       run the reminder / escalation pass now
+ *   PATCH /contracts/{c}/obligations/{o}   mark one done
+ *
+ * Replaces the sample-data mockup. The per-contract endpoints already existed; what was
+ * missing was the cross-contract view — an obligation tracker you can only read one agreement
+ * at a time is a list nobody checks.
+ */
 
-import { useMemo, useState } from "react";
-import { AlarmClock, CalendarClock, CheckCircle2, Circle, Clock, ListChecks } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import {
+  AlertTriangle,
+  BellRing,
+  Calendar,
+  CheckCircle2,
+  Circle,
+  ListTodo,
+  UserX,
+} from "lucide-react";
+import { api, ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { PageHeader } from "@/components/shell";
-import { Badge, Card, CardBody, CardHeader, CardTitle } from "@/components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  ErrorBanner,
+  Select,
+  Skeleton,
+} from "@/components/ui";
+import { formatDate } from "@/lib/utils";
+import type { ObligationRollup } from "@/lib/types";
 
-type Status = "overdue" | "due_soon" | "upcoming" | "done";
-type Obligation = {
-  id: string; title: string; contract: string; contractId: string; owner: string;
-  due: string; daysOut: number; status: Status; category: string; reminder: boolean;
-};
+type View = "all" | "mine" | "overdue" | "week" | "unassigned";
 
-const DATA: Obligation[] = [
-  { id: "1", title: "Submit Q3 deliverables report", contract: "Northwind MSA", contractId: "a", owner: "You", due: "2026-06-01", daysOut: -2, status: "overdue", category: "Deliverable", reminder: true },
-  { id: "2", title: "Pay Q2 invoice", contract: "Lumen Reseller", contractId: "b", owner: "Finance", due: "2026-06-05", daysOut: 2, status: "due_soon", category: "Payment", reminder: true },
-  { id: "3", title: "Renewal go/no-go decision", contract: "Platform DPA", contractId: "c", owner: "You", due: "2026-06-09", daysOut: 6, status: "due_soon", category: "Renewal", reminder: true },
-  { id: "4", title: "Security review sign-off", contract: "ThiqaTech NDA", contractId: "d", owner: "Legal", due: "2026-06-20", daysOut: 17, status: "upcoming", category: "Compliance", reminder: false },
-  { id: "5", title: "Deliver onboarding plan", contract: "Trial Co Order", contractId: "e", owner: "Provider", due: "2026-06-28", daysOut: 25, status: "upcoming", category: "Deliverable", reminder: false },
-  { id: "6", title: "Insurance certificate renewal", contract: "Northwind MSA", contractId: "a", owner: "You", due: "2026-05-20", daysOut: 0, status: "done", category: "Compliance", reminder: false },
-];
+export default function ObligationsPage() {
+  const { me } = useAuth();
+  const canSweep =
+    me?.user.role === "owner" || me?.user.role === "admin" || me?.user.role === "manager";
 
-const STATUS_META: Record<Status, { label: string; pill: string; dot: string }> = {
-  overdue: { label: "Overdue", pill: "bg-red-50 text-red-700", dot: "#EF4444" },
-  due_soon: { label: "Due soon", pill: "bg-amber-50 text-amber-700", dot: "#F59E0B" },
-  upcoming: { label: "Upcoming", pill: "bg-blue-50 text-blue-700", dot: "#3E7BFA" },
-  done: { label: "Done", pill: "bg-emerald-50 text-emerald-700", dot: "#12B76A" },
-};
+  const [data, setData] = useState<ObligationRollup | null>(null);
+  const [view, setView] = useState<View>("all");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [swept, setSwept] = useState("");
 
-export default function ObligationsDashboardPage() {
-  const [filter, setFilter] = useState<Status | "all">("all");
-  const [items, setItems] = useState<Obligation[]>(DATA);
+  const load = useCallback(() => {
+    const params = new URLSearchParams();
+    if (view === "mine") params.set("mine", "true");
+    if (view === "overdue") params.set("overdue_only", "true");
+    if (view === "week") params.set("due_within_days", "7");
+    if (statusFilter) params.set("status_filter", statusFilter);
+    api
+      .get<ObligationRollup>(`/obligations?${params}`)
+      .then(setData)
+      .catch(() => setData(null));
+  }, [view, statusFilter]);
+  useEffect(load, [load]);
 
-  const counts = useMemo(() => ({
-    overdue: items.filter((i) => i.status === "overdue").length,
-    due_soon: items.filter((i) => i.status === "due_soon").length,
-    upcoming: items.filter((i) => i.status === "upcoming").length,
-    done: items.filter((i) => i.status === "done").length,
-  }), [items]);
-
-  const shown = filter === "all" ? items : items.filter((i) => i.status === filter);
-
-  function toggleReminder(id: string) {
-    setItems((arr) => arr.map((i) => (i.id === id ? { ...i, reminder: !i.reminder } : i)));
+  async function markDone(contractId: string, obligationId: string) {
+    setError("");
+    try {
+      await api.patch(`/contracts/${contractId}/obligations/${obligationId}`, {
+        status: "done",
+      });
+      load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't update that obligation.");
+    }
   }
+
+  async function sweep() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.post<{
+        marked_overdue: number;
+        reminded: number;
+        escalated: number;
+      }>("/obligations/sweep", {});
+      setSwept(
+        `${result.marked_overdue} marked overdue, ${result.reminded} reminded, ${result.escalated} escalated.`,
+      );
+      load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "The sweep could not run.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const items = (data?.items ?? []).filter((i) =>
+    view === "unassigned" ? !i.owner_id && i.status !== "done" : true,
+  );
 
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Obligations</span>}
-        subtitle="Every obligation across the portfolio — due dates, owners, and email reminders."
+        title="Obligations"
+        subtitle="What every agreement commits us to, and what has slipped"
+        actions={
+          canSweep ? (
+            <Button size="sm" variant="ghost" loading={busy} onClick={sweep}>
+              <BellRing className="h-3.5 w-3.5" /> Run reminders
+            </Button>
+          ) : null
+        }
       />
 
-      <div className="space-y-4 p-4">
-        {/* KPI tiles double as filters */}
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {([
-            ["overdue", AlarmClock], ["due_soon", Clock], ["upcoming", CalendarClock], ["done", CheckCircle2],
-          ] as const).map(([k, Icon]) => {
-            const on = filter === k;
-            return (
-              <button
-                key={k}
-                onClick={() => setFilter(on ? "all" : k)}
-                className={`rounded-xl border p-3 text-left transition ${on ? "border-accent ring-1 ring-accent" : "border-line hover:border-ink-3/40"}`}
-              >
-                <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-3">
-                  <Icon className="h-3.5 w-3.5" style={{ color: STATUS_META[k].dot }} /> {STATUS_META[k].label}
-                </div>
-                <div className="mt-1 text-2xl font-semibold text-ink tnum">{counts[k]}</div>
-              </button>
-            );
-          })}
-        </div>
+      <div className="space-y-4 p-6">
+        {error && <ErrorBanner message={error} />}
+        {swept && (
+          <Card className="border-emerald-300/60">
+            <CardBody className="py-2 text-sm text-ink-2">{swept}</CardBody>
+          </Card>
+        )}
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-1.5"><ListChecks className="h-4 w-4" /> {filter === "all" ? "All obligations" : STATUS_META[filter].label}</CardTitle>
-            <span className="text-xs text-ink-3">{shown.length} item{shown.length === 1 ? "" : "s"}</span>
-          </CardHeader>
-          <CardBody className="p-0">
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="border-b border-line text-left text-[11px] font-semibold uppercase tracking-wide text-ink-3">
-                  <tr>
-                    <th className="px-3 py-2">Obligation</th>
-                    <th className="px-3 py-2">Contract</th>
-                    <th className="px-3 py-2">Owner</th>
-                    <th className="px-3 py-2">Due</th>
-                    <th className="px-3 py-2 text-center">Reminder</th>
-                    <th className="px-3 py-2 text-right">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-line">
-                  {shown.map((o) => (
-                    <tr key={o.id} className="hover:bg-surface-2">
-                      <td className="px-3 py-2.5">
-                        <div className="flex items-center gap-2">
-                          {o.status === "done" ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <Circle className="h-4 w-4 text-ink-3" />}
-                          <div>
-                            <div className="font-medium text-ink">{o.title}</div>
-                            <div className="text-[11px] text-ink-3">{o.category}</div>
-                          </div>
+        {data === null ? (
+          <Skeleton className="h-32" />
+        ) : (
+          <>
+            <div className="grid gap-3 sm:grid-cols-5">
+              <Stat label="Open" value={data.summary.open ?? 0} icon={Circle} />
+              <Stat
+                label="Overdue"
+                value={data.summary.overdue ?? 0}
+                icon={AlertTriangle}
+                tone="text-red-600"
+              />
+              <Stat label="Due in 7 days" value={data.summary.due_this_week ?? 0} icon={Calendar} />
+              <Stat label="Unassigned" value={data.summary.unassigned ?? 0} icon={UserX} />
+              <Stat
+                label="Completed"
+                value={data.summary.done ?? 0}
+                icon={CheckCircle2}
+                tone="text-emerald-600"
+              />
+            </div>
+
+            <Card>
+              <CardBody className="flex flex-wrap items-center gap-2">
+                {(
+                  [
+                    ["all", "Everything"],
+                    ["mine", "Mine"],
+                    ["overdue", "Overdue"],
+                    ["week", "Due in 7 days"],
+                    ["unassigned", "Unassigned"],
+                  ] as [View, string][]
+                ).map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => setView(key)}
+                    className={`rounded-full px-3 py-1 text-xs transition ${
+                      view === key
+                        ? "bg-accent text-white"
+                        : "bg-surface-3 text-ink-2 hover:text-ink"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+                <div className="ml-auto min-w-[150px]">
+                  <Select
+                    value={statusFilter}
+                    onChange={(e) => setStatusFilter(e.target.value)}
+                  >
+                    <option value="">Any status</option>
+                    <option value="pending">Pending</option>
+                    <option value="overdue">Overdue</option>
+                    <option value="done">Done</option>
+                    <option value="skipped">Skipped</option>
+                  </Select>
+                </div>
+              </CardBody>
+            </Card>
+
+            {items.length === 0 ? (
+              <Card>
+                <CardBody className="py-10 text-center text-sm text-ink-2">
+                  <ListTodo className="mx-auto mb-3 h-10 w-10 text-ink-3" />
+                  <div className="text-base font-semibold text-ink">Nothing here</div>
+                  <p className="mt-1">
+                    Obligations are added on an agreement and tracked here across all of them.
+                  </p>
+                </CardBody>
+              </Card>
+            ) : (
+              <Card>
+                <CardBody className="divide-y divide-line p-0">
+                  {items.map((o) => (
+                    <div key={o.id} className="flex flex-wrap items-center gap-2 px-3 py-2.5">
+                      {o.status === "done" ? (
+                        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
+                      ) : o.overdue ? (
+                        <AlertTriangle className="h-4 w-4 shrink-0 text-red-600" />
+                      ) : (
+                        <Circle className="h-4 w-4 shrink-0 text-ink-3" />
+                      )}
+                      <div className="min-w-[200px] flex-1">
+                        <div className="text-sm text-ink">{o.title}</div>
+                        <div className="text-[11px] text-ink-3">
+                          <Link
+                            href={`/contracts/${o.contract_id}`}
+                            className="hover:text-ink"
+                          >
+                            {o.contract_reference} — {o.contract_title}
+                          </Link>
                         </div>
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <Link href={`/contracts/${o.contractId}`} className="text-ink-2 hover:text-accent">{o.contract}</Link>
-                      </td>
-                      <td className="px-3 py-2.5"><span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] font-medium text-ink-2">{o.owner}</span></td>
-                      <td className="px-3 py-2.5">
-                        <div className="text-ink-2">{o.due}</div>
-                        {o.status !== "done" && (
-                          <div className={`text-[11px] ${o.daysOut < 0 ? "text-red-600" : o.daysOut <= 7 ? "text-amber-600" : "text-ink-3"}`}>
-                            {o.daysOut < 0 ? `${-o.daysOut}d overdue` : o.daysOut === 0 ? "today" : `in ${o.daysOut}d`}
-                          </div>
+                      </div>
+                      <div className="text-xs text-ink-2">
+                        {o.owner_name || <span className="text-ink-3">unassigned</span>}
+                      </div>
+                      <div className="min-w-[110px] text-xs">
+                        {o.due_date ? (
+                          <span className={o.overdue ? "text-red-600" : "text-ink-2"}>
+                            {formatDate(o.due_date)}
+                            {o.days_left !== null && (
+                              <span className="text-ink-3">
+                                {" "}
+                                {o.days_left < 0
+                                  ? `(${Math.abs(o.days_left)}d late)`
+                                  : `(${o.days_left}d)`}
+                              </span>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="text-ink-3">no due date</span>
                         )}
-                      </td>
-                      <td className="px-3 py-2.5 text-center">
-                        <button
-                          onClick={() => toggleReminder(o.id)}
-                          className={`relative inline-flex h-5 w-9 items-center rounded-full transition ${o.reminder ? "bg-accent" : "bg-surface-3"}`}
-                          aria-label="Toggle reminder"
+                      </div>
+                      <Badge tone={o.status === "done" ? "accent" : "neutral"}>{o.status}</Badge>
+                      {o.status !== "done" && o.status !== "skipped" && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => markDone(o.contract_id, o.id)}
                         >
-                          <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition ${o.reminder ? "translate-x-4" : "translate-x-0.5"}`} />
-                        </button>
-                      </td>
-                      <td className="px-3 py-2.5 text-right">
-                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${STATUS_META[o.status].pill}`}>{STATUS_META[o.status].label}</span>
-                      </td>
-                    </tr>
+                          Mark done
+                        </Button>
+                      )}
+                    </div>
                   ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="border-t border-line px-3 py-2 text-[11px] text-ink-3">
-              Reminder-enabled obligations email their owner at 7 / 3 / 1 days before the due date, and on the day it goes overdue.
-            </div>
-          </CardBody>
-        </Card>
+                </CardBody>
+              </Card>
+            )}
+          </>
+        )}
       </div>
+    </div>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  icon: Icon,
+  tone,
+}: {
+  label: string;
+  value: number;
+  icon: typeof Circle;
+  tone?: string;
+}) {
+  return (
+    <div className="rounded-lg border border-line bg-surface p-3">
+      <div
+        className={`flex items-center gap-1.5 font-display text-2xl font-semibold ${
+          tone ?? "text-ink"
+        }`}
+      >
+        <Icon className="h-4 w-4" />
+        {value}
+      </div>
+      <div className="text-xs text-ink-2">{label}</div>
     </div>
   );
 }

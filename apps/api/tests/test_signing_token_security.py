@@ -4,6 +4,8 @@
   - expired tokens look like 'not found' (don't leak existence)
   - decrypt round-trips for reminders
   - void wipes hash + ciphertext + expiry
+
+Requirements: BB-01.
 """
 
 import datetime as dt
@@ -25,17 +27,20 @@ def envelope_with_recipient(make_user):
             tenant_id=tenant.id, reference_no="CT-001", title="Test Agreement",
             owner_id=user.id, status="approved", created_by=user.id,
         )
-        db.add(contract); db.flush()
+        db.add(contract)
+        db.flush()
         env = models.SignatureEnvelope(
             tenant_id=tenant.id, contract_id=contract.id, status="draft",
             signing_order="sequential", message="", created_by=user.id,
         )
-        db.add(env); db.flush()
+        db.add(env)
+        db.flush()
         rec = models.SignatureRecipient(
             tenant_id=tenant.id, envelope_id=env.id, sequence=0,
             name="Bob Signer", email="bob@example.test", kind="signer", status="created",
         )
-        db.add(rec); db.commit()
+        db.add(rec)
+        db.commit()
         return tenant.id, env.id, rec.id
 
 

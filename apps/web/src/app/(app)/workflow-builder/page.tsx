@@ -1,272 +1,600 @@
 "use client";
 
-// Visual Workflow Builder — PROTOTYPE of the advanced approval-flow canvas: parallel approver
-// groups, conditional routing, and SLA timers with auto-escalation. The current product ships a
-// linear step-list; this is the upgrade designed in docs/10. Mockup: sample data + a config
-// panel; "Activate" is simulated. Wires later to the workflow_service engine.
+/**
+ * Workflow builder — designs the stage graph the Phase 4 engine runs.
+ *
+ * Replaces the drag-and-drop mockup. The thing being designed is not a flowchart, it is a
+ * short list of **stages**, each holding the reviewers who work **at the same time**. That is
+ * the RFI's core mechanic, so the editor makes concurrency the obvious default: adding a
+ * second reviewer to a stage puts them alongside, not after.
+ *
+ * Everything here persists to /workflows. Nothing is sample data.
+ */
 
-import { useState } from "react";
-import { ArrowDown, Clock, GitBranch, Plus, Settings2, Users, Zap } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  AlertTriangle,
+  ArrowDown,
+  Check,
+  ChevronDown,
+  Clock,
+  GitBranch,
+  Plus,
+  Save,
+  Trash2,
+  Users,
+  X,
+} from "lucide-react";
+import { api, ApiError } from "@/lib/api";
 import { PageHeader } from "@/components/shell";
-import { Badge, Button, Card, CardBody, Field, Input, Select } from "@/components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  CardTitle,
+  ErrorBanner,
+  Field,
+  Input,
+  Select,
+  Skeleton,
+} from "@/components/ui";
+import { STAGE_POLICIES } from "@/lib/types";
+import type {
+  StagePolicy,
+  User,
+  WorkflowDefinitionDetail,
+  WorkflowDefinitionListItem,
+  WorkflowStageDef,
+  WorkflowStepDef,
+} from "@/lib/types";
 
-type Mode = "single" | "any" | "all";
-type Approver = { id: string; name: string; color: string };
-type Stage = {
-  id: string;
-  name: string;
-  mode: Mode;
-  approvers: Approver[];
-  slaHours: number;
-  escalateTo: string;
-  condition?: string; // routing condition that gates entry to this stage
-};
+const ROLES = ["reviewer", "author", "approver", "manager", "admin", "owner"];
+const CONTRACT_TYPES = ["nda", "msa", "lease", "employment", "vendor", "service", "other"];
 
-const PEOPLE: Approver[] = [
-  { id: "p1", name: "Line Manager", color: "#3E7BFA" },
-  { id: "p2", name: "Finance", color: "#12B76A" },
-  { id: "p3", name: "Legal", color: "#8B5CF6" },
-  { id: "p4", name: "CFO", color: "#F59E0B" },
-  { id: "p5", name: "CEO", color: "#EF4444" },
-];
+function emptyStep(): WorkflowStepDef {
+  return { name: "", assignee_kind: "role", assignee_value: "approver" };
+}
 
-const MODE_LABEL: Record<Mode, string> = {
-  single: "One approver",
-  any: "Any one of (parallel)",
-  all: "All must approve (parallel group)",
-};
+function emptyStage(index: number): WorkflowStageDef {
+  return {
+    name: index === 0 ? "Review" : `Stage ${index + 1}`,
+    policy: "all",
+    threshold: 0,
+    sla_hours: 48,
+    escalate_to_user_id: null,
+    steps: [emptyStep()],
+  };
+}
 
-const INITIAL: Stage[] = [
-  { id: "s1", name: "Manager review", mode: "single", approvers: [PEOPLE[0]], slaHours: 24, escalateTo: "Skip-level manager" },
-  { id: "s2", name: "Finance & Legal", mode: "all", approvers: [PEOPLE[1], PEOPLE[2]], slaHours: 48, escalateTo: "Department head", condition: "Always" },
-  { id: "s3", name: "Executive sign-off", mode: "any", approvers: [PEOPLE[3], PEOPLE[4]], slaHours: 72, escalateTo: "Board secretary", condition: "If value > $50,000" },
-];
-
-let _seq = 100;
-const nextId = () => `s${++_seq}`;
+/** Promote a legacy flat definition so it can be edited here without losing anything. */
+function toStages(def: WorkflowDefinitionDetail): WorkflowStageDef[] {
+  if (def.stages?.length) return structuredClone(def.stages);
+  return (def.steps ?? []).map((s, i) => ({
+    name: s.name || `Stage ${i + 1}`,
+    policy: "all" as StagePolicy,
+    threshold: 0,
+    sla_hours: 0,
+    escalate_to_user_id: null,
+    steps: [{ ...s }],
+  }));
+}
 
 export default function WorkflowBuilderPage() {
-  const [stages, setStages] = useState<Stage[]>(INITIAL);
-  const [selected, setSelected] = useState<string | null>("s2");
-  const [activated, setActivated] = useState(false);
+  const [list, setList] = useState<WorkflowDefinitionListItem[] | null>(null);
+  const [users, setUsers] = useState<User[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<WorkflowDefinitionDetail | null>(null);
+  const [stages, setStages] = useState<WorkflowStageDef[]>([]);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
 
-  const sel = stages.find((s) => s.id === selected) ?? null;
+  const loadList = useCallback(() => {
+    api
+      .get<WorkflowDefinitionListItem[]>("/workflows", { cache: false })
+      .then(setList)
+      .catch(() => setList([]));
+  }, []);
 
-  function update(id: string, patch: Partial<Stage>) {
-    setStages((arr) => arr.map((s) => (s.id === id ? { ...s, ...patch } : s)));
-  }
-  function addStage() {
-    const ns: Stage = { id: nextId(), name: "New stage", mode: "single", approvers: [PEOPLE[0]], slaHours: 24, escalateTo: "Manager" };
-    setStages((a) => [...a, ns]);
-    setSelected(ns.id);
-  }
-  function removeStage(id: string) {
-    setStages((a) => a.filter((s) => s.id !== id));
-    if (selected === id) setSelected(null);
-  }
-  function toggleApprover(stageId: string, p: Approver) {
-    setStages((arr) =>
-      arr.map((s) => {
-        if (s.id !== stageId) return s;
-        const has = s.approvers.some((a) => a.id === p.id);
-        const approvers = has ? s.approvers.filter((a) => a.id !== p.id) : [...s.approvers, p];
-        return { ...s, approvers: approvers.length ? approvers : s.approvers };
+  useEffect(() => {
+    loadList();
+    api.get<User[]>("/users").then(setUsers).catch(() => setUsers([]));
+  }, [loadList]);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setDraft(null);
+      setStages([]);
+      return;
+    }
+    api
+      .get<WorkflowDefinitionDetail>(`/workflows/${selectedId}`, { cache: false })
+      .then((d) => {
+        setDraft(d);
+        setStages(toStages(d));
       })
+      .catch((e) => setError(e instanceof ApiError ? e.message : "Could not load that workflow."));
+  }, [selectedId]);
+
+  const problems = useMemo(() => validate(stages), [stages]);
+
+  function patchStage(index: number, patch: Partial<WorkflowStageDef>) {
+    setStages((prev) => prev.map((s, i) => (i === index ? { ...s, ...patch } : s)));
+    setSaved(false);
+  }
+
+  function patchStep(stageIndex: number, stepIndex: number, patch: Partial<WorkflowStepDef>) {
+    setStages((prev) =>
+      prev.map((s, i) =>
+        i === stageIndex
+          ? { ...s, steps: s.steps.map((st, j) => (j === stepIndex ? { ...st, ...patch } : st)) }
+          : s,
+      ),
     );
+    setSaved(false);
+  }
+
+  async function createWorkflow() {
+    setBusy(true);
+    setError("");
+    try {
+      const created = await api.post<WorkflowDefinitionDetail>("/workflows", {
+        name: "New workflow",
+        status: "draft",
+        default_for_types: [],
+        steps: [],
+        stages: [emptyStage(0)],
+      });
+      loadList();
+      setSelectedId(created.id);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not create the workflow.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function save(nextStatus?: string) {
+    if (!draft) return;
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await api.patch<WorkflowDefinitionDetail>(`/workflows/${draft.id}`, {
+        name: draft.name,
+        default_for_types: draft.default_for_types,
+        stages,
+        ...(nextStatus ? { status: nextStatus } : {}),
+      });
+      setDraft(updated);
+      setStages(toStages(updated));
+      setSaved(true);
+      loadList();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not save the workflow.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
-    <div>
+    <div className="space-y-5">
       <PageHeader
-        title={<span className="flex items-center gap-2">Workflow Builder</span>}
-        subtitle="Parallel approval groups, conditional routing, and SLA auto-escalation."
+        title="Workflow builder"
+        subtitle="Design the review stages. Reviewers in the same stage work concurrently."
         actions={
-          <div className="flex items-center gap-2">
-            <Button size="sm" variant="secondary" onClick={addStage}><Plus className="h-3.5 w-3.5" /> Add stage</Button>
-            <Button size="sm" onClick={() => setActivated(true)}><Zap className="h-3.5 w-3.5" /> Activate</Button>
-          </div>
+          <Button onClick={createWorkflow} disabled={busy}>
+            <Plus className="h-4 w-4" /> New workflow
+          </Button>
         }
       />
 
-      <div className="grid gap-4 p-4 lg:grid-cols-[1fr_340px]">
-        {/* canvas */}
-        <div className="rounded-xl border border-line bg-surface-2/40 p-6">
-          <div className="mx-auto flex max-w-md flex-col items-center">
-            <TerminalNode label="Submitted for approval" tone="start" />
-            {stages.map((s, i) => (
-              <div key={s.id} className="flex w-full flex-col items-center">
-                <Connector condition={s.condition} />
-                <StageNode
-                  stage={s}
-                  index={i}
-                  selected={selected === s.id}
-                  onSelect={() => setSelected(s.id)}
-                  onRemove={() => removeStage(s.id)}
-                />
-              </div>
-            ))}
-            <Connector />
-            <TerminalNode label="Approved → out for signature" tone="end" />
-          </div>
-        </div>
+      {error && <ErrorBanner message={error} />}
 
-        {/* config panel */}
-        <div>
-          {sel ? (
-            <Card className="lg:sticky lg:top-20">
+      <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
+        <Card className="h-fit">
+          <CardHeader>
+            <CardTitle>Workflows</CardTitle>
+          </CardHeader>
+          <CardBody className="p-0">
+            {list === null ? (
+              <div className="p-3">
+                <Skeleton className="h-20 w-full" />
+              </div>
+            ) : list.length === 0 ? (
+              <p className="p-4 text-sm text-ink-2">
+                No workflows yet. Create one to define how agreements are reviewed.
+              </p>
+            ) : (
+              <ul className="divide-y divide-line">
+                {list.map((w) => (
+                  <li key={w.id}>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedId(w.id)}
+                      className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm transition hover:bg-surface-2 ${
+                        selectedId === w.id ? "bg-accent-subtle" : ""
+                      }`}
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium text-ink">{w.name}</span>
+                        <span className="text-xs text-ink-3">{w.step_count} step(s)</span>
+                      </span>
+                      <Badge tone={w.status === "active" ? "accent" : "neutral"}>{w.status}</Badge>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardBody>
+        </Card>
+
+        {draft === null ? (
+          <Card>
+            <CardBody className="py-14 text-center">
+              <GitBranch className="mx-auto h-9 w-9 text-ink-3" />
+              <p className="mt-2 text-sm text-ink-2">
+                Select a workflow to edit it, or create a new one.
+              </p>
+            </CardBody>
+          </Card>
+        ) : (
+          <div className="space-y-4">
+            <Card>
               <CardBody className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <Settings2 className="h-4 w-4 text-accent" />
-                  <h3 className="text-sm font-semibold text-ink">Stage settings</h3>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Field label="Workflow name">
+                    <Input
+                      value={draft.name}
+                      onChange={(e) => {
+                        setDraft({ ...draft, name: e.target.value });
+                        setSaved(false);
+                      }}
+                    />
+                  </Field>
+                  <Field label="Status">
+                    <div className="flex items-center gap-2">
+                      <Badge tone={draft.status === "active" ? "accent" : "neutral"}>
+                        {draft.status}
+                      </Badge>
+                      {draft.status !== "active" && (
+                        <Button
+                          variant="ghost"
+                          className="h-8 px-2 text-xs"
+                          onClick={() => save("active")}
+                          disabled={busy || problems.length > 0}
+                        >
+                          Activate
+                        </Button>
+                      )}
+                    </div>
+                  </Field>
                 </div>
 
-                <Field label="Stage name">
-                  <Input value={sel.name} onChange={(e) => update(sel.id, { name: e.target.value })} />
-                </Field>
-
-                <Field label="Approval mode">
-                  <Select value={sel.mode} onChange={(e) => update(sel.id, { mode: e.target.value as Mode })}>
-                    {(Object.keys(MODE_LABEL) as Mode[]).map((m) => (
-                      <option key={m} value={m}>{MODE_LABEL[m]}</option>
-                    ))}
-                  </Select>
-                </Field>
-
-                <div>
-                  <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-3">Approvers</label>
+                <Field
+                  label="Use automatically for these contract types"
+                  hint="A contract of one of these types starts this workflow by default."
+                >
                   <div className="flex flex-wrap gap-1.5">
-                    {PEOPLE.map((p) => {
-                      const on = sel.approvers.some((a) => a.id === p.id);
+                    {CONTRACT_TYPES.map((t) => {
+                      const on = draft.default_for_types.includes(t);
                       return (
                         <button
-                          key={p.id}
-                          onClick={() => toggleApprover(sel.id, p)}
-                          className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition ${on ? "border-transparent text-white" : "border-line text-ink-2 hover:bg-surface-2"}`}
-                          style={on ? { background: p.color } : undefined}
+                          key={t}
+                          type="button"
+                          onClick={() => {
+                            setDraft({
+                              ...draft,
+                              default_for_types: on
+                                ? draft.default_for_types.filter((x) => x !== t)
+                                : [...draft.default_for_types, t],
+                            });
+                            setSaved(false);
+                          }}
+                          className={`rounded-full px-2.5 py-1 text-xs font-medium transition ${
+                            on
+                              ? "bg-accent text-white"
+                              : "bg-surface-3 text-ink-2 hover:text-ink"
+                          }`}
                         >
-                          <span className="h-2 w-2 rounded-full" style={{ background: on ? "#fff" : p.color }} />
-                          {p.name}
+                          {t.toUpperCase()}
                         </button>
                       );
                     })}
                   </div>
-                </div>
-
-                <Field label="SLA — escalate after (hours)">
-                  <Input
-                    type="number"
-                    value={String(sel.slaHours)}
-                    onChange={(e) => update(sel.id, { slaHours: Math.max(1, Number(e.target.value) || 1) })}
-                  />
                 </Field>
-
-                <Field label="Escalate to">
-                  <Input value={sel.escalateTo} onChange={(e) => update(sel.id, { escalateTo: e.target.value })} />
-                </Field>
-
-                <Field label="Entry condition (routing)">
-                  <Input
-                    value={sel.condition ?? ""}
-                    onChange={(e) => update(sel.id, { condition: e.target.value })}
-                    placeholder="e.g. If value > $50,000"
-                  />
-                </Field>
-
-                <div className="rounded-lg border border-dashed border-line bg-surface-2 p-3 text-[11px] text-ink-2">
-                  <span className="font-semibold text-ink">Summary:</span> {summarize(sel)}
-                </div>
               </CardBody>
             </Card>
-          ) : (
-            <Card><CardBody><p className="text-sm text-ink-3">Select a stage on the canvas to configure it, or add a new stage.</p></CardBody></Card>
+
+            {problems.length > 0 && (
+              <Card className="border-amber-300/60 bg-amber-50/50 dark:bg-amber-950/20">
+                <CardBody className="space-y-1 py-3">
+                  {problems.map((p) => (
+                    <div key={p} className="flex items-start gap-2 text-sm text-ink-2">
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                      <span>{p}</span>
+                    </div>
+                  ))}
+                </CardBody>
+              </Card>
+            )}
+
+            <div className="space-y-3">
+              {stages.map((stage, stageIndex) => (
+                <div key={stageIndex}>
+                  <StageEditor
+                    stage={stage}
+                    index={stageIndex}
+                    users={users}
+                    onPatch={(patch) => patchStage(stageIndex, patch)}
+                    onPatchStep={(stepIndex, patch) => patchStep(stageIndex, stepIndex, patch)}
+                    onAddStep={() => {
+                      patchStage(stageIndex, { steps: [...stage.steps, emptyStep()] });
+                    }}
+                    onRemoveStep={(stepIndex) => {
+                      patchStage(stageIndex, {
+                        steps: stage.steps.filter((_, j) => j !== stepIndex),
+                      });
+                    }}
+                    onRemove={() => {
+                      setStages((prev) => prev.filter((_, i) => i !== stageIndex));
+                      setSaved(false);
+                    }}
+                    canRemove={stages.length > 1}
+                  />
+                  {stageIndex < stages.length - 1 && (
+                    <div className="flex items-center justify-center gap-2 py-2 text-xs text-ink-3">
+                      <ArrowDown className="h-3.5 w-3.5" />
+                      then
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setStages((prev) => [...prev, emptyStage(prev.length)]);
+                  setSaved(false);
+                }}
+              >
+                <Plus className="h-4 w-4" /> Add a stage
+              </Button>
+              <div className="flex-1" />
+              {saved && (
+                <span className="flex items-center gap-1 text-sm text-accent">
+                  <Check className="h-4 w-4" /> Saved
+                </span>
+              )}
+              <Button onClick={() => save()} disabled={busy || problems.length > 0}>
+                <Save className="h-4 w-4" /> {busy ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Problems that would make the engine reject the graph — shown before saving, not after. */
+function validate(stages: WorkflowStageDef[]): string[] {
+  const problems: string[] = [];
+  stages.forEach((stage, i) => {
+    const label = stage.name || `Stage ${i + 1}`;
+    if (stage.steps.length === 0) {
+      problems.push(`${label} has no reviewers. A stage with nobody in it can never complete.`);
+    }
+    if (stage.policy === "quorum") {
+      if (stage.threshold < 1 || stage.threshold > stage.steps.length) {
+        problems.push(
+          `${label}: a quorum of ${stage.threshold} is impossible with ${stage.steps.length} reviewer(s).`,
+        );
+      }
+    }
+    if (stage.policy === "percentage" && (stage.threshold < 1 || stage.threshold > 100)) {
+      problems.push(`${label}: the percentage must be between 1 and 100.`);
+    }
+    stage.steps.forEach((step, j) => {
+      if (!step.assignee_value) {
+        problems.push(`${label}, reviewer ${j + 1}: choose who reviews.`);
+      }
+    });
+  });
+  return problems;
+}
+
+function StageEditor({
+  stage,
+  index,
+  users,
+  onPatch,
+  onPatchStep,
+  onAddStep,
+  onRemoveStep,
+  onRemove,
+  canRemove,
+}: {
+  stage: WorkflowStageDef;
+  index: number;
+  users: User[];
+  onPatch: (patch: Partial<WorkflowStageDef>) => void;
+  onPatchStep: (stepIndex: number, patch: Partial<WorkflowStepDef>) => void;
+  onAddStep: () => void;
+  onRemoveStep: (stepIndex: number) => void;
+  onRemove: () => void;
+  canRemove: boolean;
+}) {
+  const [open, setOpen] = useState(true);
+  const policy = STAGE_POLICIES.find((p) => p.value === stage.policy);
+
+  return (
+    <Card>
+      <CardBody className="space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-surface-3 text-[11px] font-semibold text-ink-2">
+            {index + 1}
+          </span>
+          <Input
+            value={stage.name}
+            onChange={(e) => onPatch({ name: e.target.value })}
+            className="h-8 max-w-xs"
+            placeholder="Stage name"
+          />
+          <Badge tone="neutral">
+            <Users className="h-3 w-3" /> {stage.steps.length} concurrent
+          </Badge>
+          {stage.sla_hours > 0 && (
+            <Badge tone="neutral">
+              <Clock className="h-3 w-3" /> {stage.sla_hours}h SLA
+            </Badge>
+          )}
+          <div className="flex-1" />
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="rounded p-1 text-ink-3 hover:text-ink"
+            aria-label={open ? "Collapse stage" : "Expand stage"}
+          >
+            <ChevronDown className={`h-4 w-4 transition ${open ? "" : "-rotate-90"}`} />
+          </button>
+          {canRemove && (
+            <button
+              type="button"
+              onClick={onRemove}
+              className="rounded p-1 text-ink-3 hover:text-red-600"
+              aria-label="Remove stage"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
           )}
         </div>
-      </div>
 
-      {activated && (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" onClick={() => setActivated(false)}>
-          <Card className="w-full max-w-sm">
-            <CardBody className="space-y-3 text-center">
-              <div className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-accent/10 text-accent"><Zap className="h-6 w-6" /></div>
-              <div className="text-base font-semibold text-ink">Workflow activated</div>
-              <p className="text-sm text-ink-2">
-                {stages.length} stages · {stages.filter((s) => s.mode === "all").length} parallel group(s) ·{" "}
-                {stages.filter((s) => s.condition && s.condition !== "Always").length} conditional route(s).
-                The workflow is versioned and applied to new approval runs.
+        {open && (
+          <>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Field label="Completion">
+                <Select
+                  value={stage.policy}
+                  onChange={(e) => onPatch({ policy: e.target.value as StagePolicy })}
+                >
+                  {STAGE_POLICIES.map((p) => (
+                    <option key={p.value} value={p.value}>
+                      {p.label}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              {(stage.policy === "quorum" || stage.policy === "percentage") && (
+                <Field label={stage.policy === "quorum" ? "How many" : "Percentage"}>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={stage.policy === "quorum" ? stage.steps.length : 100}
+                    value={stage.threshold || ""}
+                    onChange={(e) => onPatch({ threshold: Number(e.target.value) || 0 })}
+                  />
+                </Field>
+              )}
+              <Field label="SLA (working hours)" hint="0 = no deadline">
+                <Input
+                  type="number"
+                  min={0}
+                  value={stage.sla_hours || 0}
+                  onChange={(e) => onPatch({ sla_hours: Number(e.target.value) || 0 })}
+                />
+              </Field>
+            </div>
+
+            {policy && <p className="text-xs text-ink-3">{policy.hint}</p>}
+
+            {stage.sla_hours > 0 && (
+              <Field label="Escalate to" hint="Who picks it up if the deadline passes.">
+                <Select
+                  value={stage.escalate_to_user_id ?? ""}
+                  onChange={(e) => onPatch({ escalate_to_user_id: e.target.value || null })}
+                >
+                  <option value="">Notify only — do not reassign</option>
+                  {users.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            )}
+
+            <div className="space-y-2 border-t border-line pt-3">
+              <p className="text-xs font-medium text-ink-2">
+                Reviewers in this stage — they review at the same time
               </p>
-              <Button className="w-full" onClick={() => setActivated(false)}>Done</Button>
-            </CardBody>
-          </Card>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function summarize(s: Stage): string {
-  const who = s.approvers.map((a) => a.name).join(", ");
-  const mode = s.mode === "all" ? "all of" : s.mode === "any" ? "any of" : "";
-  const cond = s.condition && s.condition !== "Always" ? `${s.condition}, then ` : "";
-  return `${cond}${mode ? `${mode} ` : ""}${who} must approve within ${s.slaHours}h, else escalate to ${s.escalateTo}.`;
-}
-
-function Connector({ condition }: { condition?: string }) {
-  return (
-    <div className="flex flex-col items-center py-1">
-      {condition && condition !== "Always" && (
-        <span className="mb-1 inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-700">
-          <GitBranch className="h-3 w-3" /> {condition}
-        </span>
-      )}
-      <ArrowDown className="h-4 w-4 text-ink-3" />
-    </div>
-  );
-}
-
-function TerminalNode({ label, tone }: { label: string; tone: "start" | "end" }) {
-  return (
-    <div className={`rounded-full px-4 py-1.5 text-xs font-semibold ${tone === "start" ? "bg-ink text-white" : "bg-emerald-600 text-white"}`}>
-      {label}
-    </div>
-  );
-}
-
-function StageNode({
-  stage, index, selected, onSelect, onRemove,
-}: {
-  stage: Stage; index: number; selected: boolean; onSelect: () => void; onRemove: () => void;
-}) {
-  const parallel = stage.mode === "all" || stage.mode === "any";
-  return (
-    <button
-      onClick={onSelect}
-      className={`w-full rounded-xl border bg-white p-3 text-left shadow-sm transition ${selected ? "border-accent ring-1 ring-accent" : "border-line hover:border-ink-3/40"}`}
-    >
-      <div className="flex items-center gap-2">
-        <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-surface-2 text-[11px] font-semibold text-ink-2">{index + 1}</span>
-        <span className="flex-1 truncate text-sm font-semibold text-ink">{stage.name}</span>
-        <span className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-ink-2">
-          <Clock className="h-3 w-3" /> {stage.slaHours}h
-        </span>
-      </div>
-      <div className="mt-2 flex items-center gap-2">
-        <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${parallel ? "bg-accent/10 text-accent" : "bg-surface-2 text-ink-3"}`}>
-          <Users className="h-3 w-3" /> {MODE_LABEL[stage.mode]}
-        </span>
-      </div>
-      <div className="mt-2 flex items-center gap-1.5">
-        {stage.approvers.map((a) => (
-          <span key={a.id} className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-2 py-0.5 text-[10px] text-ink-2">
-            <span className="h-2 w-2 rounded-full" style={{ background: a.color }} /> {a.name}
-          </span>
-        ))}
-        <span
-          onClick={(e) => { e.stopPropagation(); onRemove(); }}
-          className="ml-auto cursor-pointer text-[10px] text-ink-3 hover:text-danger"
-        >
-          remove
-        </span>
-      </div>
-    </button>
+              {stage.steps.map((step, stepIndex) => (
+                <div key={stepIndex} className="flex flex-wrap items-end gap-2">
+                  <div className="min-w-[140px] flex-1">
+                    <Input
+                      value={step.name}
+                      onChange={(e) => onPatchStep(stepIndex, { name: e.target.value })}
+                      placeholder="Label (e.g. Legal)"
+                      className="h-9"
+                    />
+                  </div>
+                  <Select
+                    value={step.assignee_kind}
+                    onChange={(e) =>
+                      onPatchStep(stepIndex, {
+                        assignee_kind: e.target.value as "role" | "user",
+                        assignee_value: e.target.value === "role" ? "approver" : "",
+                      })
+                    }
+                    className="h-9 w-28"
+                  >
+                    <option value="role">Any role</option>
+                    <option value="user">Person</option>
+                  </Select>
+                  <Select
+                    value={step.assignee_value}
+                    onChange={(e) => onPatchStep(stepIndex, { assignee_value: e.target.value })}
+                    className="h-9 w-44"
+                  >
+                    {step.assignee_kind === "role" ? (
+                      ROLES.map((r) => (
+                        <option key={r} value={r}>
+                          {r} or above
+                        </option>
+                      ))
+                    ) : (
+                      <>
+                        <option value="">Choose a person…</option>
+                        {users.map((u) => (
+                          <option key={u.id} value={u.id}>
+                            {u.name}
+                          </option>
+                        ))}
+                      </>
+                    )}
+                  </Select>
+                  {stage.steps.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => onRemoveStep(stepIndex)}
+                      className="rounded p-2 text-ink-3 hover:text-red-600"
+                      aria-label="Remove reviewer"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  )}
+                </div>
+              ))}
+              <Button variant="ghost" className="h-8 px-2 text-xs" onClick={onAddStep}>
+                <Plus className="h-3.5 w-3.5" /> Add a concurrent reviewer
+              </Button>
+            </div>
+          </>
+        )}
+      </CardBody>
+    </Card>
   );
 }

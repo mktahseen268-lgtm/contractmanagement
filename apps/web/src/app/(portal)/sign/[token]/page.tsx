@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { CheckCircle2, Eraser, FileText, Loader2, Lock, PenLine, ShieldCheck, Type as TypeIcon, Upload } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
+import { useI18n } from "@/lib/i18n";
+import { LocaleSwitch } from "@/components/locale-switch";
 import { Button, Card, CardBody, ErrorBanner, Field, Input } from "@/components/ui";
 import type { SigningInfo } from "@/lib/types";
 
@@ -35,6 +37,41 @@ export default function SignPage() {
   const drawingRef = useRef(false);
   const lastPtRef = useRef<{ x: number; y: number } | null>(null);
   const [hasDrawing, setHasDrawing] = useState(false);
+
+  const { t, dir } = useI18n();
+
+  /**
+   * Assisted mode (Phase 9, item 7) — the branch-tablet path.
+   *
+   * Same flow, same evidence, different presentation: larger text, larger targets, and one step
+   * at a time so the person is never looking at four decisions at once. Nothing is skipped or
+   * pre-agreed — a "simplified" signing that quietly agrees on somebody's behalf is not
+   * simplification, it is a defect in the consent record.
+   *
+   * Entered by the toggle, or by `?assisted=1` so a branch tablet can be bookmarked straight
+   * into it and staff never have to remember to switch it on.
+   */
+  const [assisted, setAssisted] = useState(false);
+  const [step, setStep] = useState(0);
+  const [opened, setOpened] = useState(false);   // did they actually open the document?
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("assisted") === "1") setAssisted(true);
+  }, []);
+
+  // Two steps, not three. The name, the consent tick and the signature belong together — they
+  // are one decision, and splitting them across screens makes somebody agree on one page to
+  // something they sign on another. A stepper that shows more steps than the flow has is a
+  // progress bar that lies.
+  const STEPS = [t("sign.review"), t("sign.sign")];
+
+  /** In assisted mode a section is shown only on its own step; otherwise everything is shown. */
+  const showStep = useCallback(
+    (index: number) => !assisted || step === index,
+    [assisted, step],
+  );
 
   function canvasPos(e: React.PointerEvent<HTMLCanvasElement>) {
     const c = canvasRef.current!;
@@ -137,11 +174,68 @@ export default function SignPage() {
 
   const docUrl = info?.valid ? `${API}${info.document_path}` : "";
 
+  const canFinish = consent && !!fullName.trim() && sigReady;
+
   return (
-    <div className="flex min-h-screen flex-col items-center px-4 py-8">
-      <div className="mb-4 flex items-center gap-1.5 text-sm text-ink-3">
-        <Lock className="h-3.5 w-3.5" /> Secure signing{info?.org_name ? ` · ${info.org_name}` : ""}
+    <div
+      dir={dir}
+      className={
+        // Assisted mode scales the whole subtree with one class rather than touching every
+        // element: `text-lg` cascades, and the buttons below key their padding off `assisted`.
+        "flex min-h-screen flex-col items-center px-4 py-8 " +
+        (assisted ? "text-lg leading-relaxed" : "")
+      }
+    >
+      <div className="mb-3 flex w-full max-w-lg flex-wrap items-center justify-between gap-2">
+        <span className="inline-flex items-center gap-1.5 text-sm text-ink-3">
+          <Lock className="h-3.5 w-3.5" aria-hidden="true" /> Secure signing
+          {info?.org_name ? ` · ${info.org_name}` : ""}
+        </span>
+        <div className="flex items-center gap-3">
+          <LocaleSwitch />
+          <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-ink-2">
+            <input
+              type="checkbox"
+              checked={assisted}
+              onChange={(e) => {
+                setAssisted(e.target.checked);
+                setStep(0);
+              }}
+              className="h-4 w-4"
+            />
+            {t("sign.assisted")}
+          </label>
+        </div>
       </div>
+
+      {assisted && info?.valid && info.can_sign && (
+        <div className="mb-3 w-full max-w-lg">
+          <ol className="flex items-center gap-2" aria-label={t("sign.step", { n: step + 1, total: STEPS.length })}>
+            {STEPS.map((label, i) => (
+              <li key={label} className="flex flex-1 items-center gap-2">
+                <span
+                  aria-current={i === step ? "step" : undefined}
+                  className={
+                    "flex h-11 flex-1 items-center justify-center gap-2 rounded-lg px-3 text-base font-medium " +
+                    (i < step
+                      ? "bg-accent-subtle text-accent"
+                      : i === step
+                        ? "bg-accent text-white"
+                        : "bg-surface-3 text-ink-3")
+                  }
+                >
+                  <span className="grid h-6 w-6 place-items-center rounded-full bg-white/25 text-sm">
+                    {i + 1}
+                  </span>
+                  {label}
+                </span>
+              </li>
+            ))}
+          </ol>
+          <p className="mt-2 text-sm text-ink-2">{t("sign.help")}</p>
+        </div>
+      )}
+
       <Card className="w-full max-w-lg">
         <CardBody className="space-y-4">
           {loading && (
@@ -177,16 +271,55 @@ export default function SignPage() {
               </div>
               {info.message && <div className="rounded-md bg-surface-2 px-3 py-2 text-sm text-ink-2">&ldquo;{info.message}&rdquo;</div>}
 
-              <a href={docUrl} target="_blank" rel="noopener noreferrer">
-                <Button variant="secondary" className="w-full">
-                  <FileText className="h-4 w-4" /> Review the document
-                </Button>
-              </a>
+              {showStep(0) && (
+                <>
+                  <a
+                    href={docUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setOpened(true)}
+                  >
+                    <Button
+                      variant="secondary"
+                      className={assisted ? "h-14 w-full text-lg" : "w-full"}
+                    >
+                      <FileText className="h-4 w-4" aria-hidden="true" /> {t("sign.review")}
+                    </Button>
+                  </a>
+                  {assisted && (
+                    <>
+                      <p className="text-base text-ink-2">
+                        Open the agreement and read it. Take as long as you need — nothing is
+                        signed until you press the button on the last step.
+                      </p>
+                      {!opened && (
+                        <p className="text-sm text-amber-700">
+                          Please open the agreement before continuing. Signing something you have
+                          not read is exactly what this step exists to prevent.
+                        </p>
+                      )}
+                      <a
+                        href={`/sign/${token}/guide`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-block text-base text-accent underline underline-offset-2"
+                      >
+                        Printable step-by-step guide
+                      </a>
+                    </>
+                  )}
+                </>
+              )}
 
-              {info.can_sign && !declineMode && (
+              {info.can_sign && !declineMode && !showStep(0) && (
                 <div className="space-y-3 rounded-lg border border-line bg-surface-2 p-4">
-                  <label className="flex items-start gap-2 text-sm text-ink-2">
-                    <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5" />
+                  <label className={assisted ? "flex items-start gap-3 text-base text-ink-2" : "flex items-start gap-2 text-sm text-ink-2"}>
+                    <input
+                      type="checkbox"
+                      checked={consent}
+                      onChange={(e) => setConsent(e.target.checked)}
+                      className={assisted ? "mt-1 h-5 w-5" : "mt-0.5"}
+                    />
                     <span>
                       I agree to use electronic records and signatures.{" "}
                       <button type="button" onClick={() => setShowConsent((s) => !s)} className="text-accent hover:underline">
@@ -314,13 +447,34 @@ export default function SignPage() {
                     </div>
                   )}
                   <div className="flex flex-wrap items-center gap-2">
-                    <Button onClick={sign} loading={busy} disabled={!consent || !fullName.trim() || !sigReady}>
-                      <CheckCircle2 className="h-4 w-4" /> I agree &amp; sign
+                    <Button
+                      onClick={sign}
+                      loading={busy}
+                      disabled={!canFinish}
+                      className={assisted ? "h-14 flex-1 text-lg" : ""}
+                    >
+                      <CheckCircle2 className="h-4 w-4" aria-hidden="true" /> I agree &amp; sign
                     </Button>
-                    <button onClick={() => setDeclineMode(true)} className="text-sm text-ink-3 hover:text-danger hover:underline">
+                    <button
+                      onClick={() => setDeclineMode(true)}
+                      className={
+                        assisted
+                          ? "h-14 rounded-md px-4 text-base text-ink-3 underline hover:text-danger"
+                          : "text-sm text-ink-3 hover:text-danger hover:underline"
+                      }
+                    >
                       Decline to sign
                     </button>
                   </div>
+                  {assisted && !canFinish && (
+                    <p className="text-sm text-ink-3">
+                      {!consent
+                        ? "Tick the box above once you agree."
+                        : !fullName.trim()
+                          ? "Type your full name above."
+                          : "Add your signature above."}
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -368,8 +522,39 @@ export default function SignPage() {
               )}
             </>
           )}
+
+          {assisted && info?.valid && info.can_sign && !declineMode && (
+            <div className="flex items-center gap-3 border-t border-line pt-4">
+              <Button
+                variant="ghost"
+                className="h-14 flex-1 text-lg"
+                onClick={() => setStep((n) => Math.max(0, n - 1))}
+                disabled={step === 0}
+              >
+                {t("action.back")}
+              </Button>
+              {step < STEPS.length - 1 && (
+                <Button
+                  className="h-14 flex-1 text-lg"
+                  onClick={() => setStep((n) => Math.min(STEPS.length - 1, n + 1))}
+                  // Step 0 requires the document to have been opened. A "next" that skips
+                  // reading turns the signing record into evidence of a click, not of consent.
+                  disabled={step === 0 && !opened}
+                >
+                  {t("action.next")}
+                </Button>
+              )}
+            </div>
+          )}
         </CardBody>
       </Card>
+
+      {assisted && info?.valid && info.recipient_status === "signed" && (
+        <p className="mt-4 max-w-lg text-center text-base text-ink-2">
+          {t("sign.copy_sent")} {t("sign.no_email")}
+        </p>
+      )}
+
       <p className="mt-4 text-xs text-ink-3">Powered by Contract Management · this link is unique to you — please don&rsquo;t forward it.</p>
     </div>
   );

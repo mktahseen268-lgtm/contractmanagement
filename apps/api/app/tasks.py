@@ -133,6 +133,52 @@ def render_contract_pdf(contract_id: str, tenant_id: str, created_by: str) -> st
             raise
 
 
+def _certificates_for_signers(db, recipients) -> list[tuple]:
+    """Pair each signed recipient with the certificate to sign as.
+
+    A recipient is matched to a certificate by user id when they are an internal user, and by
+    the external-party binding minted for a visitor (Phase 2 §3). A signatory with no usable
+    certificate is skipped rather than signed with somebody else's — silently falling back to
+    a shared certificate is precisely the failure this phase exists to remove.
+    """
+    from .pki import lifecycle as pki_lifecycle
+
+    pairs: list[tuple] = []
+    for r in recipients:
+        if r.status != "signed" or r.kind != "signer":
+            continue
+        cert = None
+        if r.signer_user_id:
+            cert = pki_lifecycle.active_certificate_for(db, r.tenant_id, user_id=r.signer_user_id)
+        if cert is None and r.party_ref:
+            cert = pki_lifecycle.active_certificate_for(db, r.tenant_id, party_id=r.party_ref)
+        if cert is None:
+            _log.warning(
+                "seal_envelope: recipient %s (%s) has no active certificate — signing skipped "
+                "for this signatory", r.id, r.email,
+            )
+            continue
+        pairs.append((r, cert))
+    return pairs
+
+
+def _record_signing_receipts(db, env, receipts: list[dict]) -> None:
+    """One `SignatureEvent` per cryptographic signature, naming the certificate serial used.
+
+    The RFP asks that every SignatureEvent records the certificate serial — this is what makes
+    "who signed this, with which credential" answerable years later from the audit trail alone.
+    """
+    for receipt in receipts:
+        db.add(models.SignatureEvent(
+            tenant_id=env.tenant_id,
+            envelope_id=env.id,
+            recipient_id=receipt.get("recipient_id"),
+            recipient_name=receipt.get("recipient_name", ""),
+            event="crypto_signed" if receipt.get("ok") else "crypto_sign_failed",
+            meta=receipt,
+        ))
+
+
 @celery.task(name="signatures.seal_envelope")
 def seal_envelope(envelope_id: str, tenant_id: str) -> str:
     """Render the executed PDF + the Certificate of Completion for a completed envelope and link them."""
@@ -148,6 +194,11 @@ def seal_envelope(envelope_id: str, tenant_id: str) -> str:
             db, tenant_id=tenant_id, type="signature.seal", label=f"Sealing executed PDF — {c.title}",
             created_by=env.created_by, object_type="contract", object_id=c.id, href=f"/contracts/{c.id}?tab=signatures",
         )
+        # Stamp the attempt BEFORE doing the work: if the worker dies mid-seal, the envelope
+        # still shows an attempt that never completed rather than looking untouched.
+        env.seal_attempts = (env.seal_attempts or 0) + 1
+        env.seal_last_attempt_at = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+        env.seal_error = ""
         db.commit()
         try:
             tenant = db.get(models.Tenant, tenant_id)
@@ -176,17 +227,28 @@ def seal_envelope(envelope_id: str, tenant_id: str) -> str:
                     for t in tab_rows
                 ]
                 signed_bytes = stamp_tabs_on_pdf(signed_bytes, tab_dicts)
-            # Cryptographic seal (PAdES) when configured — applied last, over the final executed
-            # PDF. Fall back to the visual-only PDF on error so sealing never hard-fails.
+            # Cryptographic signature, applied last over the final executed PDF.
+            #
+            # With SIGNING_PROVIDER=pki each signatory signs with *their own* certificate, so
+            # the document ends up carrying one independently verifiable signature per signer
+            # (RFP: no shared or role-based certificates). Other providers apply a single
+            # org-level seal. Either way a failure degrades to the visual-only PDF rather than
+            # losing the execution — but it is recorded, not swallowed.
             from .signing_provider import get_signing_provider
 
             _sp = get_signing_provider()
-            if _sp.cryptographic:
+            signing_receipts: list[dict] = []
+            if _sp.per_signatory:
+                pairs = _certificates_for_signers(db, recips)
+                signed_bytes, signing_receipts = _sp.sign_for_recipients(
+                    db, signed_bytes, pairs, contract_ref=c.reference_no or "",
+                )
+                _record_signing_receipts(db, env, signing_receipts)
+            elif _sp.cryptographic:
                 try:
                     signed_bytes = _sp.seal_pdf(signed_bytes, contract_ref=c.reference_no or "", reason=f"Executed: {c.title}")
-                except Exception as e:  # noqa: BLE001
-                    import logging as _lg
-                    _lg.getLogger("uvicorn.error").exception("seal_envelope: %s signing failed; storing visual-only PDF", _sp.name)
+                except Exception:  # noqa: BLE001
+                    _log.exception("seal_envelope: %s signing failed; storing visual-only PDF", _sp.name)
             cert_bytes = render_certificate_bytes(envelope=env, contract=c, org_name=org, recipients=recip_dicts, events=event_dicts)
 
             storage = get_storage()
@@ -207,10 +269,29 @@ def seal_envelope(envelope_id: str, tenant_id: str) -> str:
 
             env.sealed_pdf_file_id = _store(signed_bytes, "signed_pdf", f"{ref}_executed")
             env.certificate_file_id = _store(cert_bytes, "certificate", f"{ref}_certificate_of_completion")
-            jobs.succeed(db, job, summary=f"Executed PDF + certificate produced for {ref}.")
+
+            # A signatory whose cryptographic signature failed is a real problem even though a
+            # document was produced — `partial` is what surfaces it in the dead-letter view
+            # instead of letting it pass as a clean execution.
+            failed = [r for r in signing_receipts if not r.get("ok")]
+            if failed:
+                env.seal_status = "partial"
+                env.seal_error = "; ".join(
+                    f"{r.get('recipient_name') or r.get('recipient_id')}: {r.get('error', 'signature failed')}"
+                    for r in failed
+                )[:1000]
+                jobs.succeed(
+                    db, job,
+                    summary=f"Executed PDF produced for {ref}, but {len(failed)} signature(s) failed.",
+                )
+            else:
+                env.seal_status = "sealed"
+                jobs.succeed(db, job, summary=f"Executed PDF + certificate produced for {ref}.")
             db.commit()
             return env.id
         except Exception as e:  # noqa: BLE001
+            env.seal_status = "failed"
+            env.seal_error = str(e)[:1000]
             jobs.fail(db, job, error=str(e))
             db.commit()
             raise
@@ -308,10 +389,135 @@ def retention_purge() -> dict:
     return counts
 
 
+@celery.task(name="archive.sweep")
+def archive_sweep() -> dict:
+    """Move executed contracts past the hot-search window to the cold storage tier.
+    Idempotent. See `app/archive_service.py`. RFP §4c — "1 year instantly searchable"."""
+    from . import archive_service
+
+    with SessionLocal() as db:
+        out = archive_service.archive_sweep(db)
+        db.commit()
+        return out
+
+
+@celery.task(name="archive.purge_contracts")
+def archive_purge_contracts() -> dict:
+    """Hard-delete contracts past RETENTION_YEARS. Skips anything under legal hold.
+    Irreversible — every purge writes an audit entry first. RFP §4c — "Data purging"."""
+    from . import archive_service
+
+    with SessionLocal() as db:
+        out = archive_service.purge_sweep(db)
+        db.commit()
+        return out
+
+
+@celery.task(name="pki.publish_crls")
+def pki_publish_crls() -> dict:
+    """Republish every active issuing CA's CRL before the previous one goes stale.
+
+    A CRL past its `nextUpdate` is treated as invalid by correct relying parties, which fails
+    signature validation across the board — so this runs on a schedule rather than only on
+    revocation. Revocation also publishes immediately; this is the freshness floor.
+    """
+    from sqlalchemy import select
+
+    from . import models
+    from .pki import crl as crl_mod
+
+    published = 0
+    with SessionLocal() as db:
+        cas = db.scalars(
+            select(models.CertificateAuthority).where(
+                models.CertificateAuthority.kind == "issuing",
+                models.CertificateAuthority.status == "active",
+            )
+        ).all()
+        for ca in cas:
+            try:
+                crl_mod.publish(db, ca)
+                published += 1
+            except Exception:  # noqa: BLE001
+                logging.getLogger("uvicorn.error").exception(
+                    "pki.publish_crls: failed for CA %s", ca.id
+                )
+        db.commit()
+    return {"cas": len(cas), "published": published}
+
+
+@celery.task(name="pki.expire_certificates")
+def pki_expire_certificates() -> dict:
+    """Flip past-validity certificates to `expired` so the register reflects reality and the
+    subject's one active-certificate slot is freed for a renewal."""
+    from .pki import lifecycle
+
+    with SessionLocal() as db:
+        n = lifecycle.expire_sweep(db)
+        db.commit()
+    return {"expired": n}
+
+
+@celery.task(name="workflow.sla_sweep")
+def workflow_sla_sweep() -> dict:
+    """Remind reviewers approaching their SLA and escalate the ones who passed it.
+
+    Idempotent: both actions stamp the step, so re-running does not spam. Reminders and
+    escalations are only as timely as this beat's interval — see SLA_SWEEP_SECONDS.
+    """
+    from . import workflow_service
+
+    with SessionLocal() as db:
+        out = workflow_service.sla_sweep(db)
+        db.commit()
+        return out
+
+
 # Beat schedule. Honoured when a beat scheduler is running (celery -A app.celery_app beat ...).
 # For the scaffold the manual endpoint + immediate delivery cover most needs.
+
+@celery.task(name="bulk.send_batch")
+def run_bulk_send(batch_id: str) -> dict:
+    """Fan a bulk-send batch out into one contract and one envelope per recipient.
+
+    Commits per row inside `run_batch`, so a worker killed halfway leaves the rows it already
+    sent marked sent and the rest pending — re-running the task picks up exactly the remainder
+    rather than re-sending to people who already have their envelope.
+    """
+    from . import bulk_send_service
+
+    with SessionLocal() as db:
+        return bulk_send_service.run_batch(db, batch_id)
+
+
+@celery.task(name="signatures.chase_sweep")
+def signature_chase_sweep() -> dict:
+    """Send due signing reminders and expire envelopes past their deadline."""
+    from . import signing_service
+
+    with SessionLocal() as db:
+        out = signing_service.chase_and_expire(db)
+        db.commit()
+        return out
+
+
 celery.conf.beat_schedule = {
     "renewals-sweep-hourly": {"task": "renewals.sweep", "schedule": 3600.0},
     "email-outbox-flush-1m": {"task": "email.flush_outbox", "schedule": 60.0},
     "retention-purge-nightly": {"task": "retention.purge", "schedule": 86400.0},  # 24h
+    # Archive runs before purge so a contract crossing both horizons in one night is archived
+    # (and audited as such) before it is considered for deletion.
+    "archive-sweep-nightly": {"task": "archive.sweep", "schedule": 86400.0},
+    "archive-purge-nightly": {"task": "archive.purge_contracts", "schedule": 86400.0},
+    # Half the CRL validity window, so a republish failure still leaves a valid CRL in place
+    # for one more cycle before relying parties start rejecting it.
+    "pki-publish-crls": {"task": "pki.publish_crls", "schedule": settings.crl_validity_hours * 1800.0},
+    "pki-expire-certificates": {"task": "pki.expire_certificates", "schedule": 3600.0},
+    # Review SLAs. A reminder that arrives an hour late is nearly useless, so this runs far
+    # more often than the other sweeps.
+    "workflow-sla-sweep": {"task": "workflow.sla_sweep", "schedule": settings.sla_sweep_seconds},
+    # Signing reminders and envelope expiry. Hourly rather than daily because an expiry
+    # configured in days still has an hour of the day attached to it, and a link that stays
+    # live for most of a day past its deadline is not an expiry.
+    "signature-chase-sweep": {"task": "signatures.chase_sweep", "schedule": 3600.0},
 }

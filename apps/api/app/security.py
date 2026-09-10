@@ -36,6 +36,30 @@ _COMMON_PASSWORDS = frozenset({
     "football", "master", "shadow", "superman", "batman",
 })
 
+#: Punctuation people append to satisfy a "must contain a symbol" rule.
+_TRAILING_DECORATION = r"""!@#$%^&*()-_=+.,?~`|/\[]{}<>;:'" """.strip()
+
+
+def _is_common_password(low: str) -> bool:
+    """Whether a lowercased password is on the blocklist, ignoring decoration.
+
+    Checked as given, then with trailing punctuation removed, then with trailing digits removed
+    too. Those two suffixes are what people add when a policy tells them to — `password` ->
+    `password1` -> `Password123!` — so a blocklist that only matches exactly stops none of them.
+
+    Deliberately not stripping *leading* characters or doing leetspeak folding: both start
+    rejecting passwords that are genuinely fine, and a policy that rejects good passwords sends
+    people to a sticky note.
+    """
+    if low in _COMMON_PASSWORDS:
+        return True
+    stripped = low.rstrip(_TRAILING_DECORATION)
+    if stripped and stripped in _COMMON_PASSWORDS:
+        return True
+    stem = stripped.rstrip("0123456789")
+    return bool(stem) and stem in _COMMON_PASSWORDS
+
+
 # Character classes for the "must contain N of 4" rule.
 _RE_LOWER = re.compile(r"[a-z]")
 _RE_UPPER = re.compile(r"[A-Z]")
@@ -71,7 +95,11 @@ def validate_password_strength(password: str, *, email: str | None = None, name:
         )
 
     low = p.lower()
-    if low in _COMMON_PASSWORDS:
+    # Exact match is not enough. A complexity rule that demands a symbol turns "password123"
+    # into "Password123!", which is the single most common password in the world that passes a
+    # naive policy — and an exact-match blocklist waves it straight through. Trailing
+    # punctuation is stripped before the check for exactly that reason.
+    if _is_common_password(low):
         errors.append("This password is too common — pick something unique.")
 
     if email:
@@ -79,8 +107,16 @@ def validate_password_strength(password: str, *, email: str | None = None, name:
         if local and len(local) >= 4 and local in low:
             errors.append("Password must not contain your email.")
     if name:
+        # The whole name with the space removed, and each part on its own. Matching only the
+        # name verbatim catches almost nothing: "Mark Spencer" never appears in a password,
+        # because the space is the first thing that goes — "MarkSpencer1!" and "Spencer99!"
+        # are what people actually type, and both walked straight through.
+        #
+        # Parts shorter than four characters are skipped. "Ali" or "Lee" inside a password is a
+        # coincidence, and rejecting it would fail passwords that are genuinely fine.
         n = (name or "").lower().strip()
-        if n and len(n) >= 4 and n in low:
+        candidates = {n, n.replace(" ", "")} | {part for part in n.split() if part}
+        if any(c and len(c) >= 4 and c in low for c in candidates):
             errors.append("Password must not contain your name.")
 
     if p and _is_trivial(p):

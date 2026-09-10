@@ -2,3 +2,9 @@
 pytest==8.3.4
 pytest-cov==6.0.0
 httpx==0.28.1
+
+# Phase 2: the per-signatory PAdES tests exercise real PDF signing, so the signing extra is a
+# dev/CI dependency even though it stays optional at runtime (SIGNING_PROVIDER=internal needs
+# none of it). `tests/test_esignature_depth.py` skips itself if this is absent.
+-r requirements-sign.txt
+-r requirements-qr.txt

@@ -1,180 +1,432 @@
 "use client";
 
-// Redlining / Track Changes — PROTOTYPE of inline tracked changes with accept/reject + comments.
-// Shows insertions, deletions, and an author-attributed change list. Mockup: in-memory changes.
-// Wires later into the Tiptap editor with a suggestions/marks extension.
+/**
+ * Redline — compare two versions of an agreement and decide change by change what survives.
+ *
+ * Replaces the in-memory prototype. Every change here is computed server-side and every
+ * decision is persisted:
+ *   GET  /contracts/{id}/redline?base=&compare=   word-level diff
+ *   POST /contracts/{id}/redline/apply            accepted changes → a new version
+ *   POST /contracts/{id}/redline/comment          a thread anchored to one change
+ *
+ * Nothing is applied until "Apply" — accepting a change here only marks it, because applying
+ * rewrites the agreement text and that deserves one deliberate action rather than a dozen
+ * accidental ones.
+ */
 
-import { useMemo, useState } from "react";
-import { Check, Eye, FileText, MessageSquare, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ArrowRight,
+  Check,
+  FileText,
+  MessageSquare,
+  Minus,
+  Plus,
+  X,
+} from "lucide-react";
+import { api, ApiError } from "@/lib/api";
 import { PageHeader } from "@/components/shell";
-import { Badge, Button, Card, CardBody } from "@/components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  ErrorBanner,
+  Select,
+  Skeleton,
+  Textarea,
+} from "@/components/ui";
+import type {
+  ContractListItem,
+  Paginated,
+  Redline,
+  RedlineChange,
+  Version,
+} from "@/lib/types";
 
-type ChangeKind = "insert" | "delete";
-type Change = { id: string; kind: ChangeKind; author: string; color: string; text: string; note?: string; status: "open" | "accepted" | "rejected" };
-
-type Token =
-  | { t: "text"; v: string }
-  | { t: "change"; id: string };
-
-// A short clause rendered as tokens; "change" tokens reference the changes below.
-const DOC: Token[] = [
-  { t: "text", v: "7. Limitation of Liability. Except for breaches of confidentiality, each party's aggregate liability shall not exceed the fees paid in the preceding " },
-  { t: "change", id: "c1" }, // delete "twelve (12)"
-  { t: "change", id: "c2" }, // insert "twenty-four (24)"
-  { t: "text", v: " months. " },
-  { t: "change", id: "c3" }, // insert sentence
-  { t: "text", v: " Each party shall maintain insurance adequate to cover its obligations hereunder." },
-];
-
-const INITIAL: Change[] = [
-  { id: "c1", kind: "delete", author: "Northwind", color: "#EF4444", text: "twelve (12)", status: "open" },
-  { id: "c2", kind: "insert", author: "Northwind", color: "#3E7BFA", text: "twenty-four (24)", note: "Requesting a longer cap for data-breach events.", status: "open" },
-  { id: "c3", kind: "insert", author: "Acme Legal", color: "#12B76A", text: "This cap shall not apply to a party's indemnification obligations.", status: "open" },
-];
+const LIVE = "current";
 
 export default function RedlinePage() {
-  const [changes, setChanges] = useState<Change[]>(INITIAL);
-  const [view, setView] = useState<"markup" | "final" | "original">("markup");
-  const [focus, setFocus] = useState<string | null>(null);
+  const [contracts, setContracts] = useState<ContractListItem[] | null>(null);
+  const [contractId, setContractId] = useState("");
+  const [versions, setVersions] = useState<Version[]>([]);
+  const [base, setBase] = useState<string>("");
+  const [compare, setCompare] = useState<string>(LIVE);
+  const [redline, setRedline] = useState<Redline | null>(null);
+  const [accepted, setAccepted] = useState<Set<number>>(new Set());
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [applied, setApplied] = useState("");
 
-  const open = useMemo(() => changes.filter((c) => c.status === "open"), [changes]);
+  useEffect(() => {
+    api
+      .get<Paginated<ContractListItem>>("/contracts?page_size=100")
+      .then((r) => {
+        setContracts(r.items);
+        if (r.items.length) setContractId(r.items[0].id);
+      })
+      .catch(() => setContracts([]));
+  }, []);
 
-  function decide(id: string, status: "accepted" | "rejected") {
-    setChanges((arr) => arr.map((c) => (c.id === id ? { ...c, status } : c)));
-  }
-  function decideAll(status: "accepted" | "rejected") {
-    setChanges((arr) => arr.map((c) => (c.status === "open" ? { ...c, status } : c)));
-  }
+  useEffect(() => {
+    if (!contractId) return;
+    setRedline(null);
+    setAccepted(new Set());
+    setApplied("");
+    api
+      .get<Version[]>(`/contracts/${contractId}/versions`)
+      .then((rows) => {
+        setVersions(rows);
+        setBase(rows.length ? String(rows[0].version_no) : "");
+        setCompare(LIVE);
+      })
+      .catch(() => setVersions([]));
+  }, [contractId]);
 
-  function renderChange(c: Change) {
-    // visibility rules by view + status
-    const isAccepted = c.status === "accepted";
-    const isRejected = c.status === "rejected";
-    if (view === "original") {
-      // show deletions as normal text, hide insertions
-      return c.kind === "delete" ? <span>{c.text}</span> : null;
+  const load = useCallback(async () => {
+    if (!contractId || !base) return;
+    setBusy(true);
+    setError("");
+    try {
+      const params = new URLSearchParams();
+      params.set("base", base);
+      if (compare !== LIVE) params.set("compare", compare);
+      setRedline(await api.get<Redline>(`/contracts/${contractId}/redline?${params}`));
+      setAccepted(new Set());
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "That comparison could not be made.");
+      setRedline(null);
+    } finally {
+      setBusy(false);
     }
-    if (view === "final") {
-      // show accepted insertions + non-deleted text; hide accepted deletions
-      if (c.kind === "insert") return isRejected ? null : <span>{c.text}</span>;
-      return isAccepted ? null : <span>{c.text}</span>; // deletion not yet accepted → text stays
-    }
-    // markup view
-    const base = "rounded px-0.5";
-    if (c.kind === "delete") {
-      return (
-        <span
-          onClick={() => setFocus(c.id)}
-          className={`${base} cursor-pointer line-through ${isAccepted ? "opacity-40" : ""}`}
-          style={{ color: c.color, background: focus === c.id ? `${c.color}22` : undefined }}
-        >
-          {c.text}
-        </span>
+  }, [contractId, base, compare]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  function toggle(index: number) {
+    setAccepted((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  }
+
+  async function applyChanges() {
+    if (!redline) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api.post(`/contracts/${contractId}/redline/apply`, {
+        base_version_no: redline.base_version_no,
+        compare_version_no: redline.compare_version_no,
+        accept: Array.from(accepted),
+      });
+      setApplied(
+        `Applied. ${accepted.size} of ${redline.change_count} change${
+          redline.change_count === 1 ? "" : "s"
+        } accepted; the previous wording is saved as a version.`,
       );
+      await load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "The changes could not be applied.");
+    } finally {
+      setBusy(false);
     }
-    return (
-      <span
-        onClick={() => setFocus(c.id)}
-        className={`${base} cursor-pointer underline decoration-2 underline-offset-2 ${isRejected ? "opacity-40 line-through" : ""}`}
-        style={{ color: c.color, background: focus === c.id ? `${c.color}22` : undefined }}
-      >
-        {c.text}
-      </span>
-    );
   }
 
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Redlining</span>}
-        subtitle="Tracked changes with accept / reject and author attribution — collaborative redlines."
-        actions={
-          <div className="flex items-center gap-2">
-            <Button size="sm" variant="secondary" onClick={() => decideAll("rejected")} disabled={open.length === 0}><X className="h-3.5 w-3.5" /> Reject all</Button>
-            <Button size="sm" onClick={() => decideAll("accepted")} disabled={open.length === 0}><Check className="h-3.5 w-3.5" /> Accept all</Button>
-          </div>
-        }
+        title="Redline"
+        subtitle="Compare two versions and decide, change by change, what survives"
       />
 
-      <div className="grid gap-4 p-4 lg:grid-cols-[1fr_320px]">
-        {/* document */}
-        <Card>
-          <CardBody className="space-y-4">
-            <div className="flex items-center gap-1 rounded-lg border border-line bg-surface-2 p-0.5 text-sm">
-              {([["markup", "Show markup"], ["final", "Final"], ["original", "Original"]] as const).map(([v, label]) => (
-                <button
-                  key={v}
-                  onClick={() => setView(v)}
-                  className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition ${view === v ? "bg-white text-ink shadow-sm" : "text-ink-3 hover:text-ink"}`}
-                >
-                  <Eye className="h-3.5 w-3.5" /> {label}
-                </button>
-              ))}
-            </div>
-            <div className="rounded-lg border border-line bg-white p-6 text-[15px] leading-8 text-ink">
-              <div className="mb-3 flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-ink-3">
-                <FileText className="h-3.5 w-3.5" /> Master Services Agreement · §7
-              </div>
-              <p>
-                {DOC.map((tok, i) =>
-                  tok.t === "text" ? (
-                    <span key={i}>{tok.v}</span>
-                  ) : (
-                    <span key={i}>{renderChange(changes.find((c) => c.id === tok.id)!)}</span>
-                  )
-                )}
-              </p>
-            </div>
-          </CardBody>
-        </Card>
+      <div className="space-y-5 p-6">
+        {error && <ErrorBanner message={error} />}
 
-        {/* changes list */}
-        <Card className="h-max lg:sticky lg:top-20">
-          <CardBody className="space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-semibold text-ink">Changes</div>
-              <span className="text-xs text-ink-3">{open.length} open · {changes.length} total</span>
-            </div>
-            {changes.map((c) => (
-              <div
-                key={c.id}
-                onClick={() => setFocus(c.id)}
-                className={`rounded-lg border p-2.5 text-sm transition ${focus === c.id ? "border-accent" : "border-line"} ${c.status !== "open" ? "opacity-70" : ""}`}
-              >
-                <div className="flex items-center gap-2">
-                  <span className="h-2.5 w-2.5 rounded-full" style={{ background: c.color }} />
-                  <span className="text-xs font-medium text-ink">{c.author}</span>
-                  <span className="rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-ink-3">{c.kind}</span>
-                  {c.status !== "open" && (
-                    <span className={`ml-auto rounded-full px-1.5 py-0.5 text-[10px] font-medium ${c.status === "accepted" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>{c.status}</span>
-                  )}
+        {contracts === null ? (
+          <Skeleton className="h-24" />
+        ) : contracts.length === 0 ? (
+          <Card>
+            <CardBody className="py-10 text-center text-sm text-ink-2">
+              No agreements yet. Create one first.
+            </CardBody>
+          </Card>
+        ) : (
+          <>
+            <Card>
+              <CardBody className="grid gap-3 sm:grid-cols-3">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-ink-2">Agreement</label>
+                  <Select value={contractId} onChange={(e) => setContractId(e.target.value)}>
+                    {contracts.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.reference_no} — {c.title}
+                      </option>
+                    ))}
+                  </Select>
                 </div>
-                <p className="mt-1 text-xs text-ink-2">
-                  <span style={{ color: c.color }} className={c.kind === "delete" ? "line-through" : "underline"}>{c.text}</span>
-                </p>
-                {c.note && (
-                  <p className="mt-1 flex items-start gap-1 text-[11px] text-ink-3">
-                    <MessageSquare className="mt-0.5 h-3 w-3 shrink-0" /> {c.note}
-                  </p>
-                )}
-                {c.status === "open" && (
-                  <div className="mt-2 flex gap-1.5">
-                    <button onClick={(e) => { e.stopPropagation(); decide(c.id, "accepted"); }} className="inline-flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 hover:bg-emerald-100">
-                      <Check className="h-3 w-3" /> Accept
-                    </button>
-                    <button onClick={(e) => { e.stopPropagation(); decide(c.id, "rejected"); }} className="inline-flex items-center gap-1 rounded-md bg-red-50 px-2 py-1 text-[11px] font-medium text-red-700 hover:bg-red-100">
-                      <X className="h-3 w-3" /> Reject
-                    </button>
-                  </div>
-                )}
-              </div>
-            ))}
-            {changes.length > 0 && open.length === 0 && (
-              <p className="pt-1 text-center text-xs text-ink-3">All changes resolved.</p>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-ink-2">From</label>
+                  <Select value={base} onChange={(e) => setBase(e.target.value)}>
+                    {versions.length === 0 && <option value="">No saved versions</option>}
+                    {versions.map((v) => (
+                      <option key={v.id} value={v.version_no}>
+                        v{v.version_no} — {v.change_summary || "no summary"}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-ink-2">To</label>
+                  <Select value={compare} onChange={(e) => setCompare(e.target.value)}>
+                    <option value={LIVE}>Current draft</option>
+                    {versions.map((v) => (
+                      <option key={v.id} value={v.version_no}>
+                        v{v.version_no}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </CardBody>
+            </Card>
+
+            {applied && (
+              <Card className="border-emerald-300/60">
+                <CardBody className="flex items-center gap-2 py-3 text-sm text-ink">
+                  <Check className="h-4 w-4 text-emerald-600" />
+                  {applied}
+                </CardBody>
+              </Card>
             )}
-          </CardBody>
-        </Card>
+
+            {busy && !redline && <Skeleton className="h-32" />}
+
+            {redline && redline.identical && (
+              <Card>
+                <CardBody className="py-10 text-center text-sm text-ink-2">
+                  <FileText className="mx-auto mb-3 h-10 w-10 text-ink-3" />
+                  <div className="text-base font-semibold text-ink">No differences</div>
+                  <p className="mt-1">
+                    {redline.base_label} and {redline.compare_label} are word for word the same.
+                  </p>
+                </CardBody>
+              </Card>
+            )}
+
+            {redline && !redline.identical && (
+              <>
+                <div className="grid gap-3 sm:grid-cols-4">
+                  <Stat label="Changes" value={redline.change_count} icon={FileText} />
+                  <Stat label="Words added" value={redline.added} icon={Plus} tone="text-accent" />
+                  <Stat
+                    label="Words removed"
+                    value={redline.removed}
+                    icon={Minus}
+                    tone="text-red-600"
+                  />
+                  <Stat label="Accepted" value={accepted.size} icon={Check} />
+                </div>
+
+                <Card>
+                  <CardBody className="flex flex-wrap items-center justify-between gap-3">
+                    <p className="text-sm text-ink-2">
+                      Comparing <strong>{redline.base_label}</strong> to{" "}
+                      <strong>{redline.compare_label}</strong>. Anything not accepted keeps the
+                      wording it had in {redline.base_label}.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() =>
+                          setAccepted(new Set(redline.changes.map((c) => c.index)))
+                        }
+                      >
+                        Accept all
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => setAccepted(new Set())}>
+                        Reject all
+                      </Button>
+                      <Button size="sm" loading={busy} onClick={applyChanges}>
+                        Apply <ArrowRight className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </CardBody>
+                </Card>
+
+                <div className="space-y-3">
+                  {redline.changes.map((c) => (
+                    <ChangeCard
+                      key={c.index}
+                      change={c}
+                      contractId={contractId}
+                      accepted={accepted.has(c.index)}
+                      onToggle={() => toggle(c.index)}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
+          </>
+        )}
       </div>
+    </div>
+  );
+}
+
+function ChangeCard({
+  change,
+  contractId,
+  accepted,
+  onToggle,
+}: {
+  change: RedlineChange;
+  contractId: string;
+  accepted: boolean;
+  onToggle: () => void;
+}) {
+  const [commenting, setCommenting] = useState(false);
+  const [note, setNote] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const label = useMemo(() => {
+    if (change.kind === "insert") return "Added";
+    if (change.kind === "delete") return "Removed";
+    return "Reworded";
+  }, [change.kind]);
+
+  async function comment() {
+    setBusy(true);
+    setErr("");
+    try {
+      await api.post(`/contracts/${contractId}/redline/comment`, {
+        body: note.trim(),
+        anchor_start: change.anchor_start,
+        anchor_end: change.anchor_end,
+        internal_only: true,
+      });
+      setSaved(true);
+      setCommenting(false);
+      setNote("");
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : "The comment could not be saved.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className={accepted ? "border-accent/50" : ""}>
+      <CardBody className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge tone={change.kind === "delete" ? "neutral" : "accent"}>{label}</Badge>
+          {accepted ? (
+            <span className="inline-flex items-center gap-1 text-xs text-accent">
+              <Check className="h-3 w-3" /> will be applied
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 text-xs text-ink-3">
+              <X className="h-3 w-3" /> keeping the earlier wording
+            </span>
+          )}
+          {saved && (
+            <span className="inline-flex items-center gap-1 text-xs text-ink-3">
+              <MessageSquare className="h-3 w-3" /> comment filed
+            </span>
+          )}
+        </div>
+
+        {change.before_context && (
+          <p className="truncate text-xs text-ink-3">…{change.before_context}</p>
+        )}
+
+        <div className="space-y-1 font-mono text-xs">
+          {change.before && (
+            <p className="rounded bg-red-50 px-2 py-1 text-red-700 line-through dark:bg-red-950/30">
+              {change.before}
+            </p>
+          )}
+          {change.after && (
+            <p className="rounded bg-emerald-50 px-2 py-1 text-emerald-800 dark:bg-emerald-950/30">
+              {change.after}
+            </p>
+          )}
+        </div>
+
+        {change.after_context && (
+          <p className="truncate text-xs text-ink-3">{change.after_context}…</p>
+        )}
+
+        {err && <ErrorBanner message={err} />}
+
+        {commenting ? (
+          <div className="space-y-2">
+            <Textarea
+              rows={2}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="Why this needs discussion…"
+            />
+            <div className="flex gap-2">
+              <Button size="sm" loading={busy} disabled={!note.trim()} onClick={comment}>
+                File comment
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setCommenting(false)}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant={accepted ? "ghost" : "primary"} onClick={onToggle}>
+              {accepted ? (
+                <>
+                  <X className="h-3.5 w-3.5" /> Reject
+                </>
+              ) : (
+                <>
+                  <Check className="h-3.5 w-3.5" /> Accept
+                </>
+              )}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setCommenting(true)}>
+              <MessageSquare className="h-3.5 w-3.5" /> Comment
+            </Button>
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  icon: Icon,
+  tone,
+}: {
+  label: string;
+  value: number;
+  icon: typeof FileText;
+  tone?: string;
+}) {
+  return (
+    <div className="rounded-lg border border-line bg-surface p-3">
+      <div
+        className={`flex items-center gap-1.5 font-display text-2xl font-semibold ${
+          tone ?? "text-ink"
+        }`}
+      >
+        <Icon className="h-4 w-4" />
+        {value}
+      </div>
+      <div className="text-xs text-ink-2">{label}</div>
     </div>
   );
 }

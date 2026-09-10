@@ -1,0 +1,4 @@
+# QR codes for the visitor eSigning surface (Phase 2).
+# Pure Python, zero transitive dependencies. Optional: without it the eSign flow works and
+# only the QR endpoint returns 501, so a minimal install stays minimal.
+segno==1.6.1

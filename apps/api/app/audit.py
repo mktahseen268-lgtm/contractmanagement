@@ -9,25 +9,26 @@ detect deletions or in-place edits: any break in the prev/row linkage, or any ro
 Concurrency model
 -----------------
 Concurrent audit inserts in the same tenant must serialize so they observe the same
-`prev_hash`. We use a Postgres advisory lock (`pg_advisory_xact_lock`) keyed by a stable
-hash of the tenant id; the lock is held only for the duration of the surrounding
-transaction. On SQLite the BEGIN…COMMIT cycle is already single-writer. On MSSQL we fall
-back to `sp_getapplock`. If neither is available we still chain (best-effort) but document
-the residual race window — the chain is a tamper-evidence layer, not the only line of
-defence (audit_log inserts are still append-only at the storage layer).
+`prev_hash`. `db_dialect.advisory_lock` takes a transaction-scoped exclusive lock keyed by
+the tenant id: `pg_advisory_xact_lock` on Postgres, `sp_getapplock` on MSSQL, `DBMS_LOCK`
+on Oracle. On SQLite the BEGIN…COMMIT cycle is already single-writer. Where no lock is
+available we still chain (best-effort) but document the residual race window — the chain is
+a tamper-evidence layer, not the only line of defence (audit_log inserts are still
+append-only at the storage layer).
 
 The chain key is `settings.effective_audit_chain_key` — either explicitly set or derived
 from `SECRET_KEY` (see config.py).
 """
 
+import datetime as _dt
 import hashlib
 import hmac
 import json
 
-from sqlalchemy import desc, select, text
+from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from . import models
+from . import db_dialect, models
 from .config import settings
 
 _GENESIS_PREV_HASH = "0" * 64
@@ -72,28 +73,40 @@ def _acquire_tenant_lock(db: Session, tenant_id: str) -> None:
     """Serialize audit inserts per tenant for the lifetime of the current transaction."""
     if not tenant_id:
         return
-    dialect = settings.db_dialect
-    if dialect == "postgresql":
-        # Advisory locks take a bigint — derive one from the tenant id (stable across replicas).
-        n = int.from_bytes(hashlib.sha256(tenant_id.encode("utf-8")).digest()[:8], "big", signed=True)
-        db.execute(text("SELECT pg_advisory_xact_lock(:n)"), {"n": n})
-    elif dialect == "mssql":
-        db.execute(text("EXEC sp_getapplock @Resource = :r, @LockMode = 'Exclusive', @LockOwner = 'Transaction'"),
-                   {"r": f"cm-audit-{tenant_id}"})
-    # SQLite: no advisory lock; engine is single-writer.
+    db_dialect.advisory_lock(db, settings.db_dialect, f"cm-audit-{tenant_id}")
+
+
+def _utcnow() -> _dt.datetime:
+    """The audit clock. A single function so a test can force two rows into the same tick and
+    prove the chain still detects tampering when timestamps tie."""
+    return _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
+
+
+def _previous_row(db: Session, tenant_id: str) -> tuple[str, int]:
+    """(row_hash, seq) of the tenant's latest audit row, or the genesis sentinel.
+
+    Ordered by `seq` — the monotonic insertion counter — not by `at`. Two rows written in the
+    same clock tick share a timestamp, and ordering by `(at, id)` then falls back to a random
+    uuid: the chain could skip a row, and deleting the skipped row left a chain that still
+    verified. `seq` is assigned under the advisory lock this function is already called
+    beneath, so concurrent writers cannot collide on it.
+    """
+    if not tenant_id:
+        return _GENESIS_PREV_HASH, 0
+    row = db.execute(
+        select(models.AuditLog.row_hash, models.AuditLog.seq)
+        .where(models.AuditLog.tenant_id == tenant_id)
+        .order_by(desc(models.AuditLog.seq), desc(models.AuditLog.at), desc(models.AuditLog.id))
+        .limit(1)
+    ).first()
+    if row is None:
+        return _GENESIS_PREV_HASH, 0
+    return (row[0] or _GENESIS_PREV_HASH), int(row[1] or 0)
 
 
 def _previous_row_hash(db: Session, tenant_id: str) -> str:
-    """Latest row_hash for the tenant, or the genesis sentinel."""
-    if not tenant_id:
-        return _GENESIS_PREV_HASH
-    row = db.scalar(
-        select(models.AuditLog.row_hash)
-        .where(models.AuditLog.tenant_id == tenant_id)
-        .order_by(desc(models.AuditLog.at), desc(models.AuditLog.id))
-        .limit(1)
-    )
-    return row or _GENESIS_PREV_HASH
+    """Back-compat shim for callers that only want the hash."""
+    return _previous_row(db, tenant_id)[0]
 
 
 def record(
@@ -130,10 +143,10 @@ def record(
     )
     # `at` is normally populated by the column default at flush time; for chain determinism
     # we set it explicitly *before* the hash so the canonical form matches what's persisted.
-    import datetime as dt
-    entry.at = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    entry.at = _utcnow()
 
-    prev = _previous_row_hash(db, tenant_id)
+    prev, prev_seq = _previous_row(db, tenant_id)
+    entry.seq = prev_seq + 1
     canonical = _canonical_row(
         tenant_id=tenant_id,
         actor_id=entry.actor_id,
@@ -150,6 +163,24 @@ def record(
     entry.row_hash = _hmac_chain(prev, canonical)
 
     db.add(entry)
+    # Flush now, not at commit. The session runs with `autoflush=False`, so without this the
+    # `_previous_row` query in the *next* `record()` of the same transaction would not see this
+    # row — two audit entries in one request would both claim seq 1 and both chain to the
+    # genesis hash, and `verify_chain` would then report tampering on an honest log. Recording
+    # two actions in one transaction is ordinary (a workflow decision, a grant plus a
+    # break-glass), so this is the common path, not an edge case.
+    db.flush()
+
+    # Ship it to the SIEM. Best effort and never raises: a collector outage must not stop
+    # somebody signing a contract, and the audit row is already durable — the gap can be
+    # replayed from the chain afterwards (`/siem/replay`).
+    try:
+        from . import siem
+
+        siem.emit(entry)
+    except Exception:  # noqa: BLE001 — monitoring must never break the thing it monitors
+        pass
+
     if notify_user_id and notify_title:
         db.add(
             models.Notification(
@@ -177,10 +208,13 @@ def verify_chain(db: Session, tenant_id: str) -> tuple[bool, list[dict]]:
     they are skipped silently — the chain is checked only across rows that have hashes.
     """
     problems: list[dict] = []
+    # Walk in `seq` order: the insertion order the chain was actually built in. Pre-0023
+    # rows carry seq 0 and fall back to `(at, id)`, which is how they were chained.
     rows = list(db.scalars(
         select(models.AuditLog)
         .where(models.AuditLog.tenant_id == tenant_id)
-        .order_by(models.AuditLog.at.asc(), models.AuditLog.id.asc())
+        .order_by(models.AuditLog.seq.asc(), models.AuditLog.at.asc(),
+                  models.AuditLog.id.asc())
     ).all())
     expected_prev = _GENESIS_PREV_HASH
     seen_first_chained = False

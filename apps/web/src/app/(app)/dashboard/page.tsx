@@ -7,6 +7,7 @@ import { useAuth } from "@/lib/auth";
 import { api, ApiError } from "@/lib/api";
 import { Button, Card, CardBody, CardHeader, CardTitle, Skeleton } from "@/components/ui";
 import { PageHeader } from "@/components/shell";
+import { WorkspaceGuidance } from "@/components/guidance";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { AreaChart, type TrendPoint } from "@/components/charts";
 import { ActivityFeed, KpiCard, QuickCreateTiles, StatusDistribution } from "@/components/widgets";
@@ -59,6 +60,12 @@ export default function DashboardPage() {
         }
       />
       <div className="space-y-6 p-6">
+        {/* What needs this person, before the metrics. A dashboard that opens with charts
+            answers "how are we doing"; most people open it to find out what to do next. */}
+        <ErrorBoundary label="what needs you">
+          <WorkspaceGuidance />
+        </ErrorBoundary>
+
         <ErrorBoundary label="key metrics">
           <KpiRow refreshKey={refreshKey} currency={me?.tenant.currency} />
         </ErrorBoundary>

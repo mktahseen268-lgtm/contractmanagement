@@ -5,13 +5,15 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Activity,
+  AlertTriangle,
   BarChart3,
+  TrendingUp,
   Bell,
   BookOpen,
   ChevronDown,
   ChevronsLeft,
   Check,
-  Fingerprint,
+  FileKey,
   FileText,
   GitBranch,
   Globe,
@@ -22,10 +24,11 @@ import {
   LogOut,
   Mails,
   Menu,
-  PenTool,
   Plus,
+  LifeBuoy,
   Rocket,
   Search,
+  GraduationCap,
   Settings,
   ShieldCheck,
   Sparkles,
@@ -36,6 +39,7 @@ import {
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { cn, timeAgo, titleCase } from "@/lib/utils";
+import { LocaleSwitch } from "@/components/locale-switch";
 import { Avatar } from "@/components/ui";
 import { CommandPalette } from "@/components/command-palette";
 import { useToast } from "@/components/toast";
@@ -69,14 +73,17 @@ const RAIL: RailItem[] = [
   { href: "/clauses", label: "Clause Library", icon: Library, match: (p) => p.startsWith("/clauses") },
   { href: "/workflows", label: "Workflows", icon: Workflow, match: (p) => p === "/workflows" || p.startsWith("/workflows/") },
   { href: "/workflow-builder", label: "Workflow Builder", icon: GitBranch, match: (p) => p.startsWith("/workflow-builder") },
-  { href: "/signature-studio", label: "Signature Studio", icon: PenTool, match: (p) => p.startsWith("/signature-studio") },
+  { href: "/workflow-ops", label: "Workflow Ops", icon: AlertTriangle, match: (p) => p.startsWith("/workflow-ops"), adminOnly: false },
   { href: "/bulk-send", label: "Bulk Send", icon: Mails, match: (p) => p.startsWith("/bulk-send") },
-  { href: "/identity-check", label: "Identity Verification", icon: Fingerprint, match: (p) => p.startsWith("/identity-check") },
   { href: "/client-portal", label: "Client Portal", icon: Globe, match: (p) => p.startsWith("/client-portal") },
   { href: "/reports", label: "Reports", icon: BarChart3, match: (p) => p.startsWith("/reports") },
+  { href: "/analytics", label: "Analytics", icon: TrendingUp, match: (p) => p.startsWith("/analytics") },
   { href: "/intelligence", label: "Intelligence", icon: Sparkles, match: (p) => p.startsWith("/intelligence") },
   { href: "/previews", label: "Capabilities", icon: Rocket, match: (p) => p.startsWith("/previews") },
   { href: "/team", label: "Team", icon: UsersIcon, match: (p) => p.startsWith("/team"), adminOnly: true },
+  { href: "/pki", label: "Certificates", icon: FileKey, match: (p) => p.startsWith("/pki"), adminOnly: true },
+  { href: "/knowledge", label: "Help centre", icon: LifeBuoy, match: (p) => p.startsWith("/knowledge") },
+  { href: "/training", label: "Training", icon: GraduationCap, match: (p) => p.startsWith("/training") },
   { href: "/audit", label: "Audit log", icon: ShieldCheck, match: (p) => p.startsWith("/audit") },
   { href: "/settings", label: "Settings", icon: Settings, match: (p) => p.startsWith("/settings") },
 ];
@@ -140,6 +147,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="app-aurora flex h-screen w-screen overflow-hidden text-ink">
+      {/* Genuinely first in the tab order — before the sidebar, not after it. A skip link that
+          comes after the navigation it skips is decoration. WCAG 2.4.1. */}
+      <a href="#main" className="sr-only">
+        Skip to the main content
+      </a>
+
       {/* ⌘K command palette (keyboard-first navigation + search) */}
       <CommandPalette />
 
@@ -305,6 +318,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   >
                     <Settings className="h-4 w-4" /> Settings
                   </button>
+                  <div className="border-t border-line px-3 py-2">
+                    <LocaleSwitch />
+                  </div>
                   <button onClick={logout} className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-danger hover:bg-surface-3">
                     <LogOut className="h-4 w-4" /> Sign out
                   </button>
@@ -316,6 +332,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         {/* content */}
         <main
+          id="main"
+          // Focusable so the skip link can actually move focus here. Without `tabIndex` the
+          // browser moves the scroll position and leaves focus in the nav, so the next Tab
+          // carries on through the menu — the link looks like it worked and did nothing.
+          tabIndex={-1}
           className="min-h-0 flex-1 overflow-y-auto"
           onClick={() => {
             setNotifOpen(false);
@@ -435,7 +456,7 @@ function SideNav({
       </div>
 
       {/* nav list */}
-      <nav className="mt-2 flex-1 overflow-y-auto overflow-x-hidden px-2 py-1">
+      <nav aria-label="Main" className="mt-2 flex-1 overflow-y-auto overflow-x-hidden px-2 py-1">
         {visible.map((item) => {
           const active = item.match(pathname);
           const Icon = item.icon;

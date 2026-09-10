@@ -42,16 +42,25 @@ def _deliver(to: str, subject: str, body: str) -> None:
         log.info("[email:console] To: %s | Subject: %s\n--- body ---\n%s\n------------", to, subject, body)
 
 
-def send_email(to: str, subject: str, body: str, *, tenant_id: str = "") -> str:
+def send_email(to: str, subject: str, body: str, *, tenant_id: str = "", db: Session | None = None) -> str:
     """Queue an email through the outbox + attempt immediate delivery. Returns the outbox row id.
     Failures are recorded (status=failed, last_error set) but never raise to the caller — the
-    outbox flusher will retry later."""
+    outbox flusher will retry later.
+
+    Pass `db` when calling from inside an open transaction. Without it this opens its own
+    session and commits, which deadlocks on SQLite against a caller holding a write lock and,
+    on any engine, commits the outbox row even if the caller later rolls back — so an email
+    would go out for something that never happened. Callers that are merely *finishing* a
+    request (the common case) can keep omitting it.
+    """
     import datetime as dt
 
-    with SessionLocal() as db:
+    owns_session = db is None
+    session = db if db is not None else SessionLocal()
+    try:
         row = models.EmailOutbox(tenant_id=tenant_id, to_email=to, to_name="", subject=subject[:400], body=body, status="queued", attempts=0)
-        db.add(row)
-        db.flush()
+        session.add(row)
+        session.flush()
         rid = row.id
         try:
             _deliver(to, subject, body)
@@ -63,8 +72,14 @@ def send_email(to: str, subject: str, body: str, *, tenant_id: str = "") -> str:
             row.status = "failed"
             row.attempts = 1
             row.last_error = (str(e) or e.__class__.__name__)[:500]
-        db.commit()
+        if owns_session:
+            session.commit()
+        else:
+            session.flush()
         return rid
+    finally:
+        if owns_session:
+            session.close()
 
 
 def flush_outbox(db: Session, *, max_attempts: int = 5, batch: int = 50) -> dict[str, int]:
@@ -75,6 +90,9 @@ def flush_outbox(db: Session, *, max_attempts: int = 5, batch: int = 50) -> dict
         select(models.EmailOutbox).where(
             models.EmailOutbox.status.in_(["queued", "failed"]),
             models.EmailOutbox.attempts < max_attempts,
+            # The outbox carries SMS too (Phase 2) so delivery is auditable in one place.
+            # Retrying those here would hand a phone number to SMTP.
+            models.EmailOutbox.channel == "email",
         ).order_by(models.EmailOutbox.created_at).limit(batch)
     ).all()
     sent = 0

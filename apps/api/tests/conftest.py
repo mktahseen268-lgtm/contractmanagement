@@ -28,10 +28,23 @@ os.environ.setdefault("CELERY_TASK_ALWAYS_EAGER", "true")
 os.environ.setdefault("EMAIL_BACKEND", "console")
 os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 os.environ.setdefault("AUDIT_CHAIN_KEY", "test-chain-key-" + secrets.token_hex(8))
+# A real Fernet key, because several tests assert that a value is *not* readable in the
+# database. Without one the `EncryptedString` column stores `pt$<plaintext>` — a documented,
+# deliberate dev fallback — and those tests fail for a reason that has nothing to do with the
+# code under test. Supplying a key here means the encryption path is the one CI exercises,
+# which is the path production runs.
+os.environ.setdefault(
+    "MFA_ENCRYPTION_KEYS",
+    __import__("base64").urlsafe_b64encode(secrets.token_bytes(32)).decode(),
+)
 # Production guards refuse to start outside ENV=dev with the default secret key. Supply a
 # real-shape key so the lifespan startup doesn't crash if a test happens to use TestClient.
 os.environ.setdefault("SECRET_KEY", "test-only-secret-key-32-bytes-long-aaaaaaaaaaa")
 os.environ.setdefault("COOKIE_SECURE", "false")
+# The residency gate resolves whatever endpoints the developer's .env happens to name, which
+# would make TestClient startup depend on their SMTP host. `test_residency_and_profile.py`
+# drives enforcement explicitly instead.
+os.environ.setdefault("DATA_RESIDENCY_ENFORCED", "false")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -47,6 +60,30 @@ def _prepare_schema():
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture(scope="session")
+def dialect() -> str:
+    """The dialect the suite is currently running against.
+
+    The DB matrix is driven by the harness, not by conftest: CI runs the whole suite once per
+    engine with `CM_TEST_DATABASE_URL` pointing at that engine's service container (see
+    .github/workflows/ci.yml). `requires_dialect` below skips the engine-specific tests when
+    they are not applicable, so a local SQLite run stays green and useful.
+    """
+    from app.config import settings
+
+    return settings.db_dialect
+
+
+@pytest.fixture(autouse=True)
+def _skip_by_dialect(request, dialect):
+    """Honour the `postgres` / `mssql` / `oracle` markers against the live connection."""
+    for marker in ("postgres", "mssql", "oracle"):
+        if request.node.get_closest_marker(marker) and dialect != {
+            "postgres": "postgresql", "mssql": "mssql", "oracle": "oracle",
+        }[marker]:
+            pytest.skip(f"requires {marker}; running on {dialect}")
 
 
 @pytest.fixture()

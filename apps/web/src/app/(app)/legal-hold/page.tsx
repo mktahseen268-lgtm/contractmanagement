@@ -1,141 +1,334 @@
 "use client";
 
-// Legal Hold / eDiscovery — PROTOTYPE. Place holds on contracts for litigation/audit so they (and
-// their audit trail) are preserved from retention purge, track matters + custodians, and export a
-// discovery package. Mockup: in-memory holds. Wires later to a retention-exempt flag + export job.
+/**
+ * Legal holds — matter-scoped preservation.
+ *
+ *   GET/POST /legal-holds
+ *   POST /legal-holds/{id}/release   needs a reason and a step-up challenge
+ *   GET  /legal-holds/{id}/export    the preserved set, with audit chain positions
+ *
+ * Replaces the mockup. A hold blocks deletion, purge and archival for everything it covers,
+ * and two matters can cover the same agreement — releasing one does not release the other.
+ * That is why these are records rather than a checkbox.
+ */
 
-import { useMemo, useState } from "react";
-import { Archive, Download, FileLock2, Gavel, Lock, Plus, Search, ShieldCheck, Unlock } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { Archive, FileDown, Lock, Plus, Scale, Unlock } from "lucide-react";
+import { api, ApiError } from "@/lib/api";
 import { PageHeader } from "@/components/shell";
-import { Badge, Button, Card, CardBody, CardHeader, CardTitle, Field, Input, Select } from "@/components/ui";
-
-type Matter = { id: string; name: string; status: "active" | "released"; custodian: string; opened: string; contracts: number; scope: string };
-
-const MATTERS: Matter[] = [
-  { id: "m1", name: "Northwind v. Acme — contract dispute", status: "active", custodian: "General Counsel", opened: "2026-05-12", contracts: 6, scope: "All Northwind agreements 2024–2026" },
-  { id: "m2", name: "Regulatory audit — DIFC 2026", status: "active", custodian: "Compliance", opened: "2026-04-30", contracts: 22, scope: "Vendor contracts > $50k" },
-  { id: "m3", name: "Lumen IP claim", status: "released", custodian: "External Counsel", opened: "2025-11-02", contracts: 3, scope: "Lumen Labs reseller + amendments" },
-];
+import {
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  CardTitle,
+  ErrorBanner,
+  Field,
+  Input,
+  Select,
+  Skeleton,
+  Textarea,
+} from "@/components/ui";
+import { formatDate } from "@/lib/utils";
+import type { ContractListItem, LegalHold, Paginated } from "@/lib/types";
 
 export default function LegalHoldPage() {
-  const [matters, setMatters] = useState<Matter[]>(MATTERS);
-  const [q, setQ] = useState("");
-  const [showNew, setShowNew] = useState(false);
-  const [name, setName] = useState("");
-  const [custodian, setCustodian] = useState("General Counsel");
-  const [scope, setScope] = useState("");
+  const [holds, setHolds] = useState<LegalHold[] | null>(null);
+  const [contracts, setContracts] = useState<ContractListItem[]>([]);
+  const [showReleased, setShowReleased] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState("");
+  const [note, setNote] = useState("");
 
-  const shown = useMemo(() => {
-    const n = q.trim().toLowerCase();
-    return matters.filter((m) => !n || m.name.toLowerCase().includes(n) || m.scope.toLowerCase().includes(n));
-  }, [matters, q]);
+  const load = useCallback(() => {
+    api
+      .get<LegalHold[]>(`/legal-holds?include_released=${showReleased}`)
+      .then(setHolds)
+      .catch((e) => {
+        setHolds([]);
+        setError(e instanceof ApiError ? e.message : "");
+      });
+  }, [showReleased]);
+  useEffect(load, [load]);
 
-  const activeHeld = matters.filter((m) => m.status === "active").reduce((s, m) => s + m.contracts, 0);
+  useEffect(() => {
+    api
+      .get<Paginated<ContractListItem>>("/contracts?page_size=200")
+      .then((r) => setContracts(r.items))
+      .catch(() => setContracts([]));
+  }, []);
 
-  function createMatter() {
-    if (!name.trim()) return;
-    setMatters((arr) => [
-      { id: `${Date.now()}`, name: name.trim(), status: "active", custodian, opened: "Just now", contracts: 0, scope: scope.trim() || "—" },
-      ...arr,
-    ]);
-    setName(""); setScope(""); setShowNew(false);
-  }
-  function toggleRelease(id: string) {
-    setMatters((arr) => arr.map((m) => (m.id === id ? { ...m, status: m.status === "active" ? "released" : "active" } : m)));
+  async function release(hold: LegalHold) {
+    const reason = window.prompt(
+      `Release "${hold.matter}"? Anything not covered by another matter becomes eligible for archival and purge again.\n\nWhy is it being released?`,
+    );
+    if (!reason?.trim()) return;
+    setError("");
+    try {
+      await api.post(`/legal-holds/${hold.id}/release`, { reason: reason.trim() });
+      setNote(`Released "${hold.matter}".`);
+      load();
+    } catch (e) {
+      // A 401 here is a step-up challenge, not a refusal — the API is asking the user to
+      // confirm who they are before an irreversible preservation change.
+      const message =
+        e instanceof ApiError && e.status === 401
+          ? "Releasing a hold needs you to confirm your identity. Re-enter your password in Settings → Security, then try again."
+          : e instanceof ApiError
+            ? e.message
+            : "That hold could not be released.";
+      setError(message);
+    }
   }
 
   return (
     <div>
       <PageHeader
-        title={<span className="flex items-center gap-2">Legal Hold</span>}
-        subtitle="Preserve contracts & audit trails for litigation or audit — exempt from retention purge."
-        actions={<Button size="sm" onClick={() => setShowNew((s) => !s)}><Plus className="h-3.5 w-3.5" /> Place a hold</Button>}
+        title="Legal holds"
+        subtitle="Preservation that overrides retention — deletion, purge and archival all blocked"
+        actions={
+          <Button size="sm" onClick={() => setCreating((v) => !v)}>
+            <Plus className="h-3.5 w-3.5" /> Place a hold
+          </Button>
+        }
       />
 
-      <div className="space-y-4 p-4">
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-          <Stat label="Active matters" value={matters.filter((m) => m.status === "active").length} icon={Gavel} tone="text-accent" />
-          <Stat label="Contracts on hold" value={activeHeld} icon={Lock} tone="text-amber-600" />
-          <Stat label="Released" value={matters.filter((m) => m.status === "released").length} icon={Unlock} tone="text-ink-3" />
-        </div>
+      <div className="space-y-4 p-6">
+        {error && <ErrorBanner message={error} />}
+        {note && (
+          <Card className="border-accent/50">
+            <CardBody className="py-2 text-sm text-ink-2">{note}</CardBody>
+          </Card>
+        )}
 
-        {showNew && (
+        {creating && (
+          <HoldForm
+            contracts={contracts}
+            onCancel={() => setCreating(false)}
+            onSaved={() => {
+              setCreating(false);
+              load();
+            }}
+            onError={setError}
+          />
+        )}
+
+        <label className="inline-flex items-center gap-2 text-sm text-ink-2">
+          <input
+            type="checkbox"
+            checked={showReleased}
+            onChange={(e) => setShowReleased(e.target.checked)}
+          />
+          Include released matters
+        </label>
+
+        {holds === null && <Skeleton className="h-32" />}
+
+        {holds?.length === 0 && (
           <Card>
-            <CardHeader><CardTitle className="flex items-center gap-1.5"><FileLock2 className="h-4 w-4" /> New legal hold</CardTitle></CardHeader>
-            <CardBody className="grid gap-3 sm:grid-cols-2">
-              <Field label="Matter name"><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Northwind dispute" /></Field>
-              <Field label="Custodian">
-                <Select value={custodian} onChange={(e) => setCustodian(e.target.value)}>
-                  {["General Counsel", "Compliance", "External Counsel", "CFO"].map((c) => <option key={c}>{c}</option>)}
-                </Select>
-              </Field>
-              <div className="sm:col-span-2">
-                <Field label="Scope (which contracts the hold covers)"><Input value={scope} onChange={(e) => setScope(e.target.value)} placeholder="e.g. All Northwind agreements 2024–2026" /></Field>
-              </div>
-              <div className="sm:col-span-2 flex justify-end gap-2">
-                <Button size="sm" variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
-                <Button size="sm" onClick={createMatter} disabled={!name.trim()}><Lock className="h-3.5 w-3.5" /> Place hold</Button>
-              </div>
+            <CardBody className="py-10 text-center text-sm text-ink-2">
+              <Scale className="mx-auto mb-3 h-10 w-10 text-ink-3" />
+              <div className="text-base font-semibold text-ink">No active holds</div>
+              <p className="mt-1">
+                A hold preserves agreements for a matter — litigation, a regulator enquiry, an
+                internal investigation — and overrides the retention schedule while it stands.
+              </p>
             </CardBody>
           </Card>
         )}
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Matters</CardTitle>
-            <div className="relative w-56">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-3" />
-              <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search matters…" className="h-8 pl-8 text-sm" />
-            </div>
-          </CardHeader>
-          <CardBody className="space-y-2">
-            {shown.map((m) => (
-              <div key={m.id} className={`rounded-lg border p-3 ${m.status === "active" ? "border-amber-200 bg-amber-50/40" : "border-line"}`}>
-                <div className="flex items-start gap-2">
-                  <span className={`mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg ${m.status === "active" ? "bg-amber-100 text-amber-700" : "bg-surface-2 text-ink-3"}`}>
-                    {m.status === "active" ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5" />}
+        {holds?.map((hold) => (
+          <Card key={hold.id}>
+            <CardBody className="space-y-2">
+              <div className="flex flex-wrap items-center gap-2">
+                {hold.status === "active" ? (
+                  <Lock className="h-4 w-4 text-red-600" />
+                ) : (
+                  <Unlock className="h-4 w-4 text-ink-3" />
+                )}
+                <span className="text-sm font-semibold text-ink">{hold.matter}</span>
+                {hold.reference && (
+                  <span className="rounded-full bg-surface-3 px-2 py-0.5 text-[10px] text-ink-3">
+                    {hold.reference}
                   </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="truncate text-sm font-semibold text-ink">{m.name}</span>
-                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${m.status === "active" ? "bg-amber-100 text-amber-800" : "bg-surface-2 text-ink-3"}`}>{m.status === "active" ? "On hold" : "Released"}</span>
-                    </div>
-                    <div className="mt-0.5 text-[11px] text-ink-3">{m.scope}</div>
-                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-ink-3">
-                      <span>Custodian: <span className="text-ink-2">{m.custodian}</span></span>
-                      <span>Opened {m.opened}</span>
-                      <span>{m.contracts} contract{m.contracts === 1 ? "" : "s"} preserved</span>
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 flex-col items-end gap-1.5">
-                    <Button size="sm" variant="secondary" className="h-7"><Download className="h-3 w-3" /> Export</Button>
-                    <button onClick={() => toggleRelease(m.id)} className="text-[11px] text-ink-3 hover:text-accent">
-                      {m.status === "active" ? "Release hold" : "Re-apply hold"}
-                    </button>
-                  </div>
-                </div>
+                )}
+                <Badge tone={hold.status === "active" ? "accent" : "neutral"}>
+                  {hold.status}
+                </Badge>
+                <span className="text-[11px] text-ink-3">
+                  {hold.contract_ids.length} agreement
+                  {hold.contract_ids.length === 1 ? "" : "s"} · placed{" "}
+                  {formatDate(hold.placed_at)}
+                </span>
               </div>
-            ))}
-          </CardBody>
-        </Card>
 
-        <div className="flex items-center gap-2 rounded-xl border border-line bg-surface-2 px-4 py-3 text-sm text-ink-2">
-          <ShieldCheck className="h-4 w-4 text-emerald-600" />
-          Contracts under hold (and their tamper-evident audit chain) are <span className="font-medium text-ink">exempt from retention purge</span> until the matter is released.
-          <Archive className="ml-auto h-4 w-4 text-ink-3" />
-        </div>
+              {hold.reason && <p className="text-sm text-ink-2">{hold.reason}</p>}
+              {hold.custodian && (
+                <p className="text-xs text-ink-3">Custodian: {hold.custodian}</p>
+              )}
+              {hold.status === "released" && (
+                <p className="text-xs text-ink-3">
+                  Released {formatDate(hold.released_at)} — {hold.release_reason}
+                </p>
+              )}
+
+              <div className="flex flex-wrap gap-2 pt-1">
+                <a
+                  href={`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/legal-holds/${hold.id}/export`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 text-xs text-accent hover:underline"
+                >
+                  <FileDown className="h-3.5 w-3.5" /> Export the preserved set
+                </a>
+                {hold.status === "active" && (
+                  <Button size="sm" variant="ghost" onClick={() => release(hold)}>
+                    <Unlock className="h-3.5 w-3.5" /> Release
+                  </Button>
+                )}
+              </div>
+
+              <details className="pt-1">
+                <summary className="cursor-pointer text-xs text-ink-3">
+                  Agreements covered
+                </summary>
+                <div className="mt-1 space-y-0.5">
+                  {hold.contract_ids.map((id) => {
+                    const contract = contracts.find((c) => c.id === id);
+                    return (
+                      <Link
+                        key={id}
+                        href={`/contracts/${id}`}
+                        className="block text-xs text-ink-2 hover:text-ink"
+                      >
+                        <Archive className="mr-1 inline h-3 w-3" />
+                        {contract ? `${contract.reference_no} — ${contract.title}` : id}
+                      </Link>
+                    );
+                  })}
+                </div>
+              </details>
+            </CardBody>
+          </Card>
+        ))}
       </div>
     </div>
   );
 }
 
-function Stat({ label, value, icon: Icon, tone }: { label: string; value: number; icon: typeof Gavel; tone: string }) {
+function HoldForm({
+  contracts,
+  onCancel,
+  onSaved,
+  onError,
+}: {
+  contracts: ContractListItem[];
+  onCancel: () => void;
+  onSaved: () => void;
+  onError: (m: string) => void;
+}) {
+  const [matter, setMatter] = useState("");
+  const [reference, setReference] = useState("");
+  const [custodian, setCustodian] = useState("");
+  const [reason, setReason] = useState("");
+  const [selected, setSelected] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    if (selected.length === 0) {
+      onError("A hold has to cover at least one agreement.");
+      return;
+    }
+    setBusy(true);
+    onError("");
+    try {
+      await api.post("/legal-holds", {
+        matter: matter.trim(),
+        reference: reference.trim(),
+        custodian: custodian.trim(),
+        reason: reason.trim(),
+        contract_ids: selected,
+      });
+      onSaved();
+    } catch (e: unknown) {
+      onError(e instanceof ApiError ? e.message : "That hold could not be placed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div className="rounded-xl border border-line p-3">
-      <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-3">
-        <Icon className={`h-3.5 w-3.5 ${tone}`} /> {label}
-      </div>
-      <div className="mt-1 text-2xl font-semibold text-ink tnum">{value}</div>
-    </div>
+    <Card>
+      <CardHeader>
+        <CardTitle>Place a legal hold</CardTitle>
+      </CardHeader>
+      <CardBody>
+        <form onSubmit={save} className="grid gap-3 sm:grid-cols-12">
+          <div className="sm:col-span-5">
+            <Field label="Matter">
+              <Input
+                value={matter}
+                onChange={(e) => setMatter(e.target.value)}
+                required
+                placeholder="SBP enquiry — merchant acquiring"
+              />
+            </Field>
+          </div>
+          <div className="sm:col-span-3">
+            <Field label="Reference">
+              <Input value={reference} onChange={(e) => setReference(e.target.value)} />
+            </Field>
+          </div>
+          <div className="sm:col-span-4">
+            <Field label="Custodian">
+              <Input
+                value={custodian}
+                onChange={(e) => setCustodian(e.target.value)}
+                placeholder="Head of Legal"
+              />
+            </Field>
+          </div>
+          <div className="sm:col-span-12">
+            <Field label="Reason">
+              <Textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value)} />
+            </Field>
+          </div>
+          <div className="sm:col-span-12">
+            <Field
+              label="Agreements to preserve"
+              hint="Hold Ctrl or Cmd to pick several"
+            >
+              <Select
+                multiple
+                size={8}
+                value={selected}
+                onChange={(e) =>
+                  setSelected(
+                    Array.from(e.target.selectedOptions).map((o) => o.value),
+                  )
+                }
+              >
+                {contracts.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.reference_no} — {c.title}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          <div className="flex justify-end gap-2 sm:col-span-12">
+            <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
+              Cancel
+            </Button>
+            <Button type="submit" size="sm" loading={busy}>
+              Place the hold ({selected.length})
+            </Button>
+          </div>
+        </form>
+      </CardBody>
+    </Card>
   );
 }

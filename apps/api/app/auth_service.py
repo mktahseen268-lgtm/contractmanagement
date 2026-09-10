@@ -6,7 +6,7 @@ import uuid
 
 import pyotp
 from fastapi import Request, Response
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session as DbSession
 
 from . import models, security

@@ -70,3 +70,18 @@ coverage/
 *.mov
 *.wmv
 
+
+# --- Local artefacts that are not source ---
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+# Database backups taken before a schema change — `*.db` does not catch these.
+*.db.backup-*
+# Playwright run output.
+apps/web/test-results/
+apps/web/playwright-report/
+# Local IDE state.
+.vscode/

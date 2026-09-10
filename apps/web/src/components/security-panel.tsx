@@ -6,6 +6,7 @@ import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { formatDateTime, timeAgo } from "@/lib/utils";
 import { Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Field, Input, Skeleton } from "@/components/ui";
+import { PasskeysCard } from "@/components/passkeys-card";
 import type { MfaSetup, SessionInfo } from "@/lib/types";
 
 export function SecurityPanel() {
@@ -177,6 +178,8 @@ export function SecurityPanel() {
             ))}
           </div>
         </section>
+
+        <PasskeysCard />
 
         {/* --- change password --- */}
         <section>

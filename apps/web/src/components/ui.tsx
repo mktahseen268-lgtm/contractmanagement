@@ -123,12 +123,72 @@ export function Label({ className, ...props }: React.LabelHTMLAttributes<HTMLLab
   return <label className={cn("mb-1.5 block text-[13px] font-medium text-ink-2", className)} {...props} />;
 }
 
-export function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+/**
+ * A labelled form control.
+ *
+ * The label is **associated** with the control, not merely placed above it. It previously
+ * rendered a bare `<label>` with no `htmlFor`, which looks identical and means a screen reader
+ * announces "edit text, blank" for every field in the product — axe rated it critical on the
+ * sign-in form, and the same defect was in every form because they all come through here.
+ *
+ * Fixed in this one place rather than by adding an `id` to a few hundred call sites: `Field`
+ * generates the id, clones the child to attach it, and wires the hint and any error with
+ * `aria-describedby` so both are announced with the field rather than read out separately at
+ * the end of the form (WCAG 1.3.1, 3.3.1, 3.3.2).
+ *
+ * A child that already carries an `id` keeps it — a caller that needed a specific id had a
+ * reason, and silently replacing it would break whatever pointed at it.
+ */
+export function Field({
+  label,
+  hint,
+  error,
+  htmlFor,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  /** Shown below the field and announced with it. Also marks the control `aria-invalid`. */
+  error?: string;
+  htmlFor?: string;
+  children: React.ReactNode;
+}) {
+  const generatedId = React.useId();
+  const child = React.isValidElement(children) ? children : null;
+  const childId = (child?.props as { id?: string } | undefined)?.id;
+  const fieldId = htmlFor || childId || generatedId;
+
+  const hintId = hint ? `${fieldId}-hint` : undefined;
+  const errorId = error ? `${fieldId}-error` : undefined;
+  const describedBy = [hintId, errorId].filter(Boolean).join(" ") || undefined;
+
+  const control = child
+    ? React.cloneElement(child, {
+        id: fieldId,
+        "aria-describedby":
+          [(child.props as { "aria-describedby"?: string })["aria-describedby"], describedBy]
+            .filter(Boolean)
+            .join(" ") || undefined,
+        ...(error ? { "aria-invalid": true } : {}),
+      } as Record<string, unknown>)
+    : children;
+
   return (
     <div>
-      <Label>{label}</Label>
-      {children}
-      {hint && <p className="mt-1 text-xs text-ink-3">{hint}</p>}
+      <Label htmlFor={fieldId}>{label}</Label>
+      {control}
+      {hint && (
+        <p id={hintId} className="mt-1 text-xs text-ink-3">
+          {hint}
+        </p>
+      )}
+      {error && (
+        // `role="alert"` so a validation message that appears after submit is announced,
+        // rather than sitting there silently for somebody who cannot see it.
+        <p id={errorId} role="alert" className="mt-1 text-xs text-danger">
+          {error}
+        </p>
+      )}
     </div>
   );
 }

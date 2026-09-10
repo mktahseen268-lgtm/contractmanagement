@@ -66,16 +66,67 @@ def list_workflows(db: Session = Depends(get_db), user: models.User = Depends(ge
     return [_list_item(db, r) for r in rows]
 
 
+def _validate_stages(db, tenant_id: str, stages: list[dict]) -> list[dict]:
+    """Normalise an authored stage graph.
+
+    An empty stage would produce a review that can never complete, so it is rejected here
+    rather than discovered when someone submits a contract and nothing happens.
+    """
+    from fastapi import HTTPException, status as http_status
+
+    out: list[dict] = []
+    for index, raw in enumerate(stages or []):
+        steps = _validate_steps(db, tenant_id, [
+            schemas.WorkflowStep(**s) if isinstance(s, dict) else s
+            for s in (raw.get("steps") or [])
+        ])
+        if not steps:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"Stage {index + 1} has no reviewers. Every stage needs at least one.",
+            )
+        policy = str(raw.get("policy") or "all").lower()
+        if policy not in ("all", "any", "quorum", "percentage"):
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"Stage {index + 1}: unknown completion policy {policy!r}.",
+            )
+        threshold = int(raw.get("threshold") or 0)
+        if policy == "quorum" and not 1 <= threshold <= len(steps):
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=(f"Stage {index + 1}: a quorum of {threshold} is impossible with "
+                        f"{len(steps)} reviewer(s)."),
+            )
+        if policy == "percentage" and not 1 <= threshold <= 100:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"Stage {index + 1}: percentage must be between 1 and 100.",
+            )
+        out.append({
+            "name": str(raw.get("name") or f"Stage {index + 1}")[:200],
+            "policy": policy,
+            "threshold": threshold,
+            "sla_hours": max(0, int(raw.get("sla_hours") or 0)),
+            "escalate_to_user_id": raw.get("escalate_to_user_id") or None,
+            "steps": steps,
+        })
+    return out
+
+
 @router.post("", response_model=schemas.WorkflowDefinitionDetail, status_code=status.HTTP_201_CREATED)
 def create_workflow(data: schemas.WorkflowDefinitionIn, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.WorkflowDefinitionDetail:
     _require_manage(user)
     steps = _validate_steps(db, user.tenant_id, data.steps)
+    stages = _validate_stages(db, user.tenant_id, data.stages)
+    non_standard = _validate_stages(db, user.tenant_id, data.non_standard_stages)
     st = data.status if data.status in _VALID_STATUSES else "draft"
-    if st == "active" and not steps:
+    if st == "active" and not (steps or stages):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="An active workflow needs at least one step.")
     w = models.WorkflowDefinition(
         tenant_id=user.tenant_id, name=(data.name or "").strip() or "Untitled workflow", status=st,
-        default_for_types=_validate_types(data.default_for_types or []), steps=steps, created_by=user.id,
+        default_for_types=_validate_types(data.default_for_types or []), steps=steps,
+        stages=stages, non_standard_stages=non_standard, created_by=user.id,
     )
     db.add(w)
     db.flush()
@@ -98,12 +149,16 @@ def update_workflow(wf_id: str, data: schemas.WorkflowDefinitionUpdateIn, reques
         w.name = data.name.strip()
     if data.steps is not None:
         w.steps = _validate_steps(db, user.tenant_id, data.steps)
+    if data.stages is not None:
+        w.stages = _validate_stages(db, user.tenant_id, data.stages)
+    if data.non_standard_stages is not None:
+        w.non_standard_stages = _validate_stages(db, user.tenant_id, data.non_standard_stages)
     if data.default_for_types is not None:
         w.default_for_types = _validate_types(data.default_for_types)
     if data.status is not None:
         if data.status not in _VALID_STATUSES:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid status.")
-        if data.status == "active" and not (w.steps or []):
+        if data.status == "active" and not (w.steps or w.stages or []):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="An active workflow needs at least one step.")
         w.status = data.status
         if data.status == "archived":

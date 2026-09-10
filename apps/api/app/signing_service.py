@@ -14,7 +14,7 @@ We store:
 import datetime as dt
 import hashlib
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from . import models, security
@@ -118,35 +118,59 @@ def _notify_owner(db: Session, contract: models.Contract, title: str, body: str)
         db.add(models.Notification(tenant_id=contract.tenant_id, user_id=contract.owner_id, type="contract.signature_update", title=title, body=body, object_type="contract", object_id=contract.id))
 
 
-def _email_recipient(recipient: models.SignatureRecipient, contract: models.Contract, sender_name: str, *, raw_token: str | None = None) -> None:
+def _email_recipient(db: Session, recipient: models.SignatureRecipient, contract: models.Contract, sender_name: str, *, raw_token: str | None = None, reminder: bool = False) -> None:
     """Email the signer their /sign/{token} URL. `raw_token` is the token returned by
     `_mint_token_for` at the call site; if omitted we decrypt from the stored ciphertext
-    (used by reminders). Returns early without emailing if no live token exists."""
+    (used by reminders). Returns early without emailing if no live token exists.
+
+    `db=` is passed so the outbox row joins **this** transaction. Without it `send_email` opens
+    its own session and commits, which means the invitation is committed and delivered even
+    when the surrounding request later rolls back — the recipient gets a link to an envelope
+    that was never sent. On SQLite the same omission deadlocks outright, which is how this was
+    found.
+    """
     token = raw_token or decrypt_token_for(recipient)
     if not token:
         return
     link = f"{settings.frontend_url.rstrip('/')}/sign/{token}"
+    asked = f"{sender_name} has asked you" if sender_name else "You have been asked"
+    # A reminder that reads exactly like the first invitation gets skimmed as a duplicate and
+    # ignored, which defeats the point of sending it.
+    subject = ("Reminder — please sign: " if reminder else "Please sign: ") + contract.title
+    opening = f"This is a reminder that {asked[0].lower()}{asked[1:]}" if reminder else asked
     send_email(
         recipient.email,
-        f"Please sign: {contract.title}",
-        f"Hi {recipient.name},\n\n{sender_name} has asked you to sign \"{contract.title}\" ({contract.reference_no}).\n\nReview and sign here:\n{link}\n\nThis link is unique to you — please don't forward it.",
+        subject,
+        f"Hi {recipient.name},\n\n{opening} to sign \"{contract.title}\" ({contract.reference_no}).\n\nReview and sign here:\n{link}\n\nThis link is unique to you — please don't forward it.",
+        tenant_id=contract.tenant_id,
+        db=db,
     )
 
 
 # ---------- queries ----------
 
 
+# Ordering for "the latest envelope". `created_at` alone is not enough: the system clock has
+# coarse resolution on some platforms, so two envelopes created in quick succession — a
+# double-submit, a script — can share a timestamp exactly. With no tiebreak the database is
+# free to return either, and "which envelope is current" becomes non-deterministic between two
+# calls with no writes in between. `id` is a random uuid, so it does not say which came first;
+# what it does give is a *stable* answer, which is the difference between a bug you can
+# reproduce and one you cannot.
+_LATEST_FIRST = (models.SignatureEnvelope.created_at.desc(), models.SignatureEnvelope.id.desc())
+
+
 def current_envelope(db: Session, contract_id: str) -> models.SignatureEnvelope | None:
     """The latest non-voided envelope for the contract (draft/sent/partially_signed/completed/declined)."""
     return db.scalar(
-        select(models.SignatureEnvelope).where(models.SignatureEnvelope.contract_id == contract_id, models.SignatureEnvelope.status != "voided").order_by(models.SignatureEnvelope.created_at.desc())
+        select(models.SignatureEnvelope).where(models.SignatureEnvelope.contract_id == contract_id, models.SignatureEnvelope.status != "voided").order_by(*_LATEST_FIRST)
     )
 
 
 def active_envelope(db: Session, contract_id: str) -> models.SignatureEnvelope | None:
     """An envelope that's out for signature (blocks plain status transitions)."""
     return db.scalar(
-        select(models.SignatureEnvelope).where(models.SignatureEnvelope.contract_id == contract_id, models.SignatureEnvelope.status.in_(["sent", "partially_signed"])).order_by(models.SignatureEnvelope.created_at.desc())
+        select(models.SignatureEnvelope).where(models.SignatureEnvelope.contract_id == contract_id, models.SignatureEnvelope.status.in_(["sent", "partially_signed"])).order_by(*_LATEST_FIRST)
     )
 
 
@@ -188,6 +212,24 @@ def is_recipients_turn(envelope: models.SignatureEnvelope, recipient: models.Sig
 # ---------- lifecycle ----------
 
 
+def _match_internal_user(db: Session, tenant_id: str, email: str) -> str | None:
+    """The workspace user with this email, if any.
+
+    Matched on email because that is what the envelope carries. Deliberately scoped to the
+    tenant: matching across tenants would let one workspace's envelope resolve to another's
+    user, and from there to their certificate.
+    """
+    if not email:
+        return None
+    user = db.scalar(
+        select(models.User).where(
+            models.User.tenant_id == tenant_id,
+            func.lower(models.User.email) == email.lower(),
+        )
+    )
+    return user.id if user is not None else None
+
+
 def create_envelope(db: Session, *, contract: models.Contract, recipients_in: list, message: str, signing_order: str, by_user: models.User) -> models.SignatureEnvelope:
     signers = [r for r in recipients_in if r.kind != "cc"]
     if not signers:
@@ -200,12 +242,25 @@ def create_envelope(db: Session, *, contract: models.Contract, recipients_in: li
     db.add(env)
     db.flush()
     for i, r in enumerate(recipients_in):
+        email = str(r.email).lower()
         db.add(models.SignatureRecipient(
             tenant_id=contract.tenant_id, envelope_id=env.id, sequence=i,
-            name=(r.name or "").strip()[:200], email=str(r.email).lower(),
+            name=(r.name or "").strip()[:200], email=email,
             kind=("cc" if r.kind == "cc" else "signer"), status="created",
+            # Bind the recipient to a workspace identity where one exists. This is what lets
+            # the sealer find *this signatory's* certificate instead of falling back to a
+            # shared one (Phase 2). An external counterparty simply has no match here and is
+            # bound later, through the OTP flow.
+            signer_user_id=_match_internal_user(db, contract.tenant_id, email),
+            party_ref=getattr(r, "party_ref", None),
         ))
     _log(db, env, "created", recipient=None, meta={"recipients": len(recipients_in)})
+    # Flush the recipients, not just the envelope. The session runs with `autoflush=False`, so
+    # a caller that creates and sends in one transaction — bulk send does exactly that — would
+    # have `send_envelope`'s `recipients()` query return nothing and refuse with "the envelope
+    # has no signers", on an envelope that has three. The two-request path never saw it because
+    # the commit in between did this flush by accident.
+    db.flush()
     return env
 
 
@@ -246,7 +301,7 @@ def send_envelope(db: Session, *, envelope: models.SignatureEnvelope, contract: 
             r.status = "sent"
             _log(db, envelope, "sent", recipient=r)
             if r.kind == "signer":
-                _email_recipient(r, contract, sender_name, raw_token=raw_tokens[r.id])
+                _email_recipient(db, r, contract, sender_name, raw_token=raw_tokens[r.id])
     else:
         # only the first signer is "sent"; others become "sent" when their turn comes. CC recipients are "sent" immediately.
         first_signer_seq = min(r.sequence for r in signers)
@@ -255,7 +310,7 @@ def send_envelope(db: Session, *, envelope: models.SignatureEnvelope, contract: 
                 r.status = "sent"
                 _log(db, envelope, "sent", recipient=r)
                 if r.kind == "signer":
-                    _email_recipient(r, contract, sender_name, raw_token=raw_tokens[r.id])
+                    _email_recipient(db, r, contract, sender_name, raw_token=raw_tokens[r.id])
     envelope.status = "sent"
     envelope.sent_at = _now()
     if contract.status == "approved":
@@ -327,13 +382,46 @@ def fill_tabs_for_recipient(db: Session, *, envelope: models.SignatureEnvelope, 
     return filled, missing
 
 
+class ConcurrentSigningError(RuntimeError):
+    """Two signers raced on the same envelope. Routers map this to 409 so the client retries
+    against fresh state rather than writing over the other signature."""
+
+
+def _claim_envelope(db: Session, envelope: models.SignatureEnvelope) -> None:
+    """Optimistic lock: bump `lock_version` only if it still holds the value we read.
+
+    Parallel signing means two people can legitimately hit `sign()` at the same moment. Without
+    this, both read `partially_signed`, both compute "who is still pending" from the same stale
+    snapshot, and the second write can flip the envelope to `completed` while a signature is
+    still in flight — or lose one entirely. RFP §4a(ii) 4.4 asks for execution free from
+    signature failures; this is the cheapest correct way to get it.
+    """
+    expected = envelope.lock_version or 0
+    result = db.execute(
+        models.SignatureEnvelope.__table__.update()
+        .where(
+            models.SignatureEnvelope.id == envelope.id,
+            models.SignatureEnvelope.lock_version == expected,
+        )
+        .values(lock_version=expected + 1)
+    )
+    if (result.rowcount or 0) == 0:
+        raise ConcurrentSigningError(
+            "Another signer updated this envelope at the same moment. Reload and try again."
+        )
+    envelope.lock_version = expected + 1
+
+
 def sign(db: Session, *, envelope: models.SignatureEnvelope, recipient: models.SignatureRecipient, contract: models.Contract, full_name: str, ip: str, ua: str, tab_fills: list | None = None, signature_kind: str = "typed", signature_image: str | None = None) -> models.SignatureEnvelope:
     if envelope.status not in ("sent", "partially_signed"):
         raise ValueError("This envelope is no longer open for signing.")
     if recipient.kind != "signer":
         raise ValueError("This recipient is a CC, not a signer.")
     if recipient.status in ("signed", "declined"):
+        # Idempotency: a retried request (double-tap, flaky network, client retry) must not
+        # produce a second signature or a second audit event.
         raise ValueError("You have already responded.")
+    _claim_envelope(db, envelope)
     rs = recipients(db, envelope.id)
     if not is_recipients_turn(envelope, recipient, rs):
         raise ValueError("It's not your turn to sign yet — an earlier signer hasn't signed.")
@@ -386,6 +474,8 @@ def sign(db: Session, *, envelope: models.SignatureEnvelope, recipient: models.S
                     f"Please sign: {contract.title}",
                     f"Hi {nxt.name},\n\nIt's now your turn to sign \"{contract.title}\" ({contract.reference_no}).\n\n"
                     f"Review and sign here:\n{settings.frontend_url.rstrip('/')}/sign/{raw_next}",
+                    tenant_id=contract.tenant_id,
+                    db=db,
                 )
         _notify_owner(db, contract, f"\"{contract.title}\" — {recipient.name} signed", f"{len([r for r in _signers(rs) if r.status=='signed'])} of {len(_signers(rs))} signers done.")
     return envelope
@@ -423,11 +513,13 @@ def void_envelope(db: Session, *, envelope: models.SignatureEnvelope, contract: 
     return envelope
 
 
-def remind(db: Session, *, envelope: models.SignatureEnvelope, recipient: models.SignatureRecipient, contract: models.Contract, by_user: models.User) -> None:
+def remind(db: Session, *, envelope: models.SignatureEnvelope, recipient: models.SignatureRecipient, contract: models.Contract, by_name: str) -> None:
+    """Chase one recipient. `by_name` rather than a `User` because the automatic sweep has
+    no user to attribute it to and must not have to invent one."""
     if envelope.status not in ("sent", "partially_signed") or recipient.status not in ("sent", "viewed"):
         raise ValueError("Nothing to remind about for this recipient.")
-    _email_recipient(recipient, contract, by_user.name)
-    _log(db, envelope, "reminder_sent", recipient=recipient, meta={"by": by_user.name})
+    _email_recipient(db, recipient, contract, by_name, reminder=True)
+    _log(db, envelope, "reminder_sent", recipient=recipient, meta={"by": by_name})
 
 
 def delete_envelopes_for_contract(db: Session, contract_id: str) -> None:
@@ -437,3 +529,100 @@ def delete_envelopes_for_contract(db: Session, contract_id: str) -> None:
         db.query(models.SignatureEvent).filter(models.SignatureEvent.envelope_id.in_(env_ids)).delete(synchronize_session=False)
         db.query(models.SignatureRecipient).filter(models.SignatureRecipient.envelope_id.in_(env_ids)).delete(synchronize_session=False)
         db.query(models.SignatureEnvelope).filter(models.SignatureEnvelope.contract_id == contract_id).delete(synchronize_session=False)
+
+
+# ---------------------------------------------------------------------------------------
+# Chasing and expiry — the unattended half of sending
+# ---------------------------------------------------------------------------------------
+#
+# A bulk dispatch of five hundred is only useful if the ones that go unsigned chase themselves.
+# Both halves run cross-tenant with no tenant GUC set, like the other sweeps.
+
+
+def _due_for_reminder(env: models.SignatureEnvelope, now: dt.datetime) -> bool:
+    if not env.reminder_interval_days or env.reminders_sent >= (env.max_reminders or 0):
+        return False
+    since = env.last_reminder_at or env.sent_at
+    if since is None:
+        return False
+    return since + dt.timedelta(days=env.reminder_interval_days) <= now
+
+
+def expire_envelope(db: Session, env: models.SignatureEnvelope) -> int:
+    """Close an envelope that ran out of time and revoke every outstanding link.
+
+    Clearing the tokens is the point. Leaving the envelope marked `expired` while the signing
+    URLs still resolve would mean the deadline was a label on a screen and not a control.
+    """
+    revoked = 0
+    for r in recipients(db, env.id):
+        if r.status in ("sent", "viewed"):
+            r.status = "expired"
+            _clear_token(r)
+            revoked += 1
+    env.status = "expired"
+    _log(db, env, "expired", meta={"links_revoked": revoked})
+    return revoked
+
+
+def chase_and_expire(db: Session, *, now: dt.datetime | None = None) -> dict:
+    """Send the reminders that have come due and expire the envelopes that have run out.
+
+    Expiry runs first: an envelope whose deadline has passed must not be chased on the way
+    out, which is exactly what would happen if the order were reversed and both were due in
+    the same sweep.
+    """
+    now = now or _now()
+    live = ("sent", "partially_signed")
+    expired = reminded = 0
+
+    for env in db.scalars(
+        select(models.SignatureEnvelope).where(
+            models.SignatureEnvelope.status.in_(live),
+            models.SignatureEnvelope.expires_at.is_not(None),
+            models.SignatureEnvelope.expires_at <= now,
+        )
+    ).all():
+        expire_envelope(db, env)
+        expired += 1
+
+    # Flush the expiries before selecting candidates to chase. The session runs with
+    # `autoflush=False`, so without this the reminder query below still sees every envelope it
+    # just expired as `sent` — and chases the signer towards a link the same sweep revoked
+    # seconds earlier. The email arrives, the page is dead.
+    db.flush()
+
+    for env in db.scalars(
+        select(models.SignatureEnvelope).where(
+            models.SignatureEnvelope.status.in_(live),
+            models.SignatureEnvelope.reminder_interval_days > 0,
+        )
+    ).all():
+        if not _due_for_reminder(env, now):
+            continue
+        contract = db.get(models.Contract, env.contract_id)
+        if contract is None:
+            continue
+        tenant = db.get(models.Tenant, env.tenant_id)
+        org_name = tenant.name if tenant else ""
+        rs = recipients(db, env.id)
+        sent_any = False
+        for r in rs:
+            # `is_recipients_turn` keeps a sequential envelope from chasing signer three before
+            # signer one has signed — that email names a document the recipient cannot open.
+            if r.kind != "signer" or r.status not in ("sent", "viewed"):
+                continue
+            if not is_recipients_turn(env, r, rs):
+                continue
+            _email_recipient(db, r, contract, org_name, reminder=True)
+            _log(db, env, "reminder_sent", recipient=r, meta={"by": "automatic"})
+            sent_any = True
+        if sent_any:
+            # Counted per envelope, not per recipient: "three reminders" means the signer got
+            # three emails, and counting per recipient would send a two-signer envelope only
+            # half its configured chases.
+            env.reminders_sent = (env.reminders_sent or 0) + 1
+            env.last_reminder_at = now
+            reminded += 1
+
+    return {"envelopes_expired": expired, "envelopes_reminded": reminded}

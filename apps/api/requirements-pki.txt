@@ -1,0 +1,15 @@
+# PKI hardware-security-module support (Phase 1).
+#   pip install -r requirements-pki.txt
+#
+# Needed only when KEYSTORE_PROVIDER=pkcs11. The default software keystore encrypts keys at
+# rest with the Fernet chain and needs nothing extra, but is NOT FIPS 140-2 and must not be
+# used for production signing.
+#
+# Requires a PKCS#11 library on the host:
+#   dev/CI     SoftHSM2      apt-get install softhsm2   -> /usr/lib/softhsm/libsofthsm2.so
+#   production Thales Luna   /usr/safenet/lunaclient/lib/libCryptoki2_64.so
+#              Utimaco       /opt/utimaco/lib/libcs_pkcs11_R3.so
+#              Entrust nShield /opt/nfast/toolkits/pkcs11/libcknfast.so
+#
+# See docs/PKI-ARCHITECTURE.md for the key-ceremony and slot-configuration notes.
+python-pkcs11==0.7.1

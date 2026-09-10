@@ -45,7 +45,7 @@ npm run lint     # next lint
 
 ## Architecture you need to know before editing
 
-### Multi-tenancy is enforced in the database (PostgreSQL RLS)
+### Multi-tenancy is enforced in the database (PostgreSQL RLS / MSSQL Security Policy / Oracle VPD)
 
 The single most important invariant in this codebase: **every tenant-scoped table has Row-Level Security enabled with FORCE**, gated by the session GUC `app.cm_tenant`. See [apps/api/migrations/versions/0002_rls.py](apps/api/migrations/versions/0002_rls.py) and the docstring at the top of [apps/api/app/database.py](apps/api/app/database.py).
 
@@ -55,9 +55,13 @@ Flow per request:
 3. Policies are *permissive when the GUC is unset* so the unauthenticated `/auth/login` and `/auth/refresh` endpoints still work.
 4. Repository code **also** filters by `tenant_id` — defence in depth. Don't remove these filters when "RLS will handle it"; keep both.
 
-On SQLite (`DATABASE_URL=sqlite:///./cm.db`) the listener is a no-op and the RLS migration is auto-skipped. **Anything you add that depends on cross-tenant isolation must be tested against Postgres**, not SQLite.
+On SQLite (`DATABASE_URL=sqlite:///./cm.db`) the listener is a no-op and the RLS migration is auto-skipped. **Anything you add that depends on cross-tenant isolation must be tested against Postgres or MSSQL**, not SQLite.
 
-When writing new tenant-scoped tables: add the column `tenant_id`, add a Postgres-only `ALTER TABLE … ENABLE ROW LEVEL SECURITY; FORCE …; CREATE POLICY tenant_isolation …` clause to the migration, and filter by `tenant_id` in the repository layer.
+**Since Phase 0 the dialect-specific SQL lives in one place: [apps/api/app/db_dialect.py](apps/api/app/db_dialect.py).** Do not write `if dialect == "postgresql"` in a migration or a service — add it to the seam. It covers row security, the tenant session context, advisory locks, JSON typing/indexing and full-text search across PostgreSQL, MSSQL and Oracle.
+
+When writing new tenant-scoped tables: add the column `tenant_id`, call `db_dialect.enable_row_security(dialect, [table])` from the migration (guarded by `settings.enforce_db_isolation`), and filter by `tenant_id` in the repository layer.
+
+`DEPLOYMENT_MODE=single_tenant` (the MMBL on-prem profile) provisions one tenant at install and disables registration — but **the code path does not fork**: the ContextVar and the repository filters are unconditional. `ENFORCE_DB_ISOLATION=false` is only permitted in that mode.
 
 ### Auth model
 
@@ -135,6 +139,7 @@ The codebase is a v1 **spine** at ~65–70% feature-completeness against enterpr
 3. ✅ **Password strength policy** — [apps/api/app/security.py](apps/api/app/security.py) `validate_password_strength()` enforces: min 12 chars in production (8 in dev), ≥3 of {lower, upper, digit, symbol}, blocklist (30+ common passwords), rejects email-local-part / name substrings, rejects trivial sequences/repeats. Wired into `/auth/register` and `/auth/change-password`.
 4. ✅ **Rate-limit is Redis-backed (fail-open)** — [apps/api/app/middleware/rate_limit.py](apps/api/app/middleware/rate_limit.py) `_RedisStore` runs an atomic Lua refill+consume so multi-replica state stays consistent. Set `RATE_LIMIT_STORE=redis`. Falls back to in-memory if Redis unreachable + warns to SIEM.
 5. ✅ **Audit-log hash chain (tamper evidence)** — every row stores `prev_hash` + `row_hash` = `HMAC-SHA256(audit_chain_key, prev_hash || canonical(row))`. Per-tenant chain with Postgres `pg_advisory_xact_lock` to serialize concurrent inserts. `audit.verify_chain(db, tenant_id)` is the auditor's recompute-and-detect tool. Pre-chain rows (created before 0013) are skipped (empty hashes).
+   **The chain is ordered by `AuditLog.seq`, a monotonic per-tenant counter assigned under that same lock — never by `at`.** Before `0023_audit_seq` it ordered by `(at, id)`; two rows written in the same clock tick share an `at`, so ordering fell through to a random uuid, a row could chain past its true predecessor, and deleting the skipped row left a chain that still verified. If you touch `audit.record` or `verify_chain`, keep both walking `seq` — the regression tests in `TestChainOrderingUnderClockTies` force the tie via the `audit._utcnow()` seam.
 6. ✅ **S3 SSE on every PUT** — [apps/api/app/storage.py](apps/api/app/storage.py) honors `s3_sse` (`AES256` | `aws:kms`) + `s3_sse_kms_key_id`. Defence-in-depth on top of bucket-default SSE.
 7. ✅ **Composite indexes + Postgres JSONB** — 0013_hardening adds `(tenant_id,status)`, `(tenant_id,owner_id,status)`, `(envelope_id,sequence)`, `(tenant_id,contract_id,status)`, `(tenant_id,at)` etc. and converts the queried-by JSON columns to JSONB + GIN on Postgres (no-op on SQLite/MSSQL).
 8. ✅ **K8s worker liveness/readiness probes** — [infra/k8s/deployment-api.yaml](infra/k8s/deployment-api.yaml) uses `celery inspect ping` (round-trip through broker) for both probes + startupProbe + 60s graceful termination.
@@ -151,7 +156,7 @@ Each of these is now a **real pluggable provider** with a tested zero-dependency
 
 ### Credibility-risk hotspots still open
 
-1. **MSSQL "portable" claim silently degrades to app-layer isolation** — the RLS migration in [apps/api/migrations/versions/0002_rls.py](apps/api/migrations/versions/0002_rls.py) is Postgres-only. On MSSQL, RLS is not created and only the repository-layer `tenant_id` filter holds the line. [docs/25-database-portability.md](docs/25-database-portability.md) documents this; the *only* honest deployment story right now is Postgres-first.
+1. ~~**MSSQL "portable" claim silently degrades to app-layer isolation**~~ — **closed in Phase 0.** `0002_rls` now routes through [db_dialect.py](apps/api/app/db_dialect.py) and emits a real policy on MSSQL (Security Policy + inline TVF) and Oracle (VPD). CI's `migrations` job proves it applies on Postgres + MSSQL. **Oracle DDL is written and unit-tested but never executed** — no container in CI; the first Oracle deployment is a manual acceptance gate. Don't claim Oracle is tested.
 2. **OCR/AI default is still the stub** — the *seam* is real (T-5), but unless `OCR_PROVIDER=anthropic` is configured, extraction is fabricated. Sales/RFI material must say AI extraction is configurable, not on-by-default.
 3. **No CAPTCHA / no antivirus on upload** — both currently operator/gateway concerns, not app-implemented. Roadmap items T-9 (AV) and external (CAPTCHA at WAF/CDN).
 4. **`audit_log` is unpartitioned** — the hash chain is in, but at scale (>10M rows) the table needs PG declarative partitioning by month. Operator step.

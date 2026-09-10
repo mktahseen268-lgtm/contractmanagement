@@ -1,0 +1,25 @@
+# SAML 2.0 service provider (Phase 7, item 1).
+#
+# `signxml` verifies the XML signature on an assertion. That verification is NOT hand-rolled
+# on purpose: XML signature wrapping — where an attacker keeps a validly-signed assertion and
+# wraps a forged one around it — is a whole family of SSO-bypass bugs that a naive parser
+# walks straight into. This is one of the few places where writing it yourself is the wrong
+# call regardless of how small the code looks.
+signxml==4.0.3
+lxml>=5.0.0
+defusedxml>=0.7.1
+
+# FIDO2 / WebAuthn (Phase 8, item 1).
+#
+# Verification is NOT hand-rolled, for the same reason as the SAML signature above: an
+# attestation means CBOR parsing, a COSE key decode, authenticator-data flag checks and a
+# signature over a specific concatenation. Getting any of it subtly wrong produces an
+# authenticator that appears to work and authenticates nothing.
+webauthn==2.5.2
+
+# Pinned here as well as in requirements.txt, deliberately. Installing this file on its own
+# lets pip resolve `cryptography` upward to satisfy `webauthn`, and signxml 4.0.3 fails to
+# import against cryptography >= 46 (it references `ec.SECT163K1`, removed in that release).
+# The failure is at import time, so SAML sign-in stops working the moment the extras are
+# installed in the wrong order — pinning it in both files is what stops that.
+cryptography==43.0.1
