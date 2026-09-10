@@ -63,7 +63,7 @@ export default function SettingsPage() {
     <div>
       <PageHeader title="Settings" subtitle={me?.tenant.name} />
       <div className="space-y-5 p-6">
-        <WorkspaceCard isAdmin={!!isAdmin} onSaved={refreshMe} />
+        <OrganisationCard isAdmin={!!isAdmin} onSaved={refreshMe} />
         <BrandingCard isAdmin={!!isAdmin} onSaved={refreshMe} />
 
         <SecurityPanel />
@@ -83,7 +83,7 @@ export default function SettingsPage() {
             </CardHeader>
             <CardBody>
               <p className="text-sm text-ink-2">
-                Walks every contract in this workspace, flips <code className="rounded bg-surface-2 px-1 text-xs">active → expiring</code> when the end
+                Walks every contract, flips <code className="rounded bg-surface-2 px-1 text-xs">active → expiring</code> when the end
                 date is within 30 days, and <code className="rounded bg-surface-2 px-1 text-xs">expiring/active → expired</code> when it&rsquo;s past — and
                 posts the owner a reminder at the 30 / 7 / 1-day marks. Runs hourly in production (Celery beat); this button kicks one off now.
               </p>
@@ -170,9 +170,8 @@ export default function SettingsPage() {
   );
 }
 
-function WorkspaceCard({ isAdmin, onSaved }: { isAdmin: boolean; onSaved: () => void }) {
+function OrganisationCard({ isAdmin, onSaved }: { isAdmin: boolean; onSaved: () => void }) {
   const [t, setT] = useState<Tenant | null>(null);
-  const [groupName, setGroupName] = useState("");
   const [name, setName] = useState("");
   const [currency, setCurrency] = useState("");
   const [locale, setLocale] = useState("");
@@ -183,14 +182,14 @@ function WorkspaceCard({ isAdmin, onSaved }: { isAdmin: boolean; onSaved: () => 
 
   useEffect(() => {
     api.get<Tenant>("/tenant").then((tt) => {
-      setT(tt); setGroupName(tt.group_name || ""); setName(tt.name); setCurrency(tt.currency); setLocale(tt.locale); setTz(tt.timezone);
+      setT(tt); setName(tt.name); setCurrency(tt.currency); setLocale(tt.locale); setTz(tt.timezone);
     }).catch(() => {});
   }, []);
 
   async function save() {
     setBusy(true); setErr("");
     try {
-      const tt = await api.patch<Tenant>("/tenant", { group_name: groupName, name: name || null, currency: currency || null, locale: locale || null, timezone: tz || null });
+      const tt = await api.patch<Tenant>("/tenant", { name: name || null, currency: currency || null, locale: locale || null, timezone: tz || null });
       setT(tt); setSavedAt(Date.now());
       onSaved();
     } catch (e) {
@@ -203,44 +202,31 @@ function WorkspaceCard({ isAdmin, onSaved }: { isAdmin: boolean; onSaved: () => 
   if (!t) return <Card><CardBody><Skeleton className="h-24" /></CardBody></Card>;
   return (
     <Card>
-      <CardHeader><CardTitle>Workspace</CardTitle></CardHeader>
+      <CardHeader><CardTitle>Organisation</CardTitle></CardHeader>
       <CardBody className="space-y-3">
         {err && <ErrorBanner message={err} />}
-        <Field label="Group name" hint="Optional — parent organisation or group this workspace belongs to (e.g. a holding company)">
-          <Input value={groupName} onChange={(e) => setGroupName(e.target.value)} disabled={!isAdmin} placeholder="e.g. Acme Group" />
-        </Field>
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Workspace name">
+          <Field label="Organisation name">
             <Input value={name} onChange={(e) => setName(e.target.value)} disabled={!isAdmin} />
-          </Field>
-          <Field label="Subdomain" hint="Read-only">
-            <Input value={`${t.slug}.app`} disabled readOnly />
           </Field>
           <Field label="Default currency">
             <Input value={currency} onChange={(e) => setCurrency(e.target.value.toUpperCase())} maxLength={3} disabled={!isAdmin} />
           </Field>
-          <Field label="Locale" hint="Arabic / Hebrew / Persian / Urdu switch the UI to RTL">
+          <Field label="Locale" hint="Urdu switches the interface to right-to-left">
             <Select value={locale} onChange={(e) => setLocale(e.target.value)} disabled={!isAdmin}>
               {[
-                ["en", "English"], ["en-GB", "English (UK)"], ["en-US", "English (US)"],
-                ["ar", "العربية (Arabic, RTL)"], ["he", "עברית (Hebrew, RTL)"],
-                ["fa", "فارسی (Persian, RTL)"], ["ur", "اردو (Urdu, RTL)"],
-                ["fr", "Français"], ["de", "Deutsch"], ["es", "Español"], ["pt", "Português"],
-                ["zh", "中文"], ["ja", "日本語"], ["hi", "हिन्दी"],
+                ["en", "English"], ["ur", "اردو (Urdu, RTL)"],
               ].map(([code, label]) => <option key={code} value={code}>{label}</option>)}
             </Select>
           </Field>
-          <Field label="Timezone" hint="e.g. UTC, Europe/London, Asia/Dubai">
+          <Field label="Timezone" hint="e.g. Asia/Karachi">
             <Input value={tz} onChange={(e) => setTz(e.target.value)} disabled={!isAdmin} />
-          </Field>
-          <Field label="Plan" hint="Read-only">
-            <Input value={titleCase(t.plan)} disabled readOnly />
           </Field>
         </div>
         {isAdmin && (
           <div className="flex items-center justify-end gap-3">
             {savedAt && <span className="text-xs text-emerald-700">Saved.</span>}
-            <Button size="sm" onClick={save} loading={busy}>Save workspace</Button>
+            <Button size="sm" onClick={save} loading={busy}>Save</Button>
           </div>
         )}
       </CardBody>

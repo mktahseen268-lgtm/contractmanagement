@@ -338,7 +338,7 @@ Open a template → BlockEditor in "template mode" with a right rail:
 │ ▸ Confiden. ││ │ View: [Table] [Board by type] [By jurisdiction]   148 clauses    │
 │ ▸ Liability ││ ├──────────────────────────────────────────────────────────────────┤│
 │ ▸ Indemnity ││ │ Title              Type      Jur.  Risk  Lang  Status  Used  ⋮   ││
-│ ▸ Termination││ │ Limitation of Liab Liability Oman  ▲Med  EN+ع  Approved 210  ⋮  ││
+│ ▸ Termination││ │ Limitation of Liab Liability Pakistan ▲Med EN+ع Approved 210 ⋮  ││
 │ ▸ IP        ││ │  └ fallbacks: "Mutual cap", "Higher cap (client)"                ││
 │ ▸ Data/GDPR ││ │ GCC Data Residency Data      GCC   —     EN+ع  Approved 95   ⋮  ││
 │ ▸ Force Maj.││ │ Mutual NDA Confiden Confiden. Any   —     EN+ع  Approved 312  ⋮  ││

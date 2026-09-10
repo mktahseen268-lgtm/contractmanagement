@@ -62,7 +62,7 @@ A live page preview with a soft **aurora "scan" sweep**, bounding boxes fading i
 │                                                                 │ │ End    [________]●41⚠⚠  │ ← red
 │                                                                 │ │ Value  [$120k ▾USD]●88  │
 │                                                                 │ │ Renewal[Auto ▾] ●77⚠    │
-│                                                                 │ │ Gov.law[Oman]   ●83     │
+│                                                             │ │ Gov.law[Pakistan]   ●83     │
 │                                                                 │ │ ─ Clauses(12)▾ Sigs(2)▾ │
 │                                                                 │ │   Stamps(1)▾ Tables(1)▾ │
 │                                                                 │ │ Languages: ar + en      │

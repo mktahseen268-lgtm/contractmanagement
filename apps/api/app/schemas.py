@@ -98,10 +98,33 @@ class TenantUpdateIn(BaseModel):
     accent_color: str | None = None  # CSS color (#RRGGBB recommended)
 
 
+class TextAssistIn(BaseModel):
+    text: str
+    #: correct | formal | shorten | plain — validated against `text_assist.MODES` in the
+    #: service, so the list lives in one place.
+    mode: str = "correct"
+
+
+class TextAssistOut(BaseModel):
+    text: str
+    changed: bool
+    provider: str
+    error: str = ""
+
+
+class TextAssistConfigOut(BaseModel):
+    """What the UI needs to decide whether to offer the affordance at all."""
+    enabled: bool
+    provider: str
+    modes: list[str]
+    max_chars: int
+
+
 class UserUpdateIn(BaseModel):
     name: str | None = None
     role: str | None = None
     is_active: bool | None = None
+    department: str | None = None
 
 
 class UserOut(BaseModel):
@@ -112,6 +135,7 @@ class UserOut(BaseModel):
     role: str
     is_active: bool
     avatar_color: str
+    department: str = ""
     mfa_enabled: bool = False
 
 
@@ -449,6 +473,14 @@ class ContractListOut(BaseModel):
 
 class CommentIn(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
+    #: Character range in the document body this note is about. Optional — a general remark
+    #: has no anchor and is not less valid for it.
+    anchor_start: int | None = None
+    anchor_end: int | None = None
+    #: The passage as it read when the note was written. Stored inside the body rather than in
+    #: a column: the document is edited afterwards, offsets move, and a quote that shows what
+    #: the reviewer was actually looking at survives that where a character range does not.
+    quote: str = Field(default="", max_length=1000)
 
 
 class CommentOut(BaseModel):
@@ -590,6 +622,9 @@ class UserInviteIn(BaseModel):
     email: EmailStr
     name: str
     role: str = "author"
+    #: Required. Approval routing, the authority matrix and every departmental report key
+    #: off this, so a user without one silently drops out of all three.
+    department: str = Field(min_length=1, max_length=100)
     password: str | None = Field(default=None, min_length=8, max_length=128)  # if omitted the server generates one
     welcome_message: str = ""
 

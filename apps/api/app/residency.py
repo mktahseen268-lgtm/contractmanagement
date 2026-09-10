@@ -80,6 +80,13 @@ def collect_endpoints() -> list[Endpoint]:
     # The OCR provider only reaches out when it is actually the configured provider.
     if settings.ocr_provider == "anthropic":
         candidates.append(("ocr provider", "api.anthropic.com", "OCR_PROVIDER"))
+    if settings.ocr_provider == "local":
+        candidates.append(("ocr provider", settings.ocr_base_url, "OCR_BASE_URL"))
+    # The writing assistant sees draft contract text, so it is checked like any other
+    # destination — "it is a local model" is a claim about a URL, and this is what tests it.
+    if settings.text_assist_provider == "local":
+        candidates.append(("writing assistant", settings.text_assist_base_url,
+                           "TEXT_ASSIST_BASE_URL"))
 
     out: list[Endpoint] = []
     seen: set[tuple[str, str]] = set()

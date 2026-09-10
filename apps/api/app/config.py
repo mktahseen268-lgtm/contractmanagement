@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     deployment_mode: Literal["saas", "single_tenant"] = "saas"
     single_tenant_id: str = ""        # resolved at startup when empty (the sole tenant row)
     single_tenant_name: str = "Organisation"
+    #: Governing law written onto every new agreement. The drafting screen no longer asks:
+    #: this installation serves one bank in one jurisdiction, and a free-text box invited a
+    #: typo on a field that decides which courts hear a dispute.
+    default_governing_law: str = "Islamic Republic of Pakistan"
     single_tenant_slug: str = "org"
     # DB-level row security. Mandatory for saas. Optional for single_tenant, where one tenant
     # makes the policy a tautology and Oracle VPD / MSSQL security policies cost real latency.
@@ -337,6 +341,19 @@ class Settings(BaseSettings):
     ocr_max_pages: int = 20
     #: Base URL of the on-prem OpenAI-compatible endpoint, e.g. http://llm.internal:8000/v1
     ocr_base_url: str = ""
+
+    # --- Writing assistant (text correction). Off unless a model is reachable inside the
+    # --- deployment. There is deliberately no hosted option: assistance runs over draft
+    # --- contract text, so a foreign endpoint would contradict the residency commitment.
+    text_assist_provider: Literal["off", "local"] = "off"
+    #: An OpenAI-compatible base URL on the bank's own hardware, e.g. http://llm.internal/v1
+    text_assist_base_url: str = ""
+    text_assist_model: str = ""
+    text_assist_api_key: str = ""
+    #: Interactive, so the timeout is short. A writing aid that hangs is worse than none.
+    text_assist_timeout_seconds: int = 30
+    #: Per-request cap. Assistance is for a passage, not a whole agreement body.
+    text_assist_max_chars: int = 8000
 
     # --- Cryptographic document seal on the executed PDF (RFI T-4 / docs/19). `internal` =
     # visual evidence only (default); `pades` = real PAdES signature via pyhanko + a PKCS#12

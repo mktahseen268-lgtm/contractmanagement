@@ -27,8 +27,9 @@ _TYPE_TITLES = {
     "employment": "Employment Agreement",
 }
 _STATUSES = ["draft", "draft", "in_review", "in_review", "approved", "out_for_signature", "signed", "active", "active", "active", "expiring", "expired", "changes_requested"]
-_DEPTS = ["Procurement", "Legal", "HR", "Real Estate", "Operations", "Finance"]
-_LAWS = ["Oman", "UAE", "Saudi Arabia", "England & Wales", "Bahrain"]
+_DEPTS = ["Procurement", "Legal", "Human Resources", "Real Estate & Administration",
+          "Operations", "Finance", "Information Technology", "Branchless Banking"]
+_LAWS = ["Islamic Republic of Pakistan", "Islamic Republic of Pakistan", "Islamic Republic of Pakistan", "England & Wales", "United Arab Emirates"]
 _RISKS = ["low", "low", "low", "medium", "medium", "high", "critical"]
 # (title, description, due-offset-in-days-from-today) — negative offsets become 'overdue'.
 _OBLIGATION_TEMPLATES = [
@@ -43,6 +44,76 @@ _OBLIGATION_TEMPLATES = [
 ]
 
 
+#: The status hops an agreement makes on its way to each end state. Only the ones that reach
+#: execution contribute a cycle time; the rest are still in flight and get a partial history so
+#: the pipeline views have something real in them.
+_JOURNEY_TO = {
+    "draft": [],
+    "in_review": ["in_review"],
+    "changes_requested": ["in_review", "changes_requested"],
+    "approved": ["in_review", "approved"],
+    "out_for_signature": ["in_review", "approved", "out_for_signature"],
+    "signed": ["in_review", "approved", "out_for_signature", "signed"],
+    "active": ["in_review", "approved", "out_for_signature", "signed", "active"],
+    "expiring": ["in_review", "approved", "out_for_signature", "signed", "active", "expiring"],
+    "expired": ["in_review", "approved", "out_for_signature", "signed", "active", "expired"],
+    "renewed": ["in_review", "approved", "out_for_signature", "signed", "active", "renewed"],
+    "terminated": ["in_review", "approved", "out_for_signature", "signed", "active", "terminated"],
+    "rejected": ["in_review", "rejected"],
+    "voided": ["in_review", "approved", "voided"],
+    "declined": ["in_review", "approved", "out_for_signature", "declined"],
+}
+
+
+def _record_journey(db: Session, tenant_id: str, c, creator, users, rng) -> None:
+    """Write the agreement's audit history at the dates it would really have happened.
+
+    Every analytics figure — cycle time, the volume trend, stage performance — is derived from
+    the audit trail rather than stored. Writing the whole history in one instant made "days
+    from raised to executed" honestly computed and honestly zero, and put the entire volume
+    trend in a single bar on today's date.
+
+    **The clock is moved, the rows are not edited.** The timestamp is inside the audit HMAC, so
+    rewriting `at` on a stored row would break the chain that exists to prove stored rows are
+    never rewritten. `audit._utcnow` is the seam the chain-ordering tests already use.
+    """
+    from . import audit
+
+    hops = _JOURNEY_TO.get(c.status, [])
+    # Raised up to a year back, anchored so an agreement is never raised after it took effect.
+    raised = dt.datetime.now() - dt.timedelta(days=rng.randint(20, 340), hours=rng.randint(0, 23))
+    if c.effective_date:
+        raised = min(raised, dt.datetime.combine(c.effective_date, dt.time(9, 30)))
+    c.created_at = raised
+
+    real_clock = audit._utcnow
+    moment = raised
+    try:
+        audit._utcnow = lambda at=moment: at
+        record(db, tenant_id=tenant_id, action="contract.created", actor=creator,
+               object_type="contract", object_id=c.id, object_label=c.title,
+               meta={"source": c.source})
+
+        previous = "draft"
+        for hop in hops:
+            # A few working days per hop, so cycle times land in a believable band rather than
+            # every agreement taking the same time.
+            moment = moment + dt.timedelta(days=rng.randint(1, 11), hours=rng.randint(0, 23))
+            if moment > dt.datetime.now():
+                moment = dt.datetime.now() - dt.timedelta(hours=1)
+            audit._utcnow = lambda at=moment: at
+            action = "contract.submitted" if hop == "in_review" else "contract.status_changed"
+            record(db, tenant_id=tenant_id, action=action, actor=rng.choice(users),
+                   object_type="contract", object_id=c.id, object_label=c.title,
+                   meta={"from": previous, "to": hop})
+            previous = hop
+        c.updated_at = moment
+    finally:
+        # Restore the real clock even if a row fails, or every audit entry written afterwards
+        # would silently carry a seeded timestamp.
+        audit._utcnow = real_clock
+
+
 def seed_if_empty(db: Session) -> bool:
     if db.scalar(select(models.Tenant).limit(1)) is not None:
         return False
@@ -54,14 +125,14 @@ def seed_if_empty(db: Session) -> bool:
     db.flush()
 
     colors = ["#3E7BFA", "#8B7BF5", "#2BC0D4", "#F6B83C", "#F5736B", "#3FBF7F"]
-    owner = models.User(tenant_id=tenant.id, email=DEMO_EMAIL, name="Demo Owner", password_hash=security.hash_password(DEMO_PASSWORD), role="owner", avatar_color=colors[0])
-    manager = models.User(tenant_id=tenant.id, email="manager@acme.io", name="Mariam Khan", password_hash=security.hash_password(DEMO_PASSWORD), role="manager", avatar_color=colors[1])
-    approver = models.User(tenant_id=tenant.id, email="approver@acme.io", name="John Doe", password_hash=security.hash_password(DEMO_PASSWORD), role="approver", avatar_color=colors[2])
-    author = models.User(tenant_id=tenant.id, email="author@acme.io", name="Aisha Smith", password_hash=security.hash_password(DEMO_PASSWORD), role="author", avatar_color=colors[3])
+    owner = models.User(tenant_id=tenant.id, email=DEMO_EMAIL, name="Demo Owner", password_hash=security.hash_password(DEMO_PASSWORD), role="owner", department="Legal", avatar_color=colors[0])
+    manager = models.User(tenant_id=tenant.id, email="manager@acme.io", name="Mariam Khan", password_hash=security.hash_password(DEMO_PASSWORD), role="manager", department="Procurement", avatar_color=colors[1])
+    approver = models.User(tenant_id=tenant.id, email="approver@acme.io", name="John Doe", password_hash=security.hash_password(DEMO_PASSWORD), role="approver", department="Finance", avatar_color=colors[2])
+    author = models.User(tenant_id=tenant.id, email="author@acme.io", name="Aisha Smith", password_hash=security.hash_password(DEMO_PASSWORD), role="author", department="Operations", avatar_color=colors[3])
     # A second Registration Authority officer. The RA refuses to let an officer approve their
     # own certificate request — separation of duties — so a workspace with one officer can
     # never issue that officer a certificate, including the demo login's.
-    admin = models.User(tenant_id=tenant.id, email="admin@acme.io", name="Bilal Farooq", password_hash=security.hash_password(DEMO_PASSWORD), role="admin", avatar_color=colors[4])
+    admin = models.User(tenant_id=tenant.id, email="admin@acme.io", name="Bilal Farooq", password_hash=security.hash_password(DEMO_PASSWORD), role="admin", department="Information Technology", avatar_color=colors[4])
     db.add_all([owner, manager, approver, author, admin])
     db.flush()
     users = [owner, manager, approver, author, admin]
@@ -125,9 +196,7 @@ def seed_if_empty(db: Session) -> bool:
         db.add(c)
         db.flush()
         db.add(models.ContractVersion(tenant_id=tenant.id, contract_id=c.id, version_no=1, body=c.body, change_summary="Created", created_by=creator.id))
-        record(db, tenant_id=tenant.id, action="contract.created", actor=creator, object_type="contract", object_id=c.id, object_label=c.title, meta={"source": c.source})
-        if st not in ("draft",):
-            record(db, tenant_id=tenant.id, action="contract.status_changed", actor=rng.choice(users), object_type="contract", object_id=c.id, object_label=c.title, meta={"from": "draft", "to": st})
+        _record_journey(db, tenant.id, c, creator, users, rng)
         if rng.random() < 0.4:
             cm = models.Comment(tenant_id=tenant.id, contract_id=c.id, author_id=rng.choice(users).id, author_name=rng.choice(users).name, body=rng.choice(["Please double-check the liability cap.", "Counterparty asked for net-45 payment terms.", "Approved pending the data-residency clause.", "Can we shorten the auto-renew notice to 30 days?"]))
             db.add(cm)

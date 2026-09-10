@@ -8,7 +8,7 @@ import { useAuth } from "@/lib/auth";
 import { PageHeader } from "@/components/shell";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Field, Input, Select, Skeleton } from "@/components/ui";
 import { titleCase } from "@/lib/utils";
-import type { User } from "@/lib/types";
+import type { Department, User } from "@/lib/types";
 
 // Permissions matrix — derived from the actual code's role gates. Update here if backend
 // _EDIT_ROLES / _ADMIN_ROLES / workflow_service._OVERRIDE_ROLES change.
@@ -179,10 +179,20 @@ function InviteCard({ onInvited, onError }: { onInvited: () => void; onError: (s
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<RoleKey>("author");
+  const [department, setDepartment] = useState("");
+  const [departments, setDepartments] = useState<Department[] | null>(null);
   const [welcome, setWelcome] = useState("");
   const [busy, setBusy] = useState(false);
   const [lastInvite, setLastInvite] = useState<InviteResult | null>(null);
   const [copied, setCopied] = useState(false);
+
+  // Approval routing, the authority matrix and every departmental report key off the user's
+  // department, so it is chosen from the configured list rather than typed.
+  useEffect(() => {
+    api.get<Department[]>("/departments")
+      .then((d) => setDepartments(d.filter((x) => x.is_active)))
+      .catch(() => setDepartments([]));
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -194,10 +204,11 @@ function InviteCard({ onInvited, onError }: { onInvited: () => void; onError: (s
         name: name.trim(),
         email: email.trim(),
         role,
+        department,
         welcome_message: welcome.trim() || undefined,
       });
       setLastInvite(r);
-      setName(""); setEmail(""); setWelcome("");
+      setName(""); setEmail(""); setWelcome(""); setDepartment("");
       onInvited();
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't invite that user.");
@@ -229,7 +240,7 @@ function InviteCard({ onInvited, onError }: { onInvited: () => void; onError: (s
               <Input value={name} onChange={(e) => setName(e.target.value)} required placeholder="Asha Kapoor" />
             </Field>
           </div>
-          <div className="sm:col-span-4">
+          <div className="sm:col-span-3">
             <Field label="Work email">
               <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required placeholder="asha@yourcompany.com" />
             </Field>
@@ -243,13 +254,31 @@ function InviteCard({ onInvited, onError }: { onInvited: () => void; onError: (s
               </Select>
             </Field>
           </div>
-          <div className="sm:col-span-3">
+          <div className="sm:col-span-2">
+            <Field
+              label="Department"
+              hint={departments?.length === 0 ? "Add one under Departments first" : "Required"}
+            >
+              <Select
+                value={department}
+                onChange={(e) => setDepartment(e.target.value)}
+                required
+                disabled={departments === null || departments.length === 0}
+              >
+                <option value="">{departments === null ? "Loading…" : "Select…"}</option>
+                {(departments ?? []).map((d) => (
+                  <option key={d.id} value={d.name}>{d.name}</option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          <div className="sm:col-span-2">
             <Field label="Welcome note (optional)">
               <Input value={welcome} onChange={(e) => setWelcome(e.target.value)} placeholder="Welcome aboard!" />
             </Field>
           </div>
           <div className="flex items-end justify-end sm:col-span-12">
-            <Button type="submit" loading={busy} disabled={!email.trim() || !name.trim()}>
+            <Button type="submit" loading={busy} disabled={!email.trim() || !name.trim() || !department}>
               <Mail className="h-3.5 w-3.5" /> Send invite
             </Button>
           </div>

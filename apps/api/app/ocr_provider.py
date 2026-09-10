@@ -84,7 +84,7 @@ def build_extraction(file_name: str) -> dict:
             "value": {"value": value, "confidence": round(rng.uniform(0.8, 0.95), 2)},
             "currency": {"value": "USD", "confidence": 0.99},
             "renewal_type": {"value": rng.choice(["none", "auto", "manual"]), "confidence": round(rng.uniform(0.6, 0.9), 2)},
-            "governing_law": {"value": rng.choice(["Oman", "UAE", "Saudi Arabia", "England & Wales"]), "confidence": round(rng.uniform(0.7, 0.93), 2)},
+            "governing_law": {"value": rng.choice(["Islamic Republic of Pakistan", "Islamic Republic of Pakistan", "England & Wales", "United Arab Emirates"]), "confidence": round(rng.uniform(0.7, 0.93), 2)},
         },
         "risk_level": risk,
         "summary": f"{months}-month {_TITLE[ctype].lower()} with {party}. Standard commercial terms; governing law as detected. (AI summary — verify before relying.)",

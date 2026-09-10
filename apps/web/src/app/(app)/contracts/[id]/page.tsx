@@ -1,11 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { AlertTriangle, BadgeCheck, Check, CheckSquare, Copy, Download, Eye, FileCheck2, FileDown, FileText, History, ListTodo, Pencil, PenLine, Plus, Repeat, RotateCcw, Send, Shield, Sparkles, Trash2, Workflow as WorkflowIcon, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
+import { TextAssist } from "@/components/text-assist";
+import { SelectionActions } from "@/components/selection-actions";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton, Textarea } from "@/components/ui";
 
 const BlockEditor = dynamic(() => import("@/components/block-editor").then((m) => m.BlockEditor), {
@@ -64,7 +66,7 @@ function legacyCopy(text: string): boolean {
 
 type Tab = "overview" | "approvals" | "policy" | "readiness" | "signatures" | "obligations" | "document" | "activity" | "comments" | "files" | "versions";
 const EDITABLE_STATUSES = new Set(["draft", "changes_requested"]);
-const TABS: Tab[] = ["overview", "approvals", "policy", "readiness", "signatures", "obligations", "document", "activity", "comments", "files", "versions"];
+const TABS: Tab[] = ["overview", "document", "policy", "approvals", "readiness", "signatures", "obligations", "comments", "versions", "files", "activity"];
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export default function ContractDetailPage() {
@@ -387,7 +389,7 @@ export default function ContractDetailPage() {
         {tab === "readiness" && <ReadinessTab contract={contract} />}
         {tab === "signatures" && <SignaturesTab contract={contract} env={sigState} onChanged={load} />}
         {tab === "obligations" && <ObligationsTab contract={contract} />}
-        {tab === "document" && <DocumentTab key={contract.id} contract={contract} />}
+        {tab === "document" && <DocumentTab key={contract.id} contract={contract} wf={wfState} onChanged={load} />}
         {tab === "activity" && <ActivityTab contractId={contract.id} />}
         {tab === "comments" && <CommentsTab contractId={contract.id} />}
         {tab === "files" && <FilesTab contractId={contract.id} />}
@@ -529,13 +531,14 @@ function Row({ k, v }: { k: string; v: React.ReactNode }) {
   );
 }
 
-function DocumentTab({ contract }: { contract: ContractDetail }) {
+function DocumentTab({ contract, wf, onChanged }: { contract: ContractDetail; wf: ContractWorkflow | null; onChanged: () => void }) {
   const editable = EDITABLE_STATUSES.has(contract.status);
   const [md, setMd] = useState<string>(contract.body || "");
   const [baseline, setBaseline] = useState<string>(contract.body || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [savedNote, setSavedNote] = useState("");
+  const bodyRef = useRef<HTMLDivElement | null>(null);
   const dirty = md !== baseline;
 
   async function save() {
@@ -576,14 +579,17 @@ function DocumentTab({ contract }: { contract: ContractDetail }) {
         {error && <ErrorBanner message={error} className="mb-3" />}
         {!editable && (
           <p className="mb-3 text-xs text-ink-3">
-            This contract is “{titleCase(contract.status)}” — the document is read-only (merge variables shown resolved). Return it to draft to edit.
+            This contract is “{titleCase(contract.status)}” — the document is read-only (merge variables shown resolved). Select any passage, or right-click it, to comment or raise an obligation.
           </p>
         )}
-        <BlockEditor
-          value={editable ? baseline : resolveContractVariables(contract.body || "", contract)}
-          editable={editable}
-          onChange={editable ? setMd : undefined}
-        />
+        <div ref={bodyRef} className="relative">
+          <BlockEditor
+            value={editable ? baseline : resolveContractVariables(contract.body || "", contract)}
+            editable={editable}
+            onChange={editable ? setMd : undefined}
+          />
+          <SelectionActions contractId={contract.id} containerRef={bodyRef} onSaved={onChanged} />
+        </div>
         {editable && (
           <details className="mt-4 text-xs text-ink-3">
             <summary className="cursor-pointer select-none">Markdown source · merge variables look like <code>{"{{counterparty}}"}</code> and resolve in the PDF / read-only view</summary>
@@ -591,7 +597,135 @@ function DocumentTab({ contract }: { contract: ContractDetail }) {
           </details>
         )}
       </CardBody>
+      <ReviewPanel contract={contract} wf={wf} onChanged={onChanged} />
     </Card>
+  );
+}
+
+/** Everything a reviewer needs *while reading*: raise a point, capture an obligation, decide.
+ *
+ * All three existed already, one per tab. That is fine for looking something up and wrong for
+ * reviewing: the reader is holding a paragraph in their head, and making them leave the
+ * document to record what they just noticed is how the note stops being written down at all.
+ * The obligation box especially — reading the clause that creates one is the moment it gets
+ * spotted, and the only moment it reliably does. */
+function ReviewPanel({ contract, wf, onChanged }:
+  { contract: ContractDetail; wf: ContractWorkflow | null; onChanged: () => void }) {
+  const [note, setNote] = useState("");
+  const [obTitle, setObTitle] = useState("");
+  const [obDue, setObDue] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [done, setDone] = useState("");
+  const [error, setError] = useState("");
+
+  const canDecide = !!wf?.can_decide && wf.run?.status === "running";
+
+  async function run(kind: string, fn: () => Promise<unknown>, ok: string, after?: () => void) {
+    setBusy(kind);
+    setError("");
+    setDone("");
+    try {
+      await fn();
+      setDone(ok);
+      after?.();
+      onChanged();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "That did not go through.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function comment() {
+    run("comment", () => api.post(`/contracts/${contract.id}/comments`, { body: note.trim() }),
+      "Comment added.", () => setNote(""));
+  }
+
+  function obligation() {
+    run("obligation", () => api.post(`/contracts/${contract.id}/obligations`, {
+      title: obTitle.trim(),
+      description: "Raised while reviewing the document.",
+      due_date: obDue || null,
+      owner_id: null,
+    }), "Obligation added.", () => { setObTitle(""); setObDue(""); });
+  }
+
+  // The decision carries the reviewer's note, so "approved, but fix clause 7" stays one record
+  // instead of a decision here and an unlinked comment somewhere else.
+  function decide(decision: "approve" | "reject" | "changes_requested", ok: string) {
+    run(decision, () => api.post(`/contracts/${contract.id}/workflow/decide`,
+      { decision, comment: note.trim() }), ok, () => setNote(""));
+  }
+
+  return (
+    <div className="border-t border-line bg-surface-2/40 px-5 py-4">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className="text-sm font-medium text-ink">Review</span>
+        {canDecide && <Badge tone="accent">Waiting on you</Badge>}
+        {done && <span className="text-xs text-ok">{done}</span>}
+      </div>
+      {error && <ErrorBanner message={error} className="mb-3" />}
+
+      <Textarea
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        rows={3}
+        placeholder={canDecide
+          ? "Note for the record - attached to your decision, or posted on its own as a comment."
+          : "Add a comment on what you just read..."}
+      />
+      <TextAssist value={note} onAccept={setNote} />
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="secondary" onClick={comment}
+          loading={busy === "comment"} disabled={!note.trim() || !!busy}>
+          <Plus className="h-3.5 w-3.5" /> Add comment
+        </Button>
+        {canDecide && (
+          <>
+            <Button size="sm" onClick={() => decide("approve", "Approved.")}
+              loading={busy === "approve"} disabled={!!busy}>
+              <Check className="h-3.5 w-3.5" /> Approve
+            </Button>
+            <Button size="sm" variant="secondary"
+              onClick={() => decide("changes_requested", "Changes requested.")}
+              loading={busy === "changes_requested"} disabled={!!busy}>
+              <Pencil className="h-3.5 w-3.5" /> Request changes
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => decide("reject", "Rejected.")}
+              loading={busy === "reject"} disabled={!!busy}>
+              <X className="h-3.5 w-3.5" /> Reject
+            </Button>
+          </>
+        )}
+      </div>
+
+      <div className="mt-4 border-t border-line pt-3">
+        <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-ink-2">
+          <ListTodo className="h-3.5 w-3.5" /> Spotted an obligation in the text?
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <input
+            className="h-9 min-w-[16rem] flex-1 rounded-md border border-line bg-surface px-3 text-sm text-ink outline-none focus:border-accent"
+            value={obTitle}
+            onChange={(e) => setObTitle(e.target.value)}
+            placeholder="e.g. Serve renewal notice 60 days before expiry"
+            aria-label="Obligation"
+          />
+          <input
+            type="date"
+            className="h-9 rounded-md border border-line bg-surface px-3 text-sm text-ink outline-none focus:border-accent"
+            value={obDue}
+            onChange={(e) => setObDue(e.target.value)}
+            aria-label="Obligation due date"
+          />
+          <Button size="sm" variant="secondary" onClick={obligation}
+            loading={busy === "obligation"} disabled={!obTitle.trim() || !!busy}>
+            <Plus className="h-3.5 w-3.5" /> Add obligation
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -635,6 +769,7 @@ function CommentsTab({ contractId }: { contractId: string }) {
       <CardBody className="space-y-4">
         <form onSubmit={add} className="flex flex-col gap-2">
           <Textarea rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder="Add a comment…" />
+          <TextAssist value={text} onAccept={setText} />
           <div className="flex justify-end">
             <Button size="sm" type="submit" loading={busy} disabled={!text.trim()}>
               Comment

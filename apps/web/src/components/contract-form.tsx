@@ -1,11 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
 import { CONTRACT_TYPES } from "@/lib/utils";
 import { Button, Card, CardBody, ErrorBanner, Field, Input, Select } from "@/components/ui";
-import type { ContractDetail } from "@/lib/types";
+import type { ContractDetail, Department } from "@/lib/types";
 
 export interface ContractFormValues {
   title: string;
@@ -17,7 +17,6 @@ export interface ContractFormValues {
   effective_date: string;
   end_date: string;
   renewal_type: string;
-  governing_law: string;
   tags: string;
 }
 
@@ -32,7 +31,6 @@ function emptyValues(currency = "USD"): ContractFormValues {
     effective_date: "",
     end_date: "",
     renewal_type: "none",
-    governing_law: "",
     tags: "",
   };
 }
@@ -48,7 +46,6 @@ export function fromContract(c: ContractDetail): ContractFormValues {
     effective_date: c.effective_date ?? "",
     end_date: c.end_date ?? "",
     renewal_type: c.renewal_type,
-    governing_law: c.governing_law,
     tags: c.tags.join(", "),
   };
 }
@@ -64,7 +61,6 @@ function toPayload(v: ContractFormValues) {
     effective_date: v.effective_date || null,
     end_date: v.end_date || null,
     renewal_type: v.renewal_type,
-    governing_law: v.governing_law.trim(),
     tags: v.tags.split(",").map((t) => t.trim()).filter(Boolean),
   };
 }
@@ -84,6 +80,15 @@ export function ContractForm({
   const [v, setV] = useState<ContractFormValues>(initial ? fromContract(initial) : emptyValues(currency));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [departments, setDepartments] = useState<Department[] | null>(null);
+
+  // Free text let three spellings of one department into the same report. The list is whatever
+  // an admin has set up under Departments; null means "still loading", [] means "none configured".
+  useEffect(() => {
+    api.get<Department[]>("/departments")
+      .then((d) => setDepartments(d.filter((x) => x.is_active)))
+      .catch(() => setDepartments([]));
+  }, []);
 
   function set<K extends keyof ContractFormValues>(k: K, val: ContractFormValues[K]) {
     setV((s) => ({ ...s, [k]: val }));
@@ -129,18 +134,33 @@ export function ContractForm({
                 ))}
               </Select>
             </Field>
-            <Field label="Department">
-              <Input value={v.department} onChange={(e) => set("department", e.target.value)} placeholder="Procurement" />
+            <Field
+              label="Department"
+              hint={departments?.length === 0 ? "No departments set up yet — an admin can add them under Departments." : undefined}
+            >
+              <Select
+                value={v.department}
+                onChange={(e) => set("department", e.target.value)}
+                disabled={departments === null || departments.length === 0}
+              >
+                <option value="">{departments === null ? "Loading…" : "Select a department"}</option>
+                {/* An agreement created before a department was renamed keeps its old value; keep
+                    it selectable so opening the form to edit something else cannot silently
+                    reassign it. */}
+                {v.department && !(departments ?? []).some((d) => d.name === v.department) && (
+                  <option value={v.department}>{v.department}</option>
+                )}
+                {(departments ?? []).map((d) => (
+                  <option key={d.id} value={d.name}>
+                    {d.name}
+                  </option>
+                ))}
+              </Select>
             </Field>
           </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Counterparty">
-              <Input value={v.counterparty} onChange={(e) => set("counterparty", e.target.value)} placeholder="Acme Corporation" />
-            </Field>
-            <Field label="Governing law">
-              <Input value={v.governing_law} onChange={(e) => set("governing_law", e.target.value)} placeholder="Oman" />
-            </Field>
-          </div>
+          <Field label="Counterparty">
+            <Input value={v.counterparty} onChange={(e) => set("counterparty", e.target.value)} placeholder="Acme Corporation" />
+          </Field>
           <div className="grid gap-4 sm:grid-cols-3">
             <Field label="Value">
               <Input type="number" min="0" value={v.value} onChange={(e) => set("value", e.target.value)} placeholder="120000" />

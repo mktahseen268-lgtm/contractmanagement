@@ -108,7 +108,7 @@ Covered here: **8 OCR Upload · 9 OCR Processing · 10 OCR Extracted Data · 11 
 │ │                                                      │ │ Renewal                 │ │
 │ │  [page 1/12 ‹ ›][fit][zoom][thumbnails]              │ │  [Auto-renew ▾] ●77% ⚠  │ │
 │ │                                                      │ │ Governing law           │ │
-│ │                                                      │ │  [Oman]         ●83%    │ │
+│ │                                                  │ │  [Pakistan]         ●83%    │ │
 │ │                                                      │ │ Detected clauses (12) ▾ │ │  ← expands to
 │ │                                                      │ │ Detected signatures (2)▾│ │     a list, each
 │ │                                                      │ │ Detected stamps (1) ▾   │ │     linking to its box
@@ -141,7 +141,7 @@ Covered here: **8 OCR Upload · 9 OCR Processing · 10 OCR Extracted Data · 11 
 │ ┌─ SUMMARY ──────────────────────────────────────────────────────────────────────┐ │
 │ │ "A 3-year master services agreement between {us} and Acme Corp. Auto-renews for │ │
 │ │ 12-month terms unless cancelled 60 days prior. Liability capped at $500k.       │ │
-│ │ Governing law: Oman. Includes GCC data-residency obligations. Payment net-30."  │ │
+│ │ Governing law: Pakistan. Includes SBP data-residency clauses. Payment net-30."  │ │
 │ │ Confidence ●92%  ·  [shorter] [longer] [in Arabic] [copy] [explain]            │ │
 │ ├─ CLASSIFICATION & METADATA ────────────────────────────────────────────────────┤ │
 │ │ Type: MSA ●96% · Family: Services · Parties: {us}, Acme Corp ●91% · Value $120k │ │
@@ -284,7 +284,7 @@ Done screen:  ✓ "You've signed."  [green VerifiedSeal]  "We'll email you the e
 │  │ ● 14:02  J.Doe submitted for approval → workflow "Procurement standard"           ││
 │  │ ● 09:11  AI re-ran analysis (v3) — risk: Medium (1 high, 2 med)        [view]    ││
 │  ├ Yesterday ──────────────────────────────────────────────────────────────────────┤│
-│  │ ● 16:40  A.Khan (Acme) viewed the shared draft (IP …, Muscat)         [details] ││
+│  │ ● 16:40  A.Khan (Acme) viewed the shared draft (IP …, Karachi)        [details] ││
 │  │ ● 11:22  M.Khan edited §8 Limitation of Liability  (v2 → v3)  [compare] [restore]││
 │  │ ● 10:05  Comment by Legal on §9: "name PDPL explicitly" — resolved by M.Khan     ││
 │  ├ 3 May ──────────────────────────────────────────────────────────────────────────┤│
@@ -383,14 +383,14 @@ Done screen:  ✓ "You've signed."  [green VerifiedSeal]  "We'll email you the e
 ```
 ┌──────────────────────────────────── content ──────────────────────────────────────┐
 │ Search        [ leases expiring this year over $50k in Muscat________________ 🔎 ]  │
-│  Interpreted as: Type=Lease · End date in 2026 · Value > $50,000 · Location=Muscat  │  ← AI parsed
+│  Interpreted as: Type=Lease · End date in 2026 · Value > $50,000 · Location=Karachi  │  ← AI parsed
 │                  [edit as filters ▾]                                                │     the NL query
 │  Filters: [Type▾][Party▾][Owner▾][Status▾][Value range][Date range][Tag▾][Risk▾]    │
 │           [Clause contains: "indemnif*"][Custom field…]   [Save as view]            │
 │  Results (38)  · sort [relevance ▾]                                                 │
 │  ┌ Contracts (31) ───────────────────────────────────────────────────────────────┐ │
-│  │ ● Lease — Tower 7 · ends 2026-06-01 · $48k · Muscat   "…matched: 'Muscat', value"│ │  ← shows WHY
-│  │ ● Lease — Marina · ends 2026-09-15 · $72k · Muscat    "…matched clause: §2.1 …" │ │     it matched
+│  │ ● Lease — Tower 7 · ends 2026-06-01 · $48k · Karachi   "…matched: 'Karachi', value"│ │  ← shows WHY
+│  │ ● Lease — Marina · ends 2026-09-15 · $72k · Karachi    "…matched clause: §2.1 …" │ │     it matched
 │  │ ...                                                                            │ │
 │  ├ Templates (3) ─ Clauses (2) ─ People (2) ──────────────────────────────────────┤ │
 │  └─────────────────────────────────────────────────────────────────────────────────┘│
@@ -402,7 +402,7 @@ Done screen:  ✓ "You've signed."  [green VerifiedSeal]  "We'll email you the e
 
 **States:** empty (recent searches + saved views + tips) · typing (instant suggestions in ⌘K; debounced for `/search`) · results · no results ("nothing matched — try fewer filters / different words" + "search the full text of all contracts?" toggle) · slow query (skeleton + "searching 12,840 contracts…") · permission-limited ("showing only what you can access" note). Results are saveable as a view; the NL→filters translation is always shown and editable so it never feels like a black box.
 
-**Edge cases:** Arabic queries (search the Arabic content; transliteration tolerance — "Muscat"/"مسقط"); typos (`pg_trgm` fuzzy + the AI's tolerance); huge corpora (server-side everything, ranked, paged); searching within a date range that spans a renewal chain (option: "treat renewal chains as one"); searching by a counterparty that appears under slightly different names (entity-resolution hint: "did you mean Acme Corp / Acme Corporation / ACME LLC — combine?").
+**Edge cases:** Arabic queries (search the Arabic content; transliteration tolerance — "Karachi"/"مسقط"); typos (`pg_trgm` fuzzy + the AI's tolerance); huge corpora (server-side everything, ranked, paged); searching within a date range that spans a renewal chain (option: "treat renewal chains as one"); searching by a counterparty that appears under slightly different names (entity-resolution hint: "did you mean Acme Corp / Acme Corporation / ACME LLC — combine?").
 
 **RTL/Mobile:** mirrors; Arabic query input renders RTL; on mobile, ⌘K becomes a full-screen search; `/search` filters go in a bottom-sheet; results are cards. See Doc 12.
 

@@ -414,6 +414,46 @@ def test_a_reference_number_is_searchable(db, workspace):
     assert result["total"] == 1
 
 
+def test_terms_are_matched_separately_not_as_one_phrase(db, workspace):
+    """Two words that both appear, but not next to each other, still match.
+
+    The SQLite fallback used to LIKE the whole query as one substring, so a search combining a
+    counterparty with a word from the body found nothing — which reads as the search being
+    unable to see inside documents at all. The real engines tokenise; this pins the fallback to
+    the same behaviour.
+    """
+    _contract(db, workspace, title="Acquiring Agreement", counterparty="Umbrella Services",
+              body="The Provider shall settle net proceeds within two working days.")
+    _contract(db, workspace, title="Lease", counterparty="Hooli Ltd",
+              body="The premises are at 12 Main Street.")
+
+    result = search_service.search(db, workspace["tenant"].id, q="Umbrella Provider")
+
+    assert result["total"] == 1
+    assert result["items"][0]["title"] == "Acquiring Agreement"
+
+
+def test_every_term_has_to_appear_somewhere(db, workspace):
+    """Matching *any* term would make a two-word search broader than a one-word search."""
+    _contract(db, workspace, title="Acquiring Agreement", counterparty="Umbrella Services",
+              body="The Provider shall settle net proceeds.")
+
+    assert search_service.search(db, workspace["tenant"].id, q="Umbrella")["total"] == 1
+    assert search_service.search(db, workspace["tenant"].id,
+                                 q="Umbrella unrelatedword")["total"] == 0
+
+
+def test_a_reference_number_is_not_split_into_terms(db, workspace):
+    """`C-2026-0004` is one identifier. Split on punctuation it would match every 2026 row."""
+    wanted = _contract(db, workspace, title="Wanted")
+    _contract(db, workspace, title="Other")
+
+    result = search_service.search(db, workspace["tenant"].id, q=wanted.reference_no)
+
+    assert result["total"] == 1
+    assert result["items"][0]["title"] == "Wanted"
+
+
 def test_filters_narrow_the_result(db, workspace):
     _contract(db, workspace, status="active", risk_level="high")
     _contract(db, workspace, status="draft", risk_level="high")

@@ -51,7 +51,7 @@ Real contracts and real UIs constantly mix Arabic with Latin (a counterparty nam
 - Wrap embedded foreign-direction runs in `<bdi>` (or `unicode-bidi: isolate`) so the bidi algorithm doesn't mangle the surrounding text — names, emails, URLs, codes, numbers, file names, and inline English-in-Arabic (and Arabic-in-English) all get isolated.
 - Form **inputs** that hold mixed or Latin content (email, URL, contract #, numeric, code) are `dir="ltr"` (or `dir="auto"`) even in an RTL form, with their **label** start-aligned (i.e., on the right in RTL) — so you type the email left-to-right but the label sits where it belongs.
 - The **editor** handles bidi at the paragraph level (a paragraph's base direction follows its dominant script, or an explicit per-block direction toggle) and isolates inline runs; pasted mixed content keeps its directionality; the cursor behaves correctly at script boundaries.
-- **Search** is bidi-aware: an Arabic query searches Arabic content; transliteration tolerance helps ("Muscat" ⇄ "مسقط", "Acme" ⇄ "آكمي"); `pg_trgm` fuzzy works across both.
+- **Search** is bidi-aware: an Arabic query searches Arabic content; transliteration tolerance helps ("Karachi" ⇄ "مسقط", "Acme" ⇄ "آكمي"); `pg_trgm` fuzzy works across both.
 
 ---
 

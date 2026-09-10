@@ -15,6 +15,7 @@ export interface User {
   role: Role;
   is_active: boolean;
   avatar_color: string;
+  department: string;
   mfa_enabled: boolean;
 }
 

@@ -11,6 +11,7 @@ from .. import signing_service as sig
 from .. import webhook_service
 from .. import workflow_service as wf
 from ..audit import record
+from ..config import settings
 from ..database import get_db
 from ..deps import client_ip, get_current_user
 
@@ -147,7 +148,7 @@ def create_contract(data: schemas.ContractCreateIn, request: Request, db: Sessio
         effective_date=data.effective_date,
         end_date=data.end_date,
         renewal_type=data.renewal_type,
-        governing_law=data.governing_law,
+        governing_law=(data.governing_law or settings.default_governing_law),
         risk_level=data.risk_level or "low",
         ai_summary=data.ai_summary,
         tags=data.tags,
@@ -353,7 +354,17 @@ def list_comments(contract_id: str, db: Session = Depends(get_db), user: models.
 @router.post("/{contract_id}/comments", response_model=schemas.CommentOut, status_code=status.HTTP_201_CREATED)
 def add_comment(contract_id: str, data: schemas.CommentIn, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.CommentOut:
     c = _get_owned_contract(db, user, contract_id)
-    comment = models.Comment(tenant_id=user.tenant_id, contract_id=c.id, author_id=user.id, author_name=user.name, body=data.body)
+    body = data.body
+    if data.quote.strip():
+        # Markdown block quote, so the passage renders as a quotation wherever the thread is
+        # shown without every consumer needing to learn a new field.
+        quoted = "\n".join(f"> {line}" for line in data.quote.strip().splitlines())
+        body = f"{quoted}\n\n{data.body}"
+    comment = models.Comment(
+        tenant_id=user.tenant_id, contract_id=c.id, author_id=user.id,
+        author_name=user.name, body=body,
+        anchor_start=data.anchor_start, anchor_end=data.anchor_end,
+    )
     db.add(comment)
     record(db, tenant_id=user.tenant_id, action="contract.commented", actor=user, object_type="contract", object_id=c.id, object_label=c.title, ip=client_ip(request))
     db.commit()

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from .. import jobs, models, renewal_service, schemas, security
 from ..audit import record
+from ..config import settings
 from ..database import get_db
 from ..deps import client_ip, get_current_user
 
@@ -72,7 +73,7 @@ def update_tenant(data: schemas.TenantUpdateIn, request: Request, db: Session = 
 
 @router.patch("/users/{user_id}", response_model=schemas.UserOut)
 def update_user(user_id: str, data: schemas.UserUpdateIn, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> schemas.UserOut:
-    """Admin/owner only. Update name, role, or is_active. Owners are protected (you can't demote
+    """Admin/owner only. Update name, department, role, or is_active. Owners are protected (you can't demote
     or deactivate the last owner; admins can't change another owner)."""
     if user.role not in _ADMIN_ROLES:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only owners/admins can update users.")
@@ -92,6 +93,14 @@ def update_user(user_id: str, data: schemas.UserUpdateIn, request: Request, db: 
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Name can't be empty.")
         target.name = nm
         changes["name"] = nm
+
+    if "department" in payload and payload["department"] is not None:
+        dept = payload["department"].strip()[:100]
+        if not dept:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="Department can't be empty — approval routing depends on it.")
+        target.department = dept
+        changes["department"] = dept
 
     if "role" in payload and payload["role"] is not None:
         new_role = payload["role"].lower()
@@ -198,10 +207,10 @@ def invite_user(data: schemas.UserInviteIn, request: Request, db: Session = Depe
         plain_password = secrets.token_urlsafe(9)  # ~12-char readable string
         generated = True
     colors = ["#3E7BFA", "#8B7BF5", "#2BC0D4", "#F6B83C", "#F5736B", "#3FBF7F"]
-    u = models.User(tenant_id=user.tenant_id, email=email, name=data.name, password_hash=security.hash_password(plain_password), role=data.role, avatar_color=random.choice(colors))
+    u = models.User(tenant_id=user.tenant_id, email=email, name=data.name, password_hash=security.hash_password(plain_password), role=data.role, department=data.department.strip(), avatar_color=random.choice(colors))
     db.add(u)
     db.flush()
-    record(db, tenant_id=user.tenant_id, action="user.invited", actor=user, object_type="user", object_id=u.id, object_label=u.name, ip=client_ip(request), meta={"role": u.role, "auto_password": generated})
+    record(db, tenant_id=user.tenant_id, action="user.invited", actor=user, object_type="user", object_id=u.id, object_label=u.name, ip=client_ip(request), meta={"role": u.role, "department": u.department, "auto_password": generated})
     db.commit()
     db.refresh(u)
     # send welcome email through the outbox
@@ -226,6 +235,47 @@ def invite_user(data: schemas.UserInviteIn, request: Request, db: Session = Depe
     # in person if email is misconfigured. Caller-supplied passwords are not echoed.
     out.generated_password = plain_password if generated else None
     return out
+
+
+# ---------- writing assistant ----------
+
+
+@router.get("/ai/assist/config", response_model=schemas.TextAssistConfigOut)
+def text_assist_config(user: models.User = Depends(get_current_user)) -> schemas.TextAssistConfigOut:
+    """Whether this deployment has a writing assistant, so the UI can hide the control.
+
+    Behind auth like everything else: whether the bank runs a model internally is a fact about
+    their infrastructure, not something to publish to an unauthenticated caller.
+    """
+    from .. import text_assist
+
+    provider = text_assist.get_provider()
+    return schemas.TextAssistConfigOut(
+        enabled=provider.available,
+        provider=provider.name,
+        modes=list(text_assist.MODES),
+        max_chars=settings.text_assist_max_chars,
+    )
+
+
+@router.post("/ai/assist", response_model=schemas.TextAssistOut)
+def text_assist_run(data: schemas.TextAssistIn,
+                    user: models.User = Depends(get_current_user)) -> schemas.TextAssistOut:
+    """Return a corrected version of a passage for the author to accept or reject.
+
+    Deliberately not audited and deliberately stateless. Nothing is written: the suggestion is
+    returned to the caller and discarded, and only the author's decision to save the text
+    reaches the database — where it is audited like any other edit. Logging every keystroke a
+    reviewer ran through the assistant would turn a spellcheck into surveillance of drafting,
+    and would put the same contract text in a second table for no additional control.
+    """
+    from .. import text_assist
+
+    try:
+        result = text_assist.assist(data.text, data.mode)
+    except text_assist.TextAssistError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return schemas.TextAssistOut(**result)
 
 
 # ---------- notifications ----------

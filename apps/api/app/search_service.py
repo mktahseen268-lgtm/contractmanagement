@@ -22,7 +22,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 
-from sqlalchemy import Select, or_, select, text
+from sqlalchemy import Select, and_, or_, select, text
 from sqlalchemy.orm import Session
 
 from . import db_dialect, models
@@ -71,17 +71,33 @@ def snippet(body: str, q: str, *, radius: int = SNIPPET_RADIUS) -> str:
 
 
 def _apply_text(stmt: Select, q: str) -> Select:
-    """Attach the dialect's full-text predicate, or a LIKE fallback on SQLite."""
+    """Attach the dialect's full-text predicate, or a LIKE fallback on SQLite.
+
+    The fallback matches **every term somewhere in the document**, not the query as one
+    contiguous string. Searching two words that both appear in an agreement but are not next to
+    each other — a counterparty and a clause word, say — returned nothing under a single
+    `%the whole query%` LIKE, which reads as "the search cannot see inside documents". The real
+    engines tokenise the query for exactly this reason; the fallback now agrees with them
+    instead of being quietly stricter.
+    """
     dialect = settings.db_dialect
     if dialect == db_dialect.SQLITE:
-        pattern = f"%{q.strip()}%"
-        return stmt.where(or_(
-            models.Contract.title.ilike(pattern),
-            models.Contract.counterparty.ilike(pattern),
-            models.Contract.body.ilike(pattern),
-            models.Contract.ai_summary.ilike(pattern),
-            models.Contract.reference_no.ilike(pattern),
-        ))
+        whole = f"%{q.strip()}%"
+        # One-letter noise is dropped by `_terms`; if that leaves nothing (a query of "a b", or
+        # pure punctuation) fall back to the raw string so the search still does something.
+        terms = _terms(q) or [q.strip().lower()]
+        per_term = [
+            or_(
+                models.Contract.title.ilike(f"%{term}%"),
+                models.Contract.counterparty.ilike(f"%{term}%"),
+                models.Contract.body.ilike(f"%{term}%"),
+                models.Contract.ai_summary.ilike(f"%{term}%"),
+            )
+            for term in terms
+        ]
+        # A reference number is matched whole — "C-2026-0004" is one identifier, and splitting
+        # it into terms would match every agreement from 2026.
+        return stmt.where(or_(and_(*per_term), models.Contract.reference_no.ilike(whole)))
     expression = db_dialect.fulltext_search(dialect, FTS_COLUMNS, param="q")
     return stmt.where(or_(text(expression).bindparams(q=q.strip()),
                           models.Contract.reference_no.ilike(f"%{q.strip()}%")))
