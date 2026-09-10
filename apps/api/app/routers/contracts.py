@@ -18,6 +18,31 @@ from ..deps import client_ip, get_current_user
 router = APIRouter(prefix="/contracts", tags=["contracts"])
 
 _EDIT_ROLES = {"owner", "admin", "manager", "author"}
+
+
+def _link_department(db: Session, c: models.Contract) -> None:
+    """Point `department_id` at the record whose name the agreement carries.
+
+    The name stays authoritative and is what every existing report, export and PDF reads;
+    the id is what the analytics segmentation, the obligation filter and the per-department
+    count join on. Kept in step here rather than by making the caller send both, because a
+    caller that sends only one is the situation that produced a permanently NULL column.
+
+    A department typed before the record existed simply leaves the id unset — that is a real
+    state, not an error, and clearing it when no record matches keeps a renamed department
+    from leaving the agreement pointing at the wrong one.
+    """
+    name = (c.department or "").strip()
+    if not name:
+        c.department_id = None
+        return
+    match = db.scalar(
+        select(models.Department).where(
+            models.Department.tenant_id == c.tenant_id,
+            func.lower(models.Department.name) == name.lower(),
+        )
+    )
+    c.department_id = match.id if match else None
 _APPROVE_ROLES = {"owner", "admin", "manager", "approver"}
 
 
@@ -156,6 +181,7 @@ def create_contract(data: schemas.ContractCreateIn, request: Request, db: Sessio
         source=data.source,
         created_by=user.id,
     )
+    _link_department(db, c)
     db.add(c)
     db.flush()
     db.add(models.ContractVersion(tenant_id=user.tenant_id, contract_id=c.id, version_no=1, body=c.body, change_summary="Created", created_by=user.id))
@@ -185,6 +211,8 @@ def update_contract(contract_id: str, data: schemas.ContractUpdateIn, request: R
             setattr(c, field, val)
             if field == "body":
                 body_changed = True
+    if "department" in changes:
+        _link_department(db, c)
     if changes:
         if body_changed:
             last = db.scalar(select(func.max(models.ContractVersion.version_no)).where(models.ContractVersion.contract_id == c.id)) or 0

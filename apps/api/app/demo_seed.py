@@ -207,6 +207,7 @@ def seed_extras(db: Session, tenant_id: str) -> dict[str, int]:
     contracts = list(db.scalars(select(models.Contract).filter_by(tenant_id=tenant_id)).all())
 
     made["departments"] = _seed_departments(db, tenant_id, [owner, manager, approver, author])
+    made["department_links"] = _link_departments(db, tenant_id, contracts)
     made["folders"] = _seed_folders(db, tenant_id, owner)
     made["custom_fields"] = _seed_custom_fields(db, tenant_id, owner)
     made["custom_roles"] = _seed_custom_roles(db, tenant_id, owner)
@@ -242,6 +243,30 @@ def _seed_departments(db: Session, tenant_id: str, leads: list) -> int:
         db.add(models.Department(tenant_id=tenant_id, name=name, cost_centre=cc, region=region,
                                  lead_user_id=leads[i % len(leads)].id, is_active=True))
     return len(_DEPTS)
+
+
+def _link_departments(db: Session, tenant_id: str, contracts: list) -> int:
+    """Point each agreement at the department record whose name it already carries.
+
+    The name is what the seed writes; the id is what the segmentation, the obligation filter
+    and the per-department count join on. Without this the Departments screen reports every
+    department as holding nothing.
+    """
+    # The session runs with autoflush off, so the departments added moments ago are still
+    # pending and this query would return nothing without an explicit flush — leaving every
+    # agreement unlinked and every department reporting zero.
+    db.flush()
+    by_name = {d.name.lower(): d.id for d in db.scalars(
+        select(models.Department).filter_by(tenant_id=tenant_id))}
+    linked = 0
+    for c in contracts:
+        if getattr(c, "department_id", None):
+            continue
+        match = by_name.get((c.department or "").strip().lower())
+        if match:
+            c.department_id = match
+            linked += 1
+    return linked
 
 
 def _seed_folders(db: Session, tenant_id: str, owner) -> int:

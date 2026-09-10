@@ -202,6 +202,17 @@ def remove_relation(contract_id: str, relation_id: str, request: Request,
 # ---------------------------------------------------------------------------------------
 
 
+def _department_out(db: Session, d: models.Department) -> schemas.DepartmentOut:
+    """A department plus its derived fields, so every endpoint returns the same shape."""
+    item = schemas.DepartmentOut.model_validate(d)
+    item.contract_count = db.query(models.Contract).filter_by(
+        tenant_id=d.tenant_id, department_id=d.id).count()
+    if d.lead_user_id:
+        lead = db.get(models.User, d.lead_user_id)
+        item.lead_name = lead.name if lead else ""
+    return item
+
+
 @router.get("/departments", response_model=list[schemas.DepartmentOut])
 def list_departments(db: Session = Depends(get_db),
                      user: models.User = Depends(get_current_user)) -> list[schemas.DepartmentOut]:
@@ -209,16 +220,7 @@ def list_departments(db: Session = Depends(get_db),
         select(models.Department).where(models.Department.tenant_id == user.tenant_id)
         .order_by(models.Department.name.asc())
     ).all()
-    out = []
-    for d in rows:
-        item = schemas.DepartmentOut.model_validate(d)
-        item.contract_count = db.query(models.Contract).filter_by(
-            tenant_id=user.tenant_id, department_id=d.id).count()
-        if d.lead_user_id:
-            lead = db.get(models.User, d.lead_user_id)
-            item.lead_name = lead.name if lead else ""
-        out.append(item)
-    return out
+    return [_department_out(db, d) for d in rows]
 
 
 @router.post("/departments", response_model=schemas.DepartmentOut,
@@ -244,7 +246,7 @@ def create_department(data: schemas.DepartmentIn, request: Request,
            ip=client_ip(request))
     db.commit()
     db.refresh(d)
-    return schemas.DepartmentOut.model_validate(d)
+    return _department_out(db, d)
 
 
 @router.patch("/departments/{did}", response_model=schemas.DepartmentOut)
@@ -264,7 +266,7 @@ def update_department(did: str, data: schemas.DepartmentUpdateIn, request: Reque
            ip=client_ip(request), meta={"fields": list(payload.keys())})
     db.commit()
     db.refresh(d)
-    return schemas.DepartmentOut.model_validate(d)
+    return _department_out(db, d)
 
 
 # ---------------------------------------------------------------------------------------
