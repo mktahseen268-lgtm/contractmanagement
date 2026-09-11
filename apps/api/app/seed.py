@@ -1,4 +1,4 @@
-"""Seeds a demo workspace if the DB is empty. Login: demo@acme.io / demo1234"""
+"""Seeds the demo workspace if the DB is empty. Login: demo@mobilinkbank.com / demo1234"""
 
 import datetime as dt
 import random
@@ -13,10 +13,12 @@ from .audit import record
 # `tenant_isolation` policies are permissive when the `app.cm_tenant` GUC is unset, so
 # inserting the demo data works without it, and we avoid the GUC leaking into request contexts.
 
-DEMO_EMAIL = "demo@acme.io"
+DEMO_EMAIL = "demo@mobilinkbank.com"
 DEMO_PASSWORD = "demo1234"
 
-_PARTIES = ["Acme Corporation", "Globex LLC", "Northstar Industries", "Initech FZE", "Stark Trading Co.", "Wayne Holdings", "Umbrella Services", "Hooli Ltd"]
+_PARTIES = ["Sadiq Traders (Pvt) Ltd", "Karachi Textile Mills Ltd", "Indus Logistics",
+            "Ravi Engineering Works", "Chenab Foods (Pvt) Ltd", "Bolan Distributors",
+            "Margalla Technologies", "Sindh Agri Supplies"]
 _TYPES = ["msa", "nda", "lease", "vendor", "service", "employment"]
 _TYPE_TITLES = {
     "msa": "Master Services Agreement",
@@ -29,7 +31,9 @@ _TYPE_TITLES = {
 _STATUSES = ["draft", "draft", "in_review", "in_review", "approved", "out_for_signature", "signed", "active", "active", "active", "expiring", "expired", "changes_requested"]
 _DEPTS = ["Procurement", "Legal", "Human Resources", "Real Estate & Administration",
           "Operations", "Finance", "Information Technology", "Branchless Banking"]
-_LAWS = ["Islamic Republic of Pakistan", "Islamic Republic of Pakistan", "Islamic Republic of Pakistan", "England & Wales", "United Arab Emirates"]
+#: One jurisdiction: the Bank, its counterparties and the configured default are all
+#: Pakistani. Drawn once per agreement below so the field and the clause agree.
+_LAW = "Islamic Republic of Pakistan"
 _RISKS = ["low", "low", "low", "medium", "medium", "high", "critical"]
 # (title, description, due-offset-in-days-from-today) — negative offsets become 'overdue'.
 _OBLIGATION_TEMPLATES = [
@@ -120,19 +124,20 @@ def seed_if_empty(db: Session) -> bool:
     rng = random.Random(42)
 
     tenant_id = uuid.uuid4().hex
-    tenant = models.Tenant(id=tenant_id, name="Acme Holdings", slug="acme", locale="en", currency="USD", plan="business")
+    tenant = models.Tenant(id=tenant_id, name="Mobilink Microfinance Bank", slug="mmbl",
+                           locale="en", currency="PKR", plan="business")
     db.add(tenant)
     db.flush()
 
     colors = ["#3E7BFA", "#8B7BF5", "#2BC0D4", "#F6B83C", "#F5736B", "#3FBF7F"]
     owner = models.User(tenant_id=tenant.id, email=DEMO_EMAIL, name="Demo Owner", password_hash=security.hash_password(DEMO_PASSWORD), role="owner", department="Legal", avatar_color=colors[0])
-    manager = models.User(tenant_id=tenant.id, email="manager@acme.io", name="Mariam Khan", password_hash=security.hash_password(DEMO_PASSWORD), role="manager", department="Procurement", avatar_color=colors[1])
-    approver = models.User(tenant_id=tenant.id, email="approver@acme.io", name="John Doe", password_hash=security.hash_password(DEMO_PASSWORD), role="approver", department="Finance", avatar_color=colors[2])
-    author = models.User(tenant_id=tenant.id, email="author@acme.io", name="Aisha Smith", password_hash=security.hash_password(DEMO_PASSWORD), role="author", department="Operations", avatar_color=colors[3])
+    manager = models.User(tenant_id=tenant.id, email="manager@mobilinkbank.com", name="Mariam Khan", password_hash=security.hash_password(DEMO_PASSWORD), role="manager", department="Procurement", avatar_color=colors[1])
+    approver = models.User(tenant_id=tenant.id, email="approver@mobilinkbank.com", name="John Doe", password_hash=security.hash_password(DEMO_PASSWORD), role="approver", department="Finance", avatar_color=colors[2])
+    author = models.User(tenant_id=tenant.id, email="author@mobilinkbank.com", name="Aisha Smith", password_hash=security.hash_password(DEMO_PASSWORD), role="author", department="Operations", avatar_color=colors[3])
     # A second Registration Authority officer. The RA refuses to let an officer approve their
     # own certificate request — separation of duties — so a workspace with one officer can
     # never issue that officer a certificate, including the demo login's.
-    admin = models.User(tenant_id=tenant.id, email="admin@acme.io", name="Bilal Farooq", password_hash=security.hash_password(DEMO_PASSWORD), role="admin", department="Information Technology", avatar_color=colors[4])
+    admin = models.User(tenant_id=tenant.id, email="admin@mobilinkbank.com", name="Bilal Farooq", password_hash=security.hash_password(DEMO_PASSWORD), role="admin", department="Information Technology", avatar_color=colors[4])
     db.add_all([owner, manager, approver, author, admin])
     db.flush()
     users = [owner, manager, approver, author, admin]
@@ -170,7 +175,9 @@ def seed_if_empty(db: Session) -> bool:
         creator = rng.choice(users)
         ownr = rng.choice(users)
         title = f"{_TYPE_TITLES[ctype]} — {party}"
-        value = rng.choice([0, 24000, 48000, 96000, 120000, 250000, 480000]) if ctype != "nda" else 0
+        # PKR, so the bands line up with the approval matrix (5m Finance, 25m CFO).
+        value = rng.choice([0, 850_000, 2_400_000, 4_800_000, 9_600_000,
+                            18_000_000, 32_000_000]) if ctype != "nda" else 0
         c = models.Contract(
             tenant_id=tenant.id,
             reference_no=f"C-{start.year}-{i + 1:04d}",
@@ -181,15 +188,15 @@ def seed_if_empty(db: Session) -> bool:
             counterparty=party,
             department=rng.choice(_DEPTS),
             value=value,
-            currency="USD",
+            currency="PKR",
             effective_date=start,
             end_date=end,
             renewal_type=rng.choice(["none", "none", "auto", "manual"]),
-            governing_law=rng.choice(_LAWS),
+            governing_law=_LAW,
             risk_level=rng.choice(_RISKS),
             ai_summary=f"{months}-month {_TYPE_TITLES[ctype].lower()} with {party}. Standard commercial terms. (AI summary — verify before relying.)" if rng.random() < 0.7 else "",
             tags=rng.sample(["renewal", "priority", "gov", "regional", "annual", "key-account"], k=rng.randint(0, 2)),
-            body=f"# {title}\n\nThis Agreement is made between Acme Holdings ('Provider') and {party} ('Client').\n\n## 1. Services\n…\n\n## 2. Term\nThis Agreement runs for {months} months from {start.isoformat()}.\n\n## 3. Fees\n{('USD ' + format(value, ',') ) if value else 'No fees (NDA).'}\n\n## 4. Confidentiality\n…\n\n## 5. Governing Law\nThis Agreement is governed by the laws of {rng.choice(_LAWS)}.\n",
+            body=f"# {title}\n\nThis Agreement is made between Mobilink Microfinance Bank ('the Bank') and {party} ('the Counterparty').\n\n## 1. Services\n…\n\n## 2. Term\nThis Agreement runs for {months} months from {start.isoformat()}.\n\n## 3. Fees\n{('PKR ' + format(value, ',') ) if value else 'No fees (NDA).'}\n\n## 4. Confidentiality\n…\n\n## 5. Governing Law\nThis Agreement is governed by the laws of {_LAW}.\n",
             source=rng.choice(["manual", "manual", "template", "ocr"]),
             created_by=creator.id,
         )
@@ -218,7 +225,7 @@ def seed_if_empty(db: Session) -> bool:
                 db.add(ob)
 
     # a couple of notifications for the demo owner
-    db.add(models.Notification(tenant_id=tenant.id, user_id=owner.id, type="contract.approval_requested", title="Mariam Khan asked for your approval", body="On \"Master Services Agreement — Globex LLC\"", object_type="contract"))
+    db.add(models.Notification(tenant_id=tenant.id, user_id=owner.id, type="contract.approval_requested", title="Mariam Khan asked for your approval", body="On \"Master Services Agreement — Indus Logistics\"", object_type="contract"))
     db.add(models.Notification(tenant_id=tenant.id, user_id=owner.id, type="contract.expiring", title="3 contracts expire within 30 days", body="Review renewals on the dashboard.", object_type="contract"))
 
     # --- clause library + policy -------------------------------------------------------
@@ -359,7 +366,7 @@ _DEMO_TEMPLATES: list[dict] = [
         name="Mutual Non-Disclosure Agreement", contract_type="nda",
         description="Standard mutual NDA for early-stage discussions. 2-year confidentiality term.",
         default_term_months=24, default_renewal_type="none", default_risk_level="low",
-        default_currency="USD", default_governing_law="DIFC", default_tags=["nda", "mutual", "standard"],
+        default_currency="PKR", default_governing_law="Islamic Republic of Pakistan", default_tags=["nda", "mutual", "standard"],
         body=(
             "# Mutual Non-Disclosure Agreement\n\n"
             "This Mutual Non-Disclosure Agreement (the \"Agreement\") is entered into between "
@@ -367,14 +374,14 @@ _DEMO_TEMPLATES: list[dict] = [
             "## 1. Confidential Information\nEach party may disclose confidential business, technical, and financial information to the other.\n\n"
             "## 2. Obligations\nThe receiving party shall hold all Confidential Information in strict confidence and use it solely to evaluate the potential relationship.\n\n"
             "## 3. Term\nThe confidentiality obligations survive for two (2) years from the date of disclosure.\n\n"
-            "## 4. Governing Law\nThis Agreement is governed by the laws of the DIFC."
+            "## 4. Governing Law\nThis Agreement is governed by the laws of the Islamic Republic of Pakistan."
         ),
     ),
     dict(
         name="Master Services Agreement", contract_type="msa",
         description="Enterprise MSA with SOW framework, 12-month term, auto-renewal.",
         default_term_months=12, default_renewal_type="auto", default_risk_level="medium",
-        default_currency="USD", default_governing_law="State of Delaware", default_tags=["msa", "enterprise", "services"],
+        default_currency="PKR", default_governing_law="Islamic Republic of Pakistan", default_tags=["msa", "enterprise", "services"],
         body=(
             "# Master Services Agreement\n\n"
             "This Master Services Agreement is made between **{{counterparty}}** (\"Customer\") and the Company "
@@ -390,7 +397,7 @@ _DEMO_TEMPLATES: list[dict] = [
         name="Vendor / Supplier Agreement", contract_type="vendor",
         description="Procurement template for goods & services suppliers. Net-30 terms.",
         default_term_months=12, default_renewal_type="manual", default_risk_level="medium",
-        default_currency="USD", default_governing_law="State of New York", default_tags=["vendor", "procurement", "supplier"],
+        default_currency="PKR", default_governing_law="Islamic Republic of Pakistan", default_tags=["vendor", "procurement", "supplier"],
         body=(
             "# Vendor Agreement\n\n"
             "This Vendor Agreement is between **{{counterparty}}** (\"Vendor\") and the Company, effective **{{effective_date}}**.\n\n"
@@ -404,7 +411,7 @@ _DEMO_TEMPLATES: list[dict] = [
         name="Employment Offer Letter", contract_type="employment",
         description="Standard full-time employment offer with at-will terms.",
         default_term_months=12, default_renewal_type="none", default_risk_level="low",
-        default_currency="USD", default_governing_law="State of California", default_tags=["employment", "offer", "hr"],
+        default_currency="PKR", default_governing_law="Islamic Republic of Pakistan", default_tags=["employment", "offer", "hr"],
         body=(
             "# Employment Offer Letter\n\n"
             "Dear **{{counterparty}}**,\n\nWe are pleased to offer you employment with the Company, starting **{{effective_date}}**.\n\n"
@@ -418,7 +425,7 @@ _DEMO_TEMPLATES: list[dict] = [
         name="SaaS Subscription Agreement", contract_type="service",
         description="Cloud software subscription with annual term and auto-renewal.",
         default_term_months=12, default_renewal_type="auto", default_risk_level="medium",
-        default_currency="USD", default_governing_law="DIFC", default_tags=["saas", "subscription", "service"],
+        default_currency="PKR", default_governing_law="Islamic Republic of Pakistan", default_tags=["saas", "subscription", "service"],
         body=(
             "# SaaS Subscription Agreement\n\n"
             "This Subscription Agreement is between **{{counterparty}}** (\"Subscriber\") and the Company, effective **{{effective_date}}**.\n\n"
@@ -433,7 +440,7 @@ _DEMO_TEMPLATES: list[dict] = [
         name="Commercial Lease Agreement", contract_type="lease",
         description="Office space lease, 36-month term with manual renewal.",
         default_term_months=36, default_renewal_type="manual", default_risk_level="high",
-        default_currency="USD", default_governing_law="State of Texas", default_tags=["lease", "property", "office"],
+        default_currency="PKR", default_governing_law="Islamic Republic of Pakistan", default_tags=["lease", "property", "office"],
         body=(
             "# Commercial Lease Agreement\n\n"
             "This Lease is between **{{counterparty}}** (\"Tenant\") and the Company (\"Landlord\"), effective **{{effective_date}}**.\n\n"
@@ -441,7 +448,7 @@ _DEMO_TEMPLATES: list[dict] = [
             "## 2. Rent\nTenant shall pay rent totaling **{{value}}** over the term, payable monthly in advance.\n\n"
             "## 3. Term\nThe lease term runs from the Effective Date through **{{end_date}}**.\n\n"
             "## 4. Maintenance\nTenant shall keep the premises in good repair, ordinary wear and tear excepted.\n\n"
-            "## 5. Governing Law\nThis Lease is governed by the laws of the State of Texas."
+            "## 5. Governing Law\nThis Lease is governed by the laws of the Islamic Republic of Pakistan."
         ),
     ),
 ]

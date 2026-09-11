@@ -8,6 +8,7 @@ import { AlertTriangle, BadgeCheck, Check, CheckSquare, Copy, Download, Eye, Fil
 import { api, ApiError } from "@/lib/api";
 import { TextAssist } from "@/components/text-assist";
 import { SelectionActions } from "@/components/selection-actions";
+import { DealPoints, DocumentSections } from "@/components/approval-reading";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Skeleton, Textarea } from "@/components/ui";
 
 const BlockEditor = dynamic(() => import("@/components/block-editor").then((m) => m.BlockEditor), {
@@ -578,15 +579,21 @@ function DocumentTab({ contract, wf, onChanged }: { contract: ContractDetail; wf
       <CardBody>
         {error && <ErrorBanner message={error} className="mb-3" />}
         {!editable && (
-          <p className="mb-3 text-xs text-ink-3">
-            This contract is “{titleCase(contract.status)}” — the document is read-only (merge variables shown resolved). Select any passage, or right-click it, to comment or raise an obligation.
-          </p>
+          <>
+            <DealPoints contract={contract} />
+            <DocumentSections body={contract.body || ""} containerRef={bodyRef} />
+            <p className="mb-4 text-xs text-ink-3">
+              Read-only — “{titleCase(contract.status)}”, with merge variables resolved. Select
+              any passage, or right-click it, to comment or raise an obligation.
+            </p>
+          </>
         )}
         <div ref={bodyRef} className="relative">
           <BlockEditor
             value={editable ? baseline : resolveContractVariables(contract.body || "", contract)}
             editable={editable}
             onChange={editable ? setMd : undefined}
+            className={editable ? undefined : "cm-doc--reading"}
           />
           <SelectionActions contractId={contract.id} containerRef={bodyRef} onSaved={onChanged} />
         </div>

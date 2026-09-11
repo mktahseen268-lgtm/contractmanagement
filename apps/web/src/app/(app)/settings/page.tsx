@@ -8,7 +8,7 @@ import { PageHeader } from "@/components/shell";
 import { SecurityPanel } from "@/components/security-panel";
 import { Avatar, Badge, Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Field, Input, Select, Skeleton } from "@/components/ui";
 import { titleCase } from "@/lib/utils";
-import type { ApiKey, SweepResult, Tenant, User, WebhookEndpoint } from "@/lib/types";
+import type { ApiKey, Department, SweepResult, Tenant, User, WebhookEndpoint } from "@/lib/types";
 
 export default function SettingsPage() {
   const { me, refreshMe } = useAuth();
@@ -19,6 +19,8 @@ export default function SettingsPage() {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("author");
   const [password, setPassword] = useState("demo1234");
+  const [department, setDepartment] = useState("");
+  const [departments, setDepartments] = useState<Department[] | null>(null);
   const [inviting, setInviting] = useState(false);
   const [sweepBusy, setSweepBusy] = useState(false);
   const [sweepResult, setSweepResult] = useState<SweepResult | null>(null);
@@ -27,6 +29,9 @@ export default function SettingsPage() {
 
   function load() {
     api.get<User[]>("/users").then(setUsers).catch(() => setUsers([]));
+    api.get<Department[]>("/departments")
+      .then((d) => setDepartments(d.filter((x) => x.is_active)))
+      .catch(() => setDepartments([]));
   }
   useEffect(load, []);
 
@@ -48,9 +53,10 @@ export default function SettingsPage() {
     setInviting(true);
     setError("");
     try {
-      await api.post<User>("/users", { name: name.trim(), email: email.trim(), role, password });
+      await api.post<User>("/users", { name: name.trim(), email: email.trim(), role, password, department });
       setName("");
       setEmail("");
+      setDepartment("");
       load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't add the user.");
@@ -136,7 +142,7 @@ export default function SettingsPage() {
                 <div className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-ink">
                   <UserPlus className="h-4 w-4" /> Add a user
                 </div>
-                <div className="grid gap-3 sm:grid-cols-4">
+                <div className="grid gap-3 sm:grid-cols-5">
                   <Field label="Name">
                     <Input value={name} onChange={(e) => setName(e.target.value)} required />
                   </Field>
@@ -152,12 +158,28 @@ export default function SettingsPage() {
                       ))}
                     </Select>
                   </Field>
+                  <Field
+                    label="Department"
+                    hint={departments?.length === 0 ? "Add one under Departments first" : "Required"}
+                  >
+                    <Select
+                      value={department}
+                      onChange={(e) => setDepartment(e.target.value)}
+                      required
+                      disabled={departments === null || departments.length === 0}
+                    >
+                      <option value="">{departments === null ? "Loading…" : "Select…"}</option>
+                      {(departments ?? []).map((d) => (
+                        <option key={d.id} value={d.name}>{d.name}</option>
+                      ))}
+                    </Select>
+                  </Field>
                   <Field label="Temp password" hint="≥ 8 chars">
                     <Input value={password} onChange={(e) => setPassword(e.target.value)} minLength={8} required />
                   </Field>
                 </div>
                 <div className="mt-3 flex justify-end">
-                  <Button type="submit" size="sm" loading={inviting}>
+                  <Button type="submit" size="sm" loading={inviting} disabled={!department}>
                     Add user
                   </Button>
                 </div>
@@ -444,7 +466,7 @@ function WebhooksCard() {
           </div>
         )}
         <form onSubmit={create} className="grid gap-2 sm:grid-cols-12">
-          <div className="sm:col-span-5"><Field label="URL"><Input type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://your-app.example/webhook" required /></Field></div>
+          <div className="sm:col-span-5"><Field label="URL"><Input type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://core.mmbl.internal/hooks/contracts" required /></Field></div>
           <div className="sm:col-span-4"><Field label="Description"><Input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="What is this for?" /></Field></div>
           <div className="sm:col-span-3"><Field label="Events" hint="Comma-list, or *"><Input value={events} onChange={(e) => setEvents(e.target.value)} placeholder="contract.signed, contract.expired" /></Field></div>
           <div className="flex items-end justify-end sm:col-span-12"><Button type="submit" size="sm" loading={busy}><Plug className="h-3.5 w-3.5" /> Add endpoint</Button></div>
@@ -541,7 +563,7 @@ function ApiKeysCard() {
           </div>
         )}
         <form onSubmit={create} className="flex flex-wrap items-end gap-2">
-          <div className="flex-1"><Field label="Name" hint="e.g. CI pipeline / Zapier"><Input value={name} onChange={(e) => setName(e.target.value)} required /></Field></div>
+          <div className="flex-1"><Field label="Name" hint="e.g. Core banking, nightly export"><Input value={name} onChange={(e) => setName(e.target.value)} required /></Field></div>
           <Button type="submit" size="sm" loading={busy}><Key className="h-3.5 w-3.5" /> Create key</Button>
         </form>
         {rows === null && <Skeleton className="h-16" />}

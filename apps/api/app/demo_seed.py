@@ -144,20 +144,26 @@ _HOLIDAYS = [
 ]
 
 _SANCTIONS = [
-    dict(source="ofac", list_name="SDN", name="Umbrella Services Holding Co",
-         aliases=["Umbrella Services", "Umbrella Svc Holding"], entity_type="entity",
-         country="Cyprus", programme="CYBER2", reference="OFAC-SDN-41827"),
-    dict(source="ofac", list_name="SDN", name="Initech FZE Trading",
-         aliases=["Initech FZE", "Initech Free Zone"], entity_type="entity",
-         country="United Arab Emirates", programme="IRAN-EO13846", reference="OFAC-SDN-39104"),
+    # Deliberately overlaps a seeded counterparty, so screening has something to find. The
+    # match is on an alias rather than the exact name — which is the case the alias-aware
+    # matcher exists for, and the one a plain equality check would miss.
+    dict(source="ofac", list_name="SDN", name="Bolan Distributors Company",
+         aliases=["Bolan Distributors", "Bolan Distribution Co"], entity_type="entity",
+         country="Pakistan", programme="SDGT", reference="OFAC-SDN-41827"),
+    # A spelling variant of another counterparty: same company, different transliteration.
+    dict(source="eu", list_name="EU Consolidated", name="Margala Technologies Ltd",
+         aliases=["Margalla Technologies", "Margala Tech"], entity_type="entity",
+         country="Pakistan", programme="EU-2022/328", reference="EU-3391"),
+    # Unrelated entries. A list on which every row matches a customer is not a watchlist.
     dict(source="un", list_name="UNSC Consolidated", name="Nadeem Ahmed Qureshi",
          aliases=["N. A. Qureshi", "Nadim Qureshi"], entity_type="individual",
          country="Pakistan", programme="1267/1989", reference="UN-QDi.412"),
-    dict(source="eu", list_name="EU Consolidated", name="Stark Trading Company Limited",
-         aliases=["Stark Trading Co", "Stark Trading Ltd"], entity_type="entity",
-         country="Russian Federation", programme="EU-2022/328", reference="EU-3391"),
-    dict(source="local", list_name="NACTA Proscribed", name="Wayne Holdings Private Limited",
-         aliases=["Wayne Holdings", "Wayne Hldgs Pvt Ltd"], entity_type="entity",
+    dict(source="ofac", list_name="SDN", name="Gulf Crescent Shipping FZE",
+         aliases=["Gulf Crescent", "GC Shipping"], entity_type="entity",
+         country="United Arab Emirates", programme="IRAN-EO13846",
+         reference="OFAC-SDN-39104"),
+    dict(source="local", list_name="NACTA Proscribed", name="Al-Wahid Welfare Trust",
+         aliases=["Al Wahid Trust", "Alwahid Welfare"], entity_type="entity",
          country="Pakistan", programme="ATA-1997 Schedule I", reference="NACTA-0221"),
 ]
 

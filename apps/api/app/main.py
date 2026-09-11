@@ -62,11 +62,12 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         log.exception("Could not prepare object storage")
     if settings.auto_seed:
+        from . import seed
         from .seed import seed_if_empty
 
         with SessionLocal() as db:
             if seed_if_empty(db):
-                log.info("Seeded demo workspace. Login: demo@acme.io / Password: demo1234")
+                log.info("Seeded demo workspace. Login: %s / Password: %s", seed.DEMO_EMAIL, seed.DEMO_PASSWORD)
 
     # Single-tenant profile: resolve (or provision) the one tenant this install serves. Runs
     # after migrations + seed so it can adopt an existing workspace.

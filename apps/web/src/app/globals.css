@@ -98,6 +98,26 @@ body {
 .cm-doc hr { border: none; border-top: 1px solid var(--color-border); margin: 1rem 0; }
 .cm-doc strong { font-weight: 600; }
 .cm-doc a { color: var(--color-accent); text-decoration: underline; }
+/* Reading mode: the document as an approver reads it, not as a drafter edits it.
+   Bigger type, more leading, and a measure capped near 70 characters — a legal paragraph
+   set across a 1400px card is technically legible and practically skimmed, which is the
+   opposite of what a page needs when somebody is deciding whether to sign it. */
+.cm-doc--reading {
+  font-size: 15.5px;
+  line-height: 1.85;
+  max-width: 70ch;
+  margin: 0 auto;
+  color: var(--color-text);
+}
+.cm-doc--reading h1 { font-size: 1.7rem; margin: 1.8rem 0 0.8rem; }
+.cm-doc--reading h2 { font-size: 1.3rem; margin: 1.9rem 0 0.6rem; }
+.cm-doc--reading h3 { font-size: 1.08rem; margin: 1.4rem 0 0.45rem; color: var(--color-text); }
+.cm-doc--reading p { margin: 0 0 1.05rem; }
+.cm-doc--reading li { margin: 0.35rem 0; }
+.cm-doc--reading ul, .cm-doc--reading ol { margin-bottom: 1.05rem; }
+/* Selecting a passage is how a reviewer comments on it, so make the selection obvious. */
+.cm-doc--reading ::selection { background: color-mix(in srgb, var(--color-accent) 22%, transparent); }
+
 .cm-doc p.is-editor-empty:first-child::before { content: attr(data-placeholder); color: var(--color-text-3); float: left; height: 0; pointer-events: none; }
 
 /* simple scrollbars */
