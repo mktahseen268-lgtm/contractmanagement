@@ -158,6 +158,9 @@ class ContractCreateIn(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     type: str = "other"
     counterparty: str = ""
+    #: The client record this is with. The free-text name above stays authoritative for every
+    #: existing report and PDF; this is what the client's own history joins on.
+    party_id: str | None = None
     department: str = ""
     value: float = 0.0
     currency: str = "USD"
@@ -174,6 +177,7 @@ class ContractCreateIn(BaseModel):
 
 
 class ContractUpdateIn(BaseModel):
+    party_id: str | None = None
     title: str | None = None
     type: str | None = None
     counterparty: str | None = None
@@ -213,7 +217,11 @@ class ContractBulkResult(BaseModel):
     skipped: list[ContractBulkSkip]
 
 
-class ContractListItem(BaseModel):
+class _ContractPartyMixin(BaseModel):
+    party_id: str | None = None
+
+
+class ContractListItem(_ContractPartyMixin):
     model_config = ConfigDict(from_attributes=True)
     id: str
     reference_no: str

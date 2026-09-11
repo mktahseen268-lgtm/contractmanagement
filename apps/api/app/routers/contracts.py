@@ -20,6 +20,22 @@ router = APIRouter(prefix="/contracts", tags=["contracts"])
 _EDIT_ROLES = {"owner", "admin", "manager", "author"}
 
 
+def _link_client(db: Session, tenant_id: str, party_id: str | None) -> models.Party | None:
+    """Resolve the chosen client, refusing one from another workspace.
+
+    An id arriving in a request body is caller-controlled, so it is looked up within the
+    tenant rather than trusted — the picker only ever offers this workspace's clients, but
+    the API is not the picker.
+    """
+    if not party_id:
+        return None
+    party = db.get(models.Party, party_id)
+    if party is None or party.tenant_id != tenant_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="That client is not in this workspace.")
+    return party
+
+
 def _link_department(db: Session, c: models.Contract) -> None:
     """Point `department_id` at the record whose name the agreement carries.
 
@@ -181,6 +197,12 @@ def create_contract(data: schemas.ContractCreateIn, request: Request, db: Sessio
         source=data.source,
         created_by=user.id,
     )
+    client = _link_client(db, user.tenant_id, data.party_id)
+    if client is not None:
+        c.party_id = client.id
+        # The record's legal name wins over whatever was typed. That is the whole point of
+        # linking: two spellings of one company stop being two companies.
+        c.counterparty = client.name
     _link_department(db, c)
     db.add(c)
     db.flush()
@@ -211,6 +233,11 @@ def update_contract(contract_id: str, data: schemas.ContractUpdateIn, request: R
             setattr(c, field, val)
             if field == "body":
                 body_changed = True
+    if "party_id" in changes:
+        client = _link_client(db, user.tenant_id, c.party_id)
+        if client is not None:
+            c.counterparty = client.name
+            changes["counterparty"] = client.name
     if "department" in changes:
         _link_department(db, c)
     if changes:

@@ -73,6 +73,8 @@ export interface ContractListItem {
   owner_id: string;
   owner_name: string;
   counterparty: string;
+  /** The client record behind the name, where one has been linked. */
+  party_id: string | null;
   department: string;
   value: number;
   currency: string;

@@ -6,11 +6,13 @@ import { api, ApiError } from "@/lib/api";
 import { CONTRACT_TYPES } from "@/lib/utils";
 import { Button, Card, CardBody, ErrorBanner, Field, Input, Select } from "@/components/ui";
 import type { ContractDetail, Department } from "@/lib/types";
+import { ClientPicker } from "@/components/client-picker";
 
 export interface ContractFormValues {
   title: string;
   type: string;
   counterparty: string;
+  party_id: string | null;
   department: string;
   value: string;
   currency: string;
@@ -25,6 +27,7 @@ function emptyValues(currency = "USD"): ContractFormValues {
     title: "",
     type: "msa",
     counterparty: "",
+    party_id: null,
     department: "",
     value: "",
     currency,
@@ -40,6 +43,7 @@ export function fromContract(c: ContractDetail): ContractFormValues {
     title: c.title,
     type: c.type,
     counterparty: c.counterparty,
+    party_id: c.party_id ?? null,
     department: c.department,
     value: c.value ? String(c.value) : "",
     currency: c.currency,
@@ -55,6 +59,7 @@ function toPayload(v: ContractFormValues) {
     title: v.title.trim(),
     type: v.type,
     counterparty: v.counterparty.trim(),
+    party_id: v.party_id,
     department: v.department.trim(),
     value: v.value ? Number(v.value) : 0,
     currency: v.currency,
@@ -158,8 +163,17 @@ export function ContractForm({
               </Select>
             </Field>
           </div>
-          <Field label="Counterparty">
-            <Input value={v.counterparty} onChange={(e) => set("counterparty", e.target.value)} placeholder="Acme Corporation" />
+          <Field
+            label="Client"
+            hint="Search the client register, or register a new one without leaving this form"
+          >
+            <ClientPicker
+              value={v.counterparty}
+              partyId={v.party_id}
+              onPick={(name, id) =>
+                setV((s) => ({ ...s, counterparty: name, party_id: id }))
+              }
+            />
           </Field>
           <div className="grid gap-4 sm:grid-cols-3">
             <Field label="Value">
