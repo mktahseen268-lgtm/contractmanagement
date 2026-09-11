@@ -253,7 +253,7 @@ def text_assist_config(user: models.User = Depends(get_current_user)) -> schemas
     return schemas.TextAssistConfigOut(
         enabled=provider.available,
         provider=provider.name,
-        modes=list(text_assist.MODES),
+        modes=list(provider.modes),
         max_chars=settings.text_assist_max_chars,
     )
 

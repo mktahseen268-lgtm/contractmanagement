@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { AlertTriangle, BadgeCheck, Check, CheckSquare, Copy, Download, Eye, FileCheck2, FileDown, FileText, History, ListTodo, Pencil, PenLine, Plus, Repeat, RotateCcw, Send, Shield, Sparkles, Trash2, Workflow as WorkflowIcon, X } from "lucide-react";
+import { AlertTriangle, BadgeCheck, Check, CheckSquare, MessageSquare, Maximize2, Minimize2, Copy, Download, Eye, FileCheck2, FileDown, FileText, History, ListTodo, Pencil, PenLine, Plus, Repeat, RotateCcw, Send, Shield, Sparkles, Trash2, Workflow as WorkflowIcon, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { TextAssist } from "@/components/text-assist";
 import { SelectionActions } from "@/components/selection-actions";
@@ -540,7 +540,26 @@ function DocumentTab({ contract, wf, onChanged }: { contract: ContractDetail; wf
   const [error, setError] = useState("");
   const [savedNote, setSavedNote] = useState("");
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  const [full, setFull] = useState(false);
   const dirty = md !== baseline;
+
+  // Escape leaves full screen, and the page behind must not scroll while it is open.
+  useEffect(() => {
+    if (!full) return;
+    function onKey(e: KeyboardEvent) {
+      // Only when nothing is being typed into: Escape also dismisses the comment panel, and
+      // the panel should close first rather than the whole view vanishing under the author.
+      const tag = (document.activeElement?.tagName || "").toLowerCase();
+      if (e.key === "Escape" && tag !== "textarea" && tag !== "input") setFull(false);
+    }
+    document.addEventListener("keydown", onKey);
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previous;
+    };
+  }, [full]);
 
   async function save() {
     setSaving(true);
@@ -557,6 +576,66 @@ function DocumentTab({ contract, wf, onChanged }: { contract: ContractDetail; wf
     }
   }
 
+  // One definition of the reading surface, rendered into the card or into the overlay. A
+  // full-screen view missing the comment markers would be the one people used and the one that
+  // could not capture what they found.
+  const readingSurface = (
+    <>
+      {error && <ErrorBanner message={error} className="mb-3" />}
+      {!editable && (
+        <>
+          <DealPoints contract={contract} />
+          <DocumentSections body={contract.body || ""} containerRef={bodyRef} />
+          <p className="mb-4 flex flex-wrap items-center gap-1.5 text-xs text-ink-3">
+            <MessageSquare className="h-3.5 w-3.5" />
+            Use the icon beside any section — or select a passage and right-click — to comment
+            or raise an obligation. The section and wording are recorded with it.
+            <span className="text-ink-3">· Read-only while “{titleCase(contract.status)}”.</span>
+          </p>
+        </>
+      )}
+      <div ref={bodyRef} className="relative">
+        <BlockEditor
+          value={editable ? baseline : resolveContractVariables(contract.body || "", contract)}
+          editable={editable}
+          onChange={editable ? setMd : undefined}
+          className={editable ? undefined : "cm-doc--reading"}
+        />
+        <SelectionActions contractId={contract.id} containerRef={bodyRef} onSaved={onChanged} />
+      </div>
+      {editable && (
+        <details className="mt-4 text-xs text-ink-3">
+          <summary className="cursor-pointer select-none">Markdown source · merge variables look like <code>{"{{counterparty}}"}</code> and resolve in the PDF / read-only view</summary>
+          <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-surface-2 p-3 font-mono text-[11px] text-ink-2">{md || "(empty)"}</pre>
+        </details>
+      )}
+    </>
+  );
+
+  if (full) {
+    return (
+      <div className="fixed inset-0 z-40 flex flex-col bg-surface">
+        <div className="flex items-center gap-3 border-b border-line px-5 py-2.5">
+          <FileText className="h-4 w-4 text-ink-3" />
+          <span className="truncate text-sm font-medium text-ink">{contract.title}</span>
+          <span className="hidden text-xs text-ink-3 sm:inline">{contract.reference_no}</span>
+          <div className="ml-auto flex items-center gap-2">
+            <span className="hidden text-xs text-ink-3 sm:inline">Esc to exit</span>
+            <Button size="sm" variant="ghost" onClick={() => setFull(false)}>
+              <Minimize2 className="h-3.5 w-3.5" /> Exit full screen
+            </Button>
+          </div>
+        </div>
+        {/* The document scrolls; the decision panel below stays put, so a reviewer who has
+            finished reading does not have to scroll back to act. */}
+        <div className="flex-1 overflow-y-auto px-6 py-5">{readingSurface}</div>
+        <div className="max-h-[45vh] overflow-y-auto border-t border-line">
+          <ReviewPanel contract={contract} wf={wf} onChanged={onChanged} />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <Card>
       {editable && (
@@ -567,6 +646,9 @@ function DocumentTab({ contract, wf, onChanged }: { contract: ContractDetail; wf
           </CardTitle>
           <div className="flex items-center gap-2">
             {savedNote && !dirty && <span className="text-xs text-ok">{savedNote}</span>}
+            <Button size="sm" variant="ghost" onClick={() => setFull(true)}>
+              <Maximize2 className="h-3.5 w-3.5" /> Full screen
+            </Button>
             <Button size="sm" variant="ghost" onClick={() => setMd(baseline)} disabled={!dirty || saving}>
               Discard
             </Button>
@@ -576,34 +658,15 @@ function DocumentTab({ contract, wf, onChanged }: { contract: ContractDetail; wf
           </div>
         </CardHeader>
       )}
-      <CardBody>
-        {error && <ErrorBanner message={error} className="mb-3" />}
-        {!editable && (
-          <>
-            <DealPoints contract={contract} />
-            <DocumentSections body={contract.body || ""} containerRef={bodyRef} />
-            <p className="mb-4 text-xs text-ink-3">
-              Read-only — “{titleCase(contract.status)}”, with merge variables resolved. Select
-              any passage, or right-click it, to comment or raise an obligation.
-            </p>
-          </>
-        )}
-        <div ref={bodyRef} className="relative">
-          <BlockEditor
-            value={editable ? baseline : resolveContractVariables(contract.body || "", contract)}
-            editable={editable}
-            onChange={editable ? setMd : undefined}
-            className={editable ? undefined : "cm-doc--reading"}
-          />
-          <SelectionActions contractId={contract.id} containerRef={bodyRef} onSaved={onChanged} />
+      {/* Read-only has no card header of its own, so the control sits above the document. */}
+      {!editable && (
+        <div className="flex items-center justify-end border-b border-line px-5 py-2">
+          <Button size="sm" variant="ghost" onClick={() => setFull(true)}>
+            <Maximize2 className="h-3.5 w-3.5" /> Read full screen
+          </Button>
         </div>
-        {editable && (
-          <details className="mt-4 text-xs text-ink-3">
-            <summary className="cursor-pointer select-none">Markdown source · merge variables look like <code>{"{{counterparty}}"}</code> and resolve in the PDF / read-only view</summary>
-            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-surface-2 p-3 font-mono text-[11px] text-ink-2">{md || "(empty)"}</pre>
-          </details>
-        )}
-      </CardBody>
+      )}
+      <CardBody>{readingSurface}</CardBody>
       <ReviewPanel contract={contract} wf={wf} onChanged={onChanged} />
     </Card>
   );

@@ -28,12 +28,14 @@ interface AssistConfig {
 interface AssistResult {
   text: string;
   changed: boolean;
+  /** What was corrected, in words — the half of this feature that teaches. */
+  notes: string[];
   provider: string;
   error: string;
 }
 
 const LABELS: Record<string, string> = {
-  correct: "Fix spelling & grammar",
+  correct: "Check spelling & grammar",
   formal: "Make it formal",
   shorten: "Make it concise",
   plain: "Plain language",
@@ -87,7 +89,6 @@ export function TextAssist({
       const r = await api.post<AssistResult>("/ai/assist", { text: value, mode });
       if (!alive.current) return;
       if (r.error) setNote(r.error);
-      else if (!r.changed) setNote("No changes suggested — it already reads correctly.");
       else setResult(r);
     } catch {
       if (alive.current) setNote("The writing assistant is unavailable.");
@@ -125,23 +126,38 @@ export function TextAssist({
 
       {result && (
         <div className="mt-2 rounded-md border border-line bg-surface-2 p-3">
-          <div className="mb-1.5 text-xs font-medium text-ink-2">Suggested</div>
+          {result.notes.length > 0 && (
+            <ul className="mb-2 space-y-0.5 border-b border-line pb-2">
+              {result.notes.map((n, i) => (
+                <li key={i} className="text-xs text-ink-2">
+                  · {n}
+                </li>
+              ))}
+            </ul>
+          )}
+          {result.changed && (
+            <div className="mb-1.5 text-xs font-medium text-ink-2">Suggested</div>
+          )}
           {/* The suggestion is shown in full, not as a diff. A reviewer accepting wording into a
               legal document should read the wording, not a summary of what moved. */}
-          <p className="whitespace-pre-wrap text-sm text-ink">{result.text}</p>
+          {result.changed && (
+            <p className="whitespace-pre-wrap text-sm text-ink">{result.text}</p>
+          )}
           <div className="mt-2 flex items-center gap-2">
-            <Button
-              size="sm"
-              onClick={() => {
-                onAccept(result.text);
-                setResult(null);
-                setNote("Applied.");
-              }}
-            >
-              <Check className="h-3.5 w-3.5" /> Use this
-            </Button>
+            {result.changed && (
+              <Button
+                size="sm"
+                onClick={() => {
+                  onAccept(result.text);
+                  setResult(null);
+                  setNote("Applied.");
+                }}
+              >
+                <Check className="h-3.5 w-3.5" /> Use this
+              </Button>
+            )}
             <Button size="sm" variant="ghost" onClick={() => setResult(null)}>
-              <X className="h-3.5 w-3.5" /> Discard
+              <X className="h-3.5 w-3.5" /> {result.changed ? "Discard" : "Close"}
             </Button>
           </div>
         </div>

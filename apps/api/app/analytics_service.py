@@ -276,8 +276,17 @@ def reviewer_workload(db: Session, tenant_id: str) -> list[dict]:
         lambda: {"open": 0, "overdue": 0, "decided": 0, "hours": []})
 
     for step in steps:
-        key = step.decided_by or (step.assignee_value if step.assignee_kind == "user" else "")
-        if not key:
+        # A decided step belongs to whoever decided it. An open one belongs to the person it
+        # was assigned to — or, where it was routed to a role, to that role's queue. Dropping
+        # role-routed steps left this blank on any workspace that routes by role, which is
+        # most of them.
+        if step.decided_by:
+            key = step.decided_by
+        elif step.assignee_kind == "user" and step.assignee_value:
+            key = step.assignee_value
+        elif step.assignee_value:
+            key = f"role:{step.assignee_value}"
+        else:
             continue
         entry = stats[key]
         if step.status == "active":
@@ -290,13 +299,23 @@ def reviewer_workload(db: Session, tenant_id: str) -> list[dict]:
                 entry["hours"].append(
                     max(0.0, (step.decided_at - step.activated_at).total_seconds() / 3600))
 
-    out = [{
-        "user_id": key,
-        "name": users[key].name if key in users else "(unknown)",
-        "role": users[key].role if key in users else "",
-        "open": value["open"], "overdue": value["overdue"], "decided": value["decided"],
-        "mean_hours": _mean(value["hours"]),
-    } for key, value in stats.items()]
+    out = []
+    for key, value in stats.items():
+        if key.startswith("role:"):
+            # Named as a queue, not as a person: nobody has picked these up yet, and showing
+            # them against an individual would invent an assignment the workflow never made.
+            role = key[5:]
+            out.append({"user_id": "", "name": f"{role.title()} queue", "role": role,
+                        "open": value["open"], "overdue": value["overdue"],
+                        "decided": value["decided"], "mean_hours": _mean(value["hours"])})
+            continue
+        out.append({
+            "user_id": key,
+            "name": users[key].name if key in users else "(unknown)",
+            "role": users[key].role if key in users else "",
+            "open": value["open"], "overdue": value["overdue"], "decided": value["decided"],
+            "mean_hours": _mean(value["hours"]),
+        })
     out.sort(key=lambda r: (-r["open"], -r["overdue"], r["name"]))
     return out
 

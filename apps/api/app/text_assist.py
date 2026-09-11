@@ -1,45 +1,47 @@
-"""Writing assistance for any text the product collects, served by a model inside the network.
+"""Writing assistance for any text the product collects.
 
 Contract text, review notes, clause wording and obligation descriptions are all written by hand
-under time pressure, and a typo in a clause is not a cosmetic problem — it is the thing the
-counterparty's lawyer reads. This is the seam that offers a corrected version.
+under time pressure, and a typo in a clause is not cosmetic — it is the thing the counterparty's
+lawyer reads.
 
-**Why there is no hosted option here.** Every other AI seam in this codebase ships a cloud
-adapter beside the local one. This one does not, and the omission is deliberate: assistance
-fires on the text as it is being typed, which means the *draft body of an agreement* would be
-the payload. Sending that to a service outside Pakistan would contradict the data-residency
-commitment the deployment is built around — a commitment the application enforces at boot by
-refusing to start when a configured endpoint resolves outside the allowlist. A provider that
-can only ever be wrong is better left unwritten than written and disabled.
+Three providers, in increasing order of capability:
 
-So there are two providers:
+* `BuiltinTextAssist` — **the default, and it needs nothing installed.** Deterministic spelling
+  and sentence checks: a curated misspelling list weighted towards the words this domain
+  actually gets wrong, doubled words, spacing and punctuation slips, and a warning on sentences
+  long enough to lose a reader. It reports *what* it changed, so it teaches rather than silently
+  rewriting.
+* `LocalTextAssist` — an OpenAI-compatible model on MMBL's own hardware (vLLM, Ollama, or
+  anything speaking `/chat/completions`). Adds rephrasing: formal register, concision, plain
+  language. Set `TEXT_ASSIST_PROVIDER=local` and `TEXT_ASSIST_BASE_URL`.
+* `DisabledTextAssist` — explicit opt-out via `TEXT_ASSIST_PROVIDER=none`.
 
-* `DisabledTextAssist` — the default. Returns the text untouched and says so. Nothing in the
-  product depends on assistance being available, and with no model configured the affordance
-  simply does not appear.
-* `LocalTextAssist` — an OpenAI-compatible endpoint on MMBL's own hardware (vLLM, Ollama, or
-  anything else speaking `/chat/completions`). Set `TEXT_ASSIST_PROVIDER=local` and
-  `TEXT_ASSIST_BASE_URL`.
+**Why there is no hosted option.** Every other AI seam here ships a cloud adapter beside the
+local one. This one does not, deliberately: assistance fires on text as it is being typed, so
+the payload is the *draft body of an agreement*. Sending that outside Pakistan would contradict
+the data-residency commitment the deployment is built around — one the application enforces at
+boot by refusing to start when a configured endpoint resolves outside the allowlist.
 
-The provider is asked to return the corrected text and nothing else. It is never asked to
-decide anything: the result is shown beside the original for a human to accept or reject, and
-an unaccepted suggestion changes nothing. That is what keeps this an assistant rather than an
-unreviewed edit to a legal document.
+Nothing here decides anything. The result is shown beside the original for a human to accept or
+reject, and an unaccepted suggestion changes nothing.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from abc import ABC, abstractmethod
 
 from .config import settings
 
 log = logging.getLogger("cm.text_assist")
 
-#: What the assistant may be asked to do. Each maps to an instruction below; anything else is
-#: refused rather than passed through, so a caller cannot smuggle a free-text prompt to the
-#: model through a field that looks like an enum.
+#: Everything a provider may be asked to do. A closed set, so a caller cannot smuggle a
+#: free-text prompt to a model through a field that looks like a dropdown.
 MODES = ("correct", "formal", "shorten", "plain")
+
+#: What the built-in checker can do on its own. Rephrasing needs a model.
+BUILTIN_MODES = ("correct",)
 
 _INSTRUCTIONS = {
     "correct": (
@@ -69,46 +71,191 @@ _SYSTEM = (
     "around it, no markdown fence. Never invent a fact that is not in the input."
 )
 
+#: Misspellings worth correcting, weighted towards this domain. Deliberately a curated list
+#: rather than a dictionary: a general speller flags every party name, defined term and
+#: abbreviation in an agreement, and a checker that cries wolf on "Mobilink" gets switched off.
+#: Keys are lower-case; the replacement's capitalisation is matched to the original.
+_MISSPELLINGS = {
+    # General business prose
+    "recieve": "receive", "recieved": "received", "seperate": "separate",
+    "seperately": "separately", "occured": "occurred", "occuring": "occurring",
+    "accomodate": "accommodate", "acknowledgment": "acknowledgement",
+    "agreeement": "agreement", "aggreement": "agreement", "agreemnt": "agreement",
+    "cancelation": "cancellation", "commited": "committed", "comitted": "committed",
+    "definately": "definitely", "occassion": "occasion", "priviledge": "privilege",
+    "reccomend": "recommend", "recomend": "recommend", "refered": "referred",
+    "relevent": "relevant", "responsability": "responsibility", "succesful": "successful",
+    "sucessful": "successful", "untill": "until", "wich": "which", "teh": "the",
+    "adn": "and", "thier": "their", "recipt": "receipt", "buisness": "business",
+    "goverment": "government", "enviroment": "environment", "maintainance": "maintenance",
+    "maintenence": "maintenance", "neccessary": "necessary", "necesary": "necessary",
+    "paymnet": "payment", "paymetn": "payment", "invoicce": "invoice",
+    # Contract and banking vocabulary
+    "indemnitee": "indemnitee", "indeminty": "indemnity", "indemnify": "indemnify",
+    "indeminfy": "indemnify", "liabilty": "liability", "liablity": "liability",
+    "confidentiallity": "confidentiality", "confidentialty": "confidentiality",
+    "juridiction": "jurisdiction", "jurisdication": "jurisdiction",
+    "termintation": "termination", "terminaton": "termination",
+    "warrenty": "warranty", "warrranty": "warranty", "breech": "breach",
+    "clauses": "clauses", "clasue": "clause", "cluase": "clause",
+    "signatary": "signatory", "signitory": "signatory", "counterpary": "counterparty",
+    "counterparyt": "counterparty", "amendmend": "amendment", "ammendment": "amendment",
+    "renewel": "renewal", "renewl": "renewal", "obligaton": "obligation",
+    "obligatoin": "obligation", "complaince": "compliance", "complience": "compliance",
+    "regulatary": "regulatory", "regualtory": "regulatory", "colateral": "collateral",
+    "disbursment": "disbursement", "remitance": "remittance", "guarentee": "guarantee",
+    "gaurantee": "guarantee", "morgage": "mortgage", "finacial": "financial",
+    "finiancial": "financial", "instalment": "instalment", "settlment": "settlement",
+}
+
+#: A sentence past this many words is usually two sentences. Flagged, never split
+#: automatically: splitting a clause changes what it means.
+_LONG_SENTENCE_WORDS = 45
+
 
 class TextAssistError(ValueError):
-    """Raised for a bad request — an unknown mode, or text past the configured limit."""
+    """A bad request — an unknown mode, empty text, or past the configured limit."""
 
 
 class TextAssistProvider(ABC):
     name = "none"
     available = False
+    modes: tuple[str, ...] = ()
 
     @abstractmethod
     def assist(self, text: str, mode: str) -> dict:
-        """Return `{"text": str, "changed": bool, "provider": str, "error": str}`.
+        """Return `{"text", "changed", "notes", "provider", "error"}`.
 
         Never raises for a transport failure. A writing aid that takes the page down when the
         model is unreachable is worse than no writing aid, so failures come back as `error`
-        with the original text intact and the caller shows the text unchanged.
+        with the original text intact.
         """
 
 
 class DisabledTextAssist(TextAssistProvider):
-    """The default. No model configured, so nothing is offered."""
+    """Explicitly switched off for this deployment."""
 
     name = "disabled"
     available = False
 
     def assist(self, text: str, mode: str) -> dict:
-        return {"text": text, "changed": False, "provider": self.name,
-                "error": "No writing assistant is configured for this deployment."}
+        return {"text": text, "changed": False, "notes": [], "provider": self.name,
+                "error": "The writing assistant is switched off for this deployment."}
+
+
+def _match_case(original: str, replacement: str) -> str:
+    """Keep the author's capitalisation: Teh -> The, TEH -> THE."""
+    if original.isupper():
+        return replacement.upper()
+    if original[:1].isupper():
+        return replacement[:1].upper() + replacement[1:]
+    return replacement
+
+
+class BuiltinTextAssist(TextAssistProvider):
+    """Spelling and sentence checks with no model and no network.
+
+    Every rule here is deterministic and reversible, because the author sees the result before
+    it is applied and has to be able to tell at a glance what happened to their words. Nothing
+    in this class rephrases: the moment a checker starts rewriting sentences it needs judgement,
+    and judgement without a model is guesswork on a legal document.
+    """
+
+    name = "builtin"
+    available = True
+    modes = BUILTIN_MODES
+
+    def assist(self, text: str, mode: str) -> dict:
+        if mode not in self.modes:
+            return {
+                "text": text, "changed": False, "notes": [], "provider": self.name,
+                "error": ("Rephrasing needs a language model. Spelling and punctuation "
+                          "checking works without one."),
+            }
+
+        out = text
+        notes: list[str] = []
+
+        # --- spelling -------------------------------------------------------------------
+        fixed: list[str] = []
+
+        def spell(m: re.Match) -> str:
+            word = m.group(0)
+            replacement = _MISSPELLINGS.get(word.lower())
+            if not replacement or replacement.lower() == word.lower():
+                return word
+            fixed.append(f"{word} → {_match_case(word, replacement)}")
+            return _match_case(word, replacement)
+
+        out = re.sub(r"\b[A-Za-z]+\b", spell, out)
+        if fixed:
+            notes.append("Spelling: " + ", ".join(sorted(set(fixed))[:8]))
+
+        # --- doubled words --------------------------------------------------------------
+        doubled: list[str] = []
+
+        def dedupe(m: re.Match) -> str:
+            doubled.append(m.group(1))
+            return m.group(1)
+
+        # Only across a plain space, so "had had" spanning a line break is left alone.
+        out, n = re.subn(r"\b(\w+)( +)\1\b", dedupe, out, flags=re.IGNORECASE)
+        if n:
+            notes.append(f"Removed a repeated word: {', '.join(sorted(set(doubled))[:5])}")
+
+        # --- spacing and punctuation ------------------------------------------------------
+        before = out
+        # A space before a comma or full stop, and a missing one after.
+        out = re.sub(r"\s+([,.;:!?])", r"\1", out)
+        out = re.sub(r"([,;:])(?=[A-Za-z])", r"\1 ", out)
+        # A full stop followed immediately by a letter, but not inside a decimal or an
+        # abbreviation like "e.g." — those are single letters either side.
+        out = re.sub(r"(?<=[a-z]{2})\.(?=[A-Z])", ". ", out)
+        # Runs of spaces, but never leading indentation, which may be deliberate in a clause.
+        out = re.sub(r"(?<=\S)  +", " ", out)
+        if out != before:
+            notes.append("Tidied spacing around punctuation.")
+
+        # --- sentence starts ----------------------------------------------------------------
+        before = out
+        out = re.sub(r"(^|[.!?]\s+)([a-z])",
+                     lambda m: m.group(1) + m.group(2).upper(), out)
+        if out != before:
+            notes.append("Capitalised the start of a sentence.")
+
+        # --- guidance, not edits -------------------------------------------------------------
+        # Reported rather than applied: splitting a clause changes what it means, and adding a
+        # full stop to an unfinished sentence guesses where the author was going.
+        for sentence in re.split(r"(?<=[.!?])\s+", out):
+            words = len(sentence.split())
+            if words > _LONG_SENTENCE_WORDS:
+                notes.append(
+                    f"One sentence runs to {words} words — consider splitting it: "
+                    f"“{sentence.strip()[:60]}…”"
+                )
+                break
+
+        stripped = out.strip()
+        if stripped and stripped[-1] not in ".!?:;" and len(stripped.split()) > 3:
+            notes.append("The text does not end in a full stop.")
+
+        if not notes:
+            notes.append("No spelling or punctuation problems found.")
+
+        return {"text": out, "changed": out != text, "notes": notes,
+                "provider": self.name, "error": ""}
 
 
 class LocalTextAssist(TextAssistProvider):
     """An OpenAI-compatible model hosted inside the deployment's own network.
 
     `urllib` rather than an SDK, matching the local OCR provider: the wire format is three JSON
-    fields, and a dependency whose main contribution is a `base_url` parameter is a dependency
-    to patch.
+    fields, and a dependency whose main contribution is a `base_url` parameter is one to patch.
     """
 
     name = "local"
     available = True
+    modes = MODES
 
     def __init__(self, base_url: str, model: str, api_key: str = "", timeout: int = 30):
         self.base_url = base_url.rstrip("/")
@@ -123,12 +270,11 @@ class LocalTextAssist(TextAssistProvider):
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system",
-                 "content": _SYSTEM.format(instruction=_INSTRUCTIONS[mode])},
+                {"role": "system", "content": _SYSTEM.format(instruction=_INSTRUCTIONS[mode])},
                 {"role": "user", "content": text},
             ],
-            # Zero temperature: the same sentence should correct the same way every time. A
-            # writing aid that gives a different answer on a second press is one nobody trusts.
+            # Zero temperature: the same sentence should correct the same way every time. An
+            # aid that gives a different answer on a second press is one nobody trusts.
             "temperature": 0,
         }
         headers = {"Content-Type": "application/json"}
@@ -146,29 +292,35 @@ class LocalTextAssist(TextAssistProvider):
             out = body["choices"][0]["message"]["content"]
         except Exception as e:  # noqa: BLE001 — every transport failure is the same here
             log.warning("local text assistant failed: %s", e)
-            return {"text": text, "changed": False, "provider": self.name,
+            # Fall back to the deterministic checks rather than leaving the author with
+            # nothing: an unreachable model should cost the rephrasing, not the spellcheck.
+            if mode == "correct":
+                result = BuiltinTextAssist().assist(text, mode)
+                result["notes"].append("The language model was unreachable; "
+                                       "checked with the built-in rules instead.")
+                return result
+            return {"text": text, "changed": False, "notes": [], "provider": self.name,
                     "error": "The writing assistant is unavailable."}
 
         out = _unwrap(out)
         if not out:
-            return {"text": text, "changed": False, "provider": self.name,
+            return {"text": text, "changed": False, "notes": [], "provider": self.name,
                     "error": "The assistant returned nothing usable."}
-        return {"text": out, "changed": out != text, "provider": self.name, "error": ""}
+        return {"text": out, "changed": out != text, "notes": [], "provider": self.name,
+                "error": ""}
 
 
 def _unwrap(raw: str) -> str:
     """Strip the wrapping a chat model adds even when told not to.
 
     Models fence their output and open with "Here is the corrected text:" regardless of the
-    instruction. Pasting that into a clause is worse than offering no suggestion, so it is
-    removed here rather than trusted not to appear.
+    instruction. Pasting that into a clause is worse than offering no suggestion.
     """
     out = (raw or "").strip()
     if out.startswith("```"):
         parts = out.split("```")
         if len(parts) >= 2:
             out = parts[1]
-            # A fence may carry a language tag on its first line.
             if "\n" in out and " " not in out.split("\n", 1)[0]:
                 out = out.split("\n", 1)[1]
         out = out.strip()
@@ -180,7 +332,7 @@ def _unwrap(raw: str) -> str:
 
 
 def get_provider() -> TextAssistProvider:
-    """The configured provider. `local` needs a base URL; anything short of that is disabled."""
+    """The configured provider. `local` needs a base URL; `none` switches the feature off."""
     if settings.text_assist_provider == "local" and settings.text_assist_base_url:
         return LocalTextAssist(
             settings.text_assist_base_url,
@@ -188,15 +340,17 @@ def get_provider() -> TextAssistProvider:
             settings.text_assist_api_key,
             settings.text_assist_timeout_seconds,
         )
-    return DisabledTextAssist()
+    if settings.text_assist_provider == "none":
+        return DisabledTextAssist()
+    return BuiltinTextAssist()
 
 
 def assist(text: str, mode: str) -> dict:
     """Validate the request, then hand it to the configured provider.
 
-    The length cap is a real limit, not politeness: assistance is an interactive action, and a
-    whole agreement body pushed through a model on a keystroke is a request that will time out
-    on the user and occupy the worker while it does.
+    The length cap is a real limit, not politeness: assistance is interactive, and a whole
+    agreement body pushed through a model on a keystroke is a request that will time out on the
+    user and occupy the worker while it does.
     """
     if mode not in MODES:
         raise TextAssistError(f"Unknown mode {mode!r}. Expected one of: {', '.join(MODES)}.")

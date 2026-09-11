@@ -108,6 +108,8 @@ class TextAssistIn(BaseModel):
 class TextAssistOut(BaseModel):
     text: str
     changed: bool
+    #: What was corrected, in words. The point is to teach, not to silently rewrite.
+    notes: list[str] = []
     provider: str
     error: str = ""
 

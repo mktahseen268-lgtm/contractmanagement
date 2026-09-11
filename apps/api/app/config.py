@@ -345,7 +345,10 @@ class Settings(BaseSettings):
     # --- Writing assistant (text correction). Off unless a model is reachable inside the
     # --- deployment. There is deliberately no hosted option: assistance runs over draft
     # --- contract text, so a foreign endpoint would contradict the residency commitment.
-    text_assist_provider: Literal["off", "local"] = "off"
+    #: builtin = deterministic spelling and punctuation checks, no model required (the
+    #: default). local = an OpenAI-compatible model inside your network, which adds
+    #: rephrasing. none = switch the feature off entirely.
+    text_assist_provider: Literal["builtin", "local", "none"] = "builtin"
     #: An OpenAI-compatible base URL on the bank's own hardware, e.g. http://llm.internal/v1
     text_assist_base_url: str = ""
     text_assist_model: str = ""

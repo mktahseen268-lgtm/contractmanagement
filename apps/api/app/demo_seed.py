@@ -644,7 +644,9 @@ def _seed_workflow_runs(db: Session, tenant_id: str, contracts: list, owner, man
                     with db.begin_nested():
                         workflow_service.decide(
                             db, run=run, step=step, contract=c, user=manager,
-                            decision="approved",
+                            # "approve", not "approved" — the engine rejects anything else and
+                            # the surrounding except would swallow it without a trace.
+                            decision="approve",
                             comment="Reviewed — commercial terms acceptable.")
                 except Exception:
                     pass
