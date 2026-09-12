@@ -558,3 +558,30 @@ _DEMO_PLAYBOOKS: list[dict] = [
         ],
     ),
 ]
+
+
+def main() -> None:
+    """Seed a database directly: `python -m app.seed`.
+
+    The seed otherwise only runs when the API boots with `AUTO_SEED=true`, which is fine for a
+    dev container and awkward for anything else — filling a Postgres database meant starting a
+    web server you did not want. This runs the same code against whatever `DATABASE_URL` points
+    at, and is the command to use when setting up a demo or a UAT environment.
+
+    Refuses a database that already has a workspace rather than adding a second one. Topping up
+    an existing workspace is `python -m app.demo_seed`, which is gap-fill and says what it did.
+    """
+    from .database import SessionLocal
+
+    with SessionLocal() as db:
+        created = seed_if_empty(db)
+
+    if created:
+        print(f"Seeded the demo workspace. Login: {DEMO_EMAIL} / {DEMO_PASSWORD}")
+    else:
+        print("This database already has a workspace — nothing was seeded.")
+        print("To fill in what is missing without touching what is there: python -m app.demo_seed")
+
+
+if __name__ == "__main__":
+    main()
