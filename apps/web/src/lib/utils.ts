@@ -15,6 +15,18 @@ export function formatMoney(value: number, currency = "USD"): string {
   }
 }
 
+/** Large amounts shortened for tight spaces, e.g. PKR 104.9M. Show the exact figure nearby. */
+export function formatMoneyCompact(value: number, currency = "USD"): string {
+  if (!value) return "—";
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency", currency, notation: "compact", maximumFractionDigits: 1,
+    }).format(value);
+  } catch {
+    return `${currency} ${new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(value)}`;
+  }
+}
+
 export function formatDate(s: string | null | undefined): string {
   if (!s) return "—";
   const d = new Date(s);

@@ -12,7 +12,7 @@ import { ErrorBoundary } from "@/components/error-boundary";
 import { AreaChart, type TrendPoint } from "@/components/charts";
 import { ActivityFeed, KpiCard, QuickCreateTiles, StatusDistribution } from "@/components/widgets";
 import { StatusPill, RiskBadge } from "@/components/lifecycle";
-import { cn, contractTypeLabel, daysUntil, formatDate, formatMoney } from "@/lib/utils";
+import { cn, contractTypeLabel, daysUntil, formatDate, formatMoney, formatMoneyCompact } from "@/lib/utils";
 import type { ContractListItem, Dashboard, InboxSummary } from "@/lib/types";
 
 type Kpis = Pick<Dashboard, "total_contracts" | "pending_approvals" | "awaiting_signature" | "expiring_30d" | "active_value" | "open_risks">;
@@ -175,7 +175,7 @@ function KpiRow({ refreshKey, currency }: { refreshKey: number; currency?: strin
       <KpiCard label="Awaiting signature" value={k.awaiting_signature} href="/contracts?status=out_for_signature" icon={PenLine} />
       <KpiCard label="Expiring ≤30d" value={k.expiring_30d} href="/contracts?status=expiring" icon={CalendarClock} tone={k.expiring_30d ? "warn" : "default"} />
       <KpiCard label="Open risks" value={k.open_risks} icon={ShieldAlert} tone={k.open_risks ? "danger" : "default"} />
-      <KpiCard label="Active value" value={formatMoney(k.active_value, currency)} icon={Wallet} hero sparkline={valueSpark} delta={valueDelta} />
+      <KpiCard label="Active value" value={formatMoneyCompact(k.active_value, currency)} sub={formatMoney(k.active_value, currency)} icon={Wallet} hero sparkline={valueSpark} delta={valueDelta} />
     </div>
   );
 }

@@ -47,7 +47,7 @@ export default function RegisterPage() {
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Jane Doe" required />
           </Field>
           <Field label="Work email">
-            <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="jane@acme.com" autoComplete="username" required />
+            <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@mobilinkbank.com" autoComplete="username" required />
           </Field>
           <Field label="Password" hint="At least 8 characters.">
             <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" required minLength={8} />

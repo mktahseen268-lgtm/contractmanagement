@@ -68,7 +68,9 @@ export function KpiCard({
           )}
           {delta != null && <DeltaChip delta={delta} onDark />}
         </div>
-        <div className="relative mt-3 font-display text-[26px] font-bold leading-none tnum">{display}</div>
+        {/* One line, sized to the card: the hero sits in a narrow grid column, and a fixed 26px
+            amount either clipped or wrapped mid-figure. */}
+        <div className="relative mt-3 whitespace-nowrap font-display text-[clamp(16px,1.45vw,26px)] font-bold leading-none tnum">{display}</div>
         <div className="relative mt-1.5 text-[13px] font-medium text-white/80">{label}</div>
         {sub && <div className="relative mt-0.5 text-xs text-white/70">{sub}</div>}
         {sparkline && sparkline.length > 1 && (

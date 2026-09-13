@@ -28,8 +28,14 @@ from sqlalchemy.orm import Session
 from . import models
 from .audit import record
 
-#: `[[clause:key]]`, tolerant of surrounding whitespace.
-CLAUSE_REF_RE = re.compile(r"\[\[\s*clause:\s*([a-z][a-z0-9_]{0,79})\s*\]\]")
+#: Anything that looks like a clause tag. Deliberately loose: `[[Clause: Agent Commission]]`,
+#: `[[ clause : agent-commission ]]` and the markdown-escaped `\[\[clause:agent\_commission\]\]`
+#: a rich-text editor or a Word paste produces are all the same intent. A strict pattern failed
+#: silently on every one of them: the tag was not recognised as a tag, so template approval
+#: passed, the contract was created, and the clause was quietly missing. Loose matching plus
+#: `_normalise_key` resolves a harmless variation and reports a real mistake by name.
+CLAUSE_REF_RE = re.compile(
+    r"\\?\[\\?\[\s*clause\s*\\?:\s*([^\]\n]{0,120}?)\s*\\?\]\\?\]", re.IGNORECASE)
 
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 
@@ -92,11 +98,18 @@ def approved_body(db: Session, clause: models.Clause) -> str:
 # ---------------------------------------------------------------------------------------
 
 
+def _normalise_key(raw: str) -> str:
+    """The key a tag meant: escapes dropped, lower-cased, spaces and punctuation as `_`."""
+    key = (raw or "").replace("\\", "").strip().lower()
+    return re.sub(r"[^a-z0-9_]+", "_", key).strip("_")
+
+
 def references_in(body: str) -> list[str]:
     """Every distinct clause key a body references, in first-appearance order."""
     seen: list[str] = []
-    for key in CLAUSE_REF_RE.findall(body or ""):
-        if key not in seen:
+    for raw in CLAUSE_REF_RE.findall(body or ""):
+        key = _normalise_key(raw)
+        if key and key not in seen:
             seen.append(key)
     return seen
 
@@ -109,10 +122,16 @@ def validate_references(db: Session, tenant_id: str, body: str) -> list[str]:
     whoever is raising an agreement to discover under deadline.
     """
     problems: list[str] = []
+    if any(not _normalise_key(raw) for raw in CLAUSE_REF_RE.findall(body or "")):
+        problems.append("The template has a clause tag with no key. It should read "
+                        "[[clause:your_clause_key]].")
     for key in references_in(body):
         clause = by_key(db, tenant_id, key)
         if clause is None:
-            problems.append(f"The template references clause [[clause:{key}]], which does not exist.")
+            problems.append(
+                f"The template references clause [[clause:{key}]], which does not exist. "
+                "Use Copy reference in the Clause Library to avoid a typo in the key."
+            )
         elif clause.status != "active":
             problems.append(
                 f"Clause [[clause:{key}]] is {clause.status.replace('_', ' ')}, "
@@ -180,14 +199,32 @@ def expand(db: Session, tenant_id: str, body: str, *,
         return text
 
     def replace(match: re.Match) -> str:
-        key = match.group(1)
+        key = _normalise_key(match.group(1))
+        if not key:
+            # A tag with nothing usable in it: reported, never quietly left as plain text.
+            if "" not in unresolved:
+                unresolved.append("")
+            return match.group(0)
         chosen_key = str(choices.get(key) or key)
         try:
             clause = resolve_choice(db, tenant_id, key, chosen_key)
         except ClauseError:
             clause = by_key(db, tenant_id, key)
         text = _use(clause, key)
-        return text or match.group(0)
+        if not text:
+            return match.group(0)
+        # A tag typed inside a line of text used to have the clause wording glued onto that
+        # sentence, so it read as part of the paragraph above and nobody could see it had been
+        # added. A tag on a line of its own is where the author placed it; anywhere else, the
+        # clause becomes its own section under its title.
+        src = match.string
+        line_start = src.rfind("\n", 0, match.start()) + 1
+        line_end = src.find("\n", match.end())
+        line_end = len(src) if line_end < 0 else line_end
+        inline = bool(src[line_start:match.start()].strip() or src[match.end():line_end].strip())
+        if inline and clause is not None:
+            return f"\n\n## {clause.title}\n\n{text}\n\n"
+        return text
 
     out = CLAUSE_REF_RE.sub(replace, body or "")
 

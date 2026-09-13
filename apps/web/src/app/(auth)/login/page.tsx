@@ -19,7 +19,7 @@ const SSO_ERRORS: Record<string, string> = {
 export default function LoginPage() {
   const { login } = useAuth();
   const router = useRouter();
-  const [email, setEmail] = useState("demo@acme.io");
+  const [email, setEmail] = useState("demo@mobilinkbank.com");
   const [password, setPassword] = useState("demo1234");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -102,7 +102,7 @@ export default function LoginPage() {
         )}
         {!singleTenant && (
           <div className="rounded-md bg-surface-2 px-3 py-2 text-xs text-ink-3">
-            Demo workspace seeded automatically — <span className="font-medium text-ink-2">demo@acme.io</span> / <span className="font-medium text-ink-2">demo1234</span>
+            Demo workspace seeded automatically — <span className="font-medium text-ink-2">demo@mobilinkbank.com</span> / <span className="font-medium text-ink-2">demo1234</span>
           </div>
         )}
         {registrationEnabled ? (

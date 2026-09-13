@@ -70,10 +70,14 @@ def submit_for_approval(db: Session, template: models.ContractTemplate, *,
     # a `{{fee}}` that lives inside a clause is supplied by the template's form, and checking
     # the unexpanded body would report it as an unfillable placeholder.
     assembled, _included, unresolved = clause_service.expand(db, template.tenant_id, body)
-    problems = [
-        f"The template references clause [[clause:{key}]], which has no approved wording."
-        for key in unresolved
-    ]
+    # Named failures, not a generic "no approved wording": a mistyped key and a clause still
+    # awaiting approval need different fixes, and the author should not have to guess which.
+    problems = clause_service.validate_references(db, template.tenant_id, body)
+    if not problems:
+        problems = [
+            f"The template references clause [[clause:{key}]], which has no approved wording."
+            for key in unresolved
+        ]
     problems += merge_engine.validate_definition(fields, assembled)
     if problems:
         raise MergeError("; ".join(problems))

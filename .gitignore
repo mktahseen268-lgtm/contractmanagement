@@ -85,3 +85,4 @@ apps/web/test-results/
 apps/web/playwright-report/
 # Local IDE state.
 .vscode/
+.gstack/

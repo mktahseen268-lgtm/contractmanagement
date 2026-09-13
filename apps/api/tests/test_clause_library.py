@@ -256,6 +256,62 @@ def test_validate_references_explains_both_failure_modes(db, workspace):
     assert any("draft" in p for p in problems)
 
 
+@pytest.mark.parametrize("tag", [
+    "[[Clause:Confidentiality]]",
+    "[[ clause : confidentiality ]]",
+    "[[CLAUSE:CONFIDENTIALITY]]",
+    "\\[\\[clause:confidentiality\\]\\]",
+])
+def test_a_harmless_variation_of_the_tag_still_resolves(db, workspace, tag):
+    """Case, spacing and the escaping a rich-text editor adds are the same intent. A strict
+    match ignored every one of them silently: approval passed and the clause was missing."""
+    _approved(db, workspace, "confidentiality", CONFIDENTIALITY)
+    text, included, unresolved = clause_service.expand(
+        db, workspace["tenant"].id, f"Before {tag} after")
+    assert CONFIDENTIALITY in text
+    assert unresolved == []
+    assert included[0]["key"] == "confidentiality"
+
+
+def test_spaces_hyphens_and_escapes_in_a_key_map_to_underscores():
+    body = "[[clause:Data-Protection]] [[clause:data protection]] \\[\\[clause:data\\_protection\\]\\]"
+    assert clause_service.references_in(body) == ["data_protection"]
+
+
+def test_a_mistyped_key_blocks_template_approval_by_name(db, workspace):
+    """The failure that used to be silent now stops approval and names the tag."""
+    _approved(db, workspace, "confidentiality", CONFIDENTIALITY)
+    template = models.ContractTemplate(
+        tenant_id=workspace["tenant"].id, name="Typo", contract_type="nda",
+        body="## Confidentiality\n\n[[clause:confidentialty]]", fields=[], status="draft",
+        is_active=False, created_by=workspace["author"].id,
+    )
+    db.add(template)
+    db.flush()
+    with pytest.raises(Exception, match="confidentialty.*does not exist"):
+        template_service.submit_for_approval(db, template, actor=workspace["author"])
+
+
+def test_a_tag_with_no_key_is_reported(db, workspace):
+    problems = clause_service.validate_references(db, workspace["tenant"].id, "[[clause: ]]")
+    assert any("no key" in p for p in problems)
+
+
+def test_a_tag_typed_inside_a_sentence_becomes_its_own_section(db, workspace):
+    """Glued onto the sentence before it, the clause read as part of that paragraph."""
+    clause = _approved(db, workspace, "confidentiality", CONFIDENTIALITY)
+    body = "## Terms\nYou agree to the terms.  [[clause:confidentiality]]"
+    text, _included, _unresolved = clause_service.expand(db, workspace["tenant"].id, body)
+    assert f"You agree to the terms.  \n\n## {clause.title}\n\n{CONFIDENTIALITY}" in text
+
+
+def test_a_tag_on_its_own_line_is_left_where_the_author_put_it(db, workspace):
+    _approved(db, workspace, "confidentiality", CONFIDENTIALITY)
+    body = "## 5. Confidentiality\n\n[[clause:confidentiality]]\n"
+    text, _included, _unresolved = clause_service.expand(db, workspace["tenant"].id, body)
+    assert text == f"## 5. Confidentiality\n\n{CONFIDENTIALITY}\n"
+
+
 def test_a_clause_may_itself_contain_merge_fields(db, workspace):
     """Clause expansion runs before field substitution, so this has to work end to end."""
     _approved(db, workspace, "fees",
