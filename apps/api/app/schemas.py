@@ -357,6 +357,8 @@ class UseTemplateIn(BaseModel):
     """Spawn a contract from a template — override anything the user wants."""
     title: str = Field(min_length=1, max_length=300)
     counterparty: str = ""
+    #: The registered client. When set, its name is what the contract carries.
+    party_id: str | None = None
     department: str = ""
     value: float = 0.0
     effective_date: dt.date | None = None

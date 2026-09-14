@@ -126,16 +126,23 @@ def _spawn(db: Session, user: models.User, t: models.ContractTemplate,
            included_clauses: list[dict] | None = None) -> models.Contract:
     """Unpack the request shape and hand off. The creation itself lives in `template_service`
     so bulk send — which has no `Request` to take an IP from — runs the identical path."""
+    from .contracts import _link_client
+
+    client = _link_client(db, user.tenant_id, data.party_id)
     try:
-        return template_service.spawn_from_template(
+        c = template_service.spawn_from_template(
             db, template=t, actor=user, title=data.title, body=body,
-            counterparty=data.counterparty or "", department=data.department or "",
+            counterparty=client.name if client else (data.counterparty or ""),
+            department=data.department or "",
             value=data.value, effective_date=data.effective_date, end_date=data.end_date,
             owner_id=data.owner_id, values=values, version_no=version_no,
             source_note=source_note, ip=client_ip(request), included_clauses=included_clauses,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    if client:
+        c.party_id = client.id
+    return c
 
 
 @router.post("/{tid}/use", response_model=schemas.ContractDetail, status_code=status.HTTP_201_CREATED)

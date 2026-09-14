@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import { ClientPicker } from "@/components/client-picker";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -97,6 +98,7 @@ export default function IntakeWizardPage() {
   const [extras, setExtras] = useState<string[]>([]);
   const [title, setTitle] = useState("");
   const [counterparty, setCounterparty] = useState("");
+  const [partyId, setPartyId] = useState<string | null>(null);
   const [value, setValue] = useState("");
   const [effectiveDate, setEffectiveDate] = useState("");
   const [preview, setPreview] = useState<TemplatePreview | null>(null);
@@ -177,6 +179,7 @@ export default function IntakeWizardPage() {
       const contract = await api.post<ContractDetail>(`/templates/${templateId}/generate`, {
         title: title.trim(),
         counterparty: counterparty.trim(),
+        party_id: partyId,
         value: Number(value) || 0,
         effective_date: effectiveDate || null,
         values,
@@ -303,10 +306,14 @@ export default function IntakeWizardPage() {
                   </Field>
                 </div>
                 <Field label="Counterparty">
-                  <Input
+                  <ClientPicker
                     value={counterparty}
-                    onChange={(e) => setCounterparty(e.target.value)}
-                    disabled={!form.usable}
+                    partyId={partyId}
+                    onPick={(name, id) => {
+                      setCounterparty(name);
+                      setPartyId(id);
+                      setPreview(null);
+                    }}
                   />
                 </Field>
                 <Field label={`Value (${form.defaults.currency ?? ""})`}>

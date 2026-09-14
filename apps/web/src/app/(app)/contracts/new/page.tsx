@@ -6,6 +6,7 @@ import { ChevronRight, Sparkles } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { PageHeader } from "@/components/shell";
 import { ContractForm } from "@/components/contract-form";
+import { ClientPicker } from "@/components/client-picker";
 import { Button, Card, CardBody, CardHeader, CardTitle, ErrorBanner, Field, Input, Skeleton } from "@/components/ui";
 import { contractTypeLabel, titleCase } from "@/lib/utils";
 import { api, ApiError } from "@/lib/api";
@@ -20,6 +21,7 @@ export default function NewContractPage() {
   const [loadingTemplate, setLoadingTemplate] = useState(!!templateId);
   const [title, setTitle] = useState("");
   const [counterparty, setCounterparty] = useState("");
+  const [partyId, setPartyId] = useState<string | null>(null);
   const [effective, setEffective] = useState("");
   const [end, setEnd] = useState("");
   const [value, setValue] = useState(0);
@@ -45,7 +47,7 @@ export default function NewContractPage() {
     setBusy(true); setError("");
     try {
       const c = await api.post<ContractDetail>(`/templates/${template.id}/use`, {
-        title: title.trim(), counterparty: counterparty.trim(),
+        title: title.trim(), counterparty: counterparty.trim(), party_id: partyId,
         value: Number(value) || 0,
         effective_date: effective || null, end_date: end || null,
       });
@@ -75,7 +77,7 @@ export default function NewContractPage() {
               <CardBody>
                 <form onSubmit={spawn} className="grid gap-3 sm:grid-cols-12">
                   <div className="sm:col-span-6"><Field label="Title"><Input value={title} onChange={(e) => setTitle(e.target.value)} required /></Field></div>
-                  <div className="sm:col-span-6"><Field label="Counterparty"><Input value={counterparty} onChange={(e) => setCounterparty(e.target.value)} placeholder="e.g. Globex LLC" /></Field></div>
+                  <div className="sm:col-span-6"><Field label="Counterparty"><ClientPicker value={counterparty} partyId={partyId} onPick={(name, id) => { setCounterparty(name); setPartyId(id); }} /></Field></div>
                   <div className="sm:col-span-4"><Field label="Value"><Input type="number" min={0} step={0.01} value={value} onChange={(e) => setValue(Number(e.target.value))} /></Field></div>
                   <div className="sm:col-span-4"><Field label="Effective" hint="Defaults to today"><Input type="date" value={effective} onChange={(e) => setEffective(e.target.value)} /></Field></div>
                   <div className="sm:col-span-4"><Field label="End" hint="Defaults to effective + template term"><Input type="date" value={end} onChange={(e) => setEnd(e.target.value)} /></Field></div>
